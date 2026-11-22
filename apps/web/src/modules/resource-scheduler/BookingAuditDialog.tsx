@@ -4,7 +4,7 @@ import { X } from "lucide-react";
 export type BookingAuditEntry = { id: string; action: string; details: Record<string, unknown>; createdAt: string; actorName: string | null };
 
 const actionLabels: Record<string, string> = {
-  booking_approved: "Booking approved", booking_declined: "Booking rejected", booking_cancelled: "Booking cancelled",
+  booking_resource_reassigned: "Resource reassigned", booking_approved: "Booking approved", booking_declined: "Booking rejected", booking_cancelled: "Booking cancelled",
   series_created: "Series created", series_archived: "Series cancelled", series_future_edited: "Future bookings changed",
   occurrence_overridden: "Occurrence changed", occurrence_override_reset: "Occurrence reset",
   extra_date_added: "Extra date added", extra_date_removed: "Extra date removed", date_excluded: "Date skipped",
@@ -19,6 +19,7 @@ function detailFields(details: Record<string, unknown>) {
     const value = details[key];
     if (typeof value === "number") fields.push([label, key.endsWith("Minutes") ? `${value} min` : String(value)]);
   }
+  if (typeof details.resourceName === "string") fields.push(["Resource", details.resourceName]);
   if (typeof details.status === "string" && statusLabels[details.status]) fields.push(["Status", statusLabels[details.status]]);
   if (typeof details.date === "string") fields.push(["Date", details.date]);
   if (typeof details.fromDate === "string") fields.push(["From", details.fromDate]);

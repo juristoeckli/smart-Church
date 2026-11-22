@@ -1,4 +1,4 @@
-import { recordPendingResourceBookingRequest, recordResourceBookingDecision, resourceBookingReviewers } from "../../resource-booking-notices.js";
+import { recordPendingResourceBookingRequest, recordResourceBookingDecision, recordResourceBookingReassignment, resourceBookingReviewers } from "../../resource-booking-notices.js";
 import { registerResourceCalendarSubscriptions } from "./booking-calendar-subscriptions.js";
 import { registerMyResourceBookings } from "./my-resource-bookings.js";
 import { resourceBookedDayReport } from "./booked-day-report.js";
@@ -385,6 +385,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ${schema?.usable ? "AND NOT EXISTS (SELECT 1 FROM church_calendar_resource_links link WHERE link.resource_booking_id=booking.id)" : schema?.installed ? "AND FALSE" : ""})`;
   }
 
+  const assignableSingleBooking = `booking.status='requested' AND booking.ends_at>now()
+    AND (series.id IS NULL OR (series.recurrence->>'frequency'='once' AND NOT EXISTS (
+      SELECT 1 FROM resource_booking_series_occurrences other WHERE other.series_id=series.id AND other.resource_booking_id<>booking.id
+    ) AND NOT EXISTS (SELECT 1 FROM resource_booking_series_dates dates WHERE dates.series_id=series.id)))`;
+
   app.get<{ Params: { id: string } }>("/api/modules/resource-scheduler/bookings/:id/copy-draft", { schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
   } }, async (request, reply) => {
@@ -501,7 +506,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",
-          ${calendarLinkFlag} AS "canOpenCalendar", ${copyable} AS "canCopy",occurrence.is_extra_date AS "isExtraDate",
+          ${calendarLinkFlag} AS "canOpenCalendar", ${copyable} AS "canCopy",
+          ($7 AND ${copyable} AND ${assignableSingleBooking}) AS "canReassign",occurrence.is_extra_date AS "isExtraDate",
           CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate", (series.all_day_date IS NOT NULL) AS "seriesAllDay",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
           EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
           (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (series.all_day_date IS NULL OR series.recurrence->>'frequency' <> 'once') AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
@@ -1373,6 +1379,99 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return { excluded: true, cancelledBookings: cancelled.rowCount };
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
+  });
+
+  app.put<{ Params: { bookingId: string }; Body: { resourceId: string; expectedResourceId: string } }>("/api/modules/resource-scheduler/bookings/:bookingId/resource", {
+    schema: {
+      params: { type: "object", required: ["bookingId"], properties: { bookingId: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["resourceId", "expectedResourceId"], properties: { resourceId: { type: "string", format: "uuid" }, expectedResourceId: { type: "string", format: "uuid" } } },
+    },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply, true);
+    if (!departmentId || !context.validateMutation(request, reply)) return reply;
+    const bookingId = request.params.bookingId;
+    const targetId = request.body.resourceId.toLowerCase();
+    const actor = request.authenticatedUser!.id;
+    const copyable = await copyableResourceBooking("$3", "TRUE");
+    const client = await context.pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only on this installation." });
+      }
+      const seriesLink = await client.query<{ series_id: string }>(
+        "SELECT series_id FROM resource_booking_series_occurrences WHERE resource_booking_id=$1 AND department_id=$2", [bookingId, departmentId],
+      );
+      const seriesId = seriesLink.rows[0]?.series_id;
+      if (seriesId) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, seriesId]);
+        await client.query("SELECT id FROM resource_booking_series WHERE id=$1 AND department_id=$2 FOR UPDATE", [seriesId, departmentId]);
+      }
+      const found = await client.query<{ resource_id: string; requested_by: string }>(
+        `SELECT resource_id,requested_by FROM resource_bookings WHERE id=$1 AND department_id=$2 FOR UPDATE`, [bookingId, departmentId],
+      );
+      const booking = found.rows[0];
+      if (!booking) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Booking not found." });
+      }
+      const sourceId = booking.resource_id;
+      if (sourceId !== request.body.expectedResourceId.toLowerCase()) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The assigned resource has changed. Reload the booking before assigning it again." });
+      }
+      if (sourceId === targetId) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose a different resource." });
+      }
+      const [firstId, secondId] = [sourceId, targetId].sort();
+      const first = await lockResourceBookingPolicy(client, departmentId, firstId);
+      const second = await lockResourceBookingPolicy(client, departmentId, secondId);
+      const [source, target] = firstId === sourceId ? [first, second] : [second, first];
+      if (!target?.active || target.calendar_required || !source?.active) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose an active resource that accepts direct bookings in this location." });
+      }
+      if (!await canViewResource(client, departmentId, target.visibility_group_id, booking.requested_by, false)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The requester does not have access to the selected resource." });
+      }
+      const allowed = await client.query(
+        `SELECT booking.id FROM resource_bookings booking
+          JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
+          LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
+          LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
+         WHERE booking.id=$1 AND booking.department_id=$2 AND ${copyable} AND ${assignableSingleBooking}`,
+        [bookingId, departmentId, actor],
+      );
+      if (!allowed.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Only current pending one-off resource requests can be reassigned." });
+      }
+      await client.query("UPDATE resource_bookings SET resource_id=$3,updated_at=now() WHERE id=$1 AND department_id=$2", [bookingId, departmentId, target.id]);
+      if (seriesId) await client.query("UPDATE resource_booking_series SET resource_id=$3,updated_at=now() WHERE id=$1 AND department_id=$2", [seriesId, departmentId, target.id]);
+      await client.query(
+        `INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details)
+         VALUES($1,$2,$3,'booking_resource_reassigned',$4,$5,$6::jsonb)`,
+        [randomUUID(), departmentId, actor, seriesId ?? null, bookingId, JSON.stringify({
+          previous: { resourceId: source.id, resourceName: source.name },
+          next: { resourceId: target.id, resourceName: target.name },
+        })],
+      );
+      await recordResourceBookingReassignment(client, departmentId, bookingId, actor, booking.requested_by, source.name, target.name);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error && typeof error === "object" && "code" in error && error.code === "23P01") {
+        return reply.code(409).send({ error: "The new resource has a booking conflict or insufficient capacity." });
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
+    return { resourceId: targetId, status: "requested" };
   });
 
   app.put<{ Params: { bookingId: string }; Body: { status: "approved" | "declined" | "cancelled"; expectedStatus?: "requested" } }>("/api/modules/resource-scheduler/bookings/:bookingId/status", {

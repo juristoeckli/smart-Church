@@ -21,6 +21,34 @@ export async function recordResourceBookingDecision(client: PoolClient, departme
   );
 }
 
+export async function recordResourceBookingReassignment(client: PoolClient, departmentId: string, bookingId: string, actorId: string, requesterId: string, previousName: string, nextName: string) {
+  const storage = await client.query<{ ready: boolean }>(
+    "SELECT to_regclass('public.module_notifications') IS NOT NULL AS ready",
+  );
+  if (!storage.rows[0]?.ready) return;
+  await client.query(
+    `INSERT INTO module_notifications(id,department_id,recipient_user_id,sender_user_id,kind,title,body,in_app_enabled,email_enabled)
+     SELECT $5,booking.department_id,booking.requested_by,$3,'resource_booking','Resource booking reassigned',
+            $4,true,true FROM resource_bookings booking
+       JOIN department_memberships member ON member.user_id=booking.requested_by AND member.department_id=booking.department_id
+       JOIN app_users account ON account.id=member.user_id AND account.is_enabled AND NOT account.is_service_user
+      WHERE booking.department_id=$1 AND booking.id=$2 AND booking.requested_by<>$3 AND booking.status='requested'`,
+    [departmentId, bookingId, actorId, `Your request for “${previousName}” was moved to “${nextName}” and is awaiting a decision.`, randomUUID()],
+  );
+  const queue = await client.query<{ ready: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.module_notifications')
+      AND attname='resource_request_booking_ids' AND NOT attisdropped) AS ready`,
+  );
+  if (queue.rows[0]?.ready) {
+    await client.query(
+      `UPDATE module_notifications SET resource_request_booking_ids=array_remove(resource_request_booking_ids,$2::uuid)
+        WHERE department_id=$1 AND kind='resource_booking_request' AND $2::uuid=ANY(resource_request_booking_ids)`,
+      [departmentId, bookingId],
+    );
+    await recordPendingResourceBookingRequest(client, departmentId, requesterId, [bookingId]);
+  }
+}
+
 const resourceReviewer = `
   account.is_enabled AND NOT account.is_service_user AND NOT (account.must_change_password AND account.can_change_password)
   AND (member.role='site_admin' OR 'resources_manage'=ANY(member.permissions)
