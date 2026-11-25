@@ -1,3 +1,4 @@
+import { registerFinanceReplication } from "./replication.js";
 import { parseCamt053 } from "./camt053.js";
 import { parseMt940, statementPreviewAmount, type ImportedBankStatementEntry } from "./mt940.js";
 import { allocateJournalNumber, isJournalReceiptConflict, journalReceiptConflictMessage, registerJournalNumbering } from "./journal-numbering.js";
@@ -199,6 +200,7 @@ function transactionOrder(query: TransactionOrderQuery, forExport: boolean) {
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  registerFinanceReplication(context);
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
 
   async function department(request: FastifyRequest, reply: FastifyReply, write = false) {
@@ -1317,7 +1319,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const content = body[format]!;
     return { format, content: format === "csv" ? content : content.replace(/^\uFEFF/, "").replace(/\r\n|\r/g, "\n") };
   }
-  function readNativeStatement(departmentId: string, format: "mt940" | "camt053", content: string) {
+  async function readNativeStatement(departmentId: string, format: "mt940" | "camt053", content: string) {
     const parsed = format === "mt940" ? parseMt940(content) : parseCamt053(content);
     if (typeof parsed === "string") return parsed;
     // Parsers already trim identifiers. Identical, syntactically IBAN-shaped identifiers can
@@ -1325,11 +1327,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const normalized = parsed.sourceAccount.toUpperCase();
     const isIban = /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(normalized)
       && (!("sourceAccountIsIban" in parsed) || parsed.sourceAccountIsIban);
+    const scope = await statementMappingScope(departmentId);
     const digest = createHash("sha256")
-      .update(JSON.stringify(["smart-church.bank-statement-source.v1", departmentId, parsed.currency,
+      .update(JSON.stringify(["smart-church.bank-statement-source.v1", scope, parsed.currency,
         isIban ? "iban" : format, isIban ? normalized : parsed.sourceAccount]))
       .digest("hex");
-    return { entries: parsed.entries, currency: parsed.currency, accountEnding: parsed.accountEnding, digest };
+    return { entries: parsed.entries, currency: parsed.currency, accountEnding: parsed.accountEnding, digest, scope };
   }
   async function recognizedStatementAccount(departmentId: string, digest: string) {
     const { rows: [mapping] } = await pool!.query<{ accountId: string; available: boolean }>(
@@ -1339,9 +1342,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE mapping.department_id=$1 AND mapping.source_digest=$2`, [departmentId, digest]);
     return mapping ?? null;
   }
-  async function statementCurrency(departmentId: string, db: Pool | PoolClient = pool!, lock = false) {
+  async function statementMappingScope(departmentId: string, db: Pool | PoolClient = pool!) {
+    const { rows: [settings] } = await db.query<{ statement_mapping_scope: string | null }>(
+      "SELECT statement_mapping_scope FROM finance_settings WHERE department_id=$1", [departmentId]);
+    return settings?.statement_mapping_scope ?? departmentId;
+  }
+  async function statementCurrency(departmentId: string, db: Pool | PoolClient = pool!, lock: false | "share" | "update" = false) {
     const { rows: [settings] } = await db.query<{ currency_code: string }>(
-      `SELECT currency_code FROM finance_settings WHERE department_id=$1 ${lock ? "FOR SHARE" : ""}`, [departmentId]);
+      `SELECT currency_code FROM finance_settings WHERE department_id=$1 ${lock === "update" ? "FOR UPDATE" : lock === "share" ? "FOR SHARE" : ""}`, [departmentId]);
     return settings?.currency_code ?? "CHF";
   }
   async function findStatementImport(departmentId: string, accountId: string, contentHash: string) {
@@ -1364,7 +1372,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const upload = statementUpload(request.body);
     if (!upload || upload.format === "csv") return reply.code(400).send({ error: "Choose one MT940 or CAMT.053 statement." });
-    const parsed = readNativeStatement(departmentId, upload.format, upload.content);
+    const parsed = await readNativeStatement(departmentId, upload.format, upload.content);
     if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
     if (parsed.currency !== await statementCurrency(departmentId)) {
       return reply.code(400).send({ error: "The statement currency does not match this ledger." });
@@ -1453,7 +1461,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const contentHash = createHash("sha256").update(upload.content, "utf8").digest("hex");
     const duplicate = Boolean((await findStatementImport(departmentId, request.body.accountId, contentHash)).rowCount);
     if (upload.format !== "csv") {
-      const parsed = readNativeStatement(departmentId, upload.format, upload.content);
+      const parsed = await readNativeStatement(departmentId, upload.format, upload.content);
       if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
       if (parsed.currency !== await statementCurrency(departmentId)) {
         return reply.code(400).send({ error: "The statement currency does not match this ledger." });
@@ -1493,6 +1501,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!upload) return reply.code(400).send({ error: "Choose one CSV, MT940, or CAMT.053 statement." });
     let nativeStatementCurrency: string | undefined;
     let nativeSourceDigest: string | undefined;
+    let nativeSourceScope: string | undefined;
     const rememberSource = request.body.rememberSource;
     if (rememberSource && upload.format === "csv") {
       return reply.code(400).send({ error: "Only MT940 and CAMT.053 source accounts can be remembered." });
@@ -1502,10 +1511,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (request.body.confirmSourceAccount !== true) {
         return reply.code(400).send({ error: "Confirm the source account matches the chosen ledger account." });
       }
-      const parsed = readNativeStatement(departmentId, upload.format, upload.content);
+      const parsed = await readNativeStatement(departmentId, upload.format, upload.content);
       if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
       nativeStatementCurrency = parsed.currency;
       nativeSourceDigest = parsed.digest;
+      nativeSourceScope = parsed.scope;
       if (nativeStatementCurrency !== await statementCurrency(departmentId)) {
         return reply.code(400).send({ error: "The statement currency does not match this ledger." });
       }
@@ -1574,12 +1584,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(423).send({ error: "This location is read-only." });
         }
         if (!await validateStatementAccount(departmentId, request.body.accountId, client, true)
-          || nativeStatementCurrency !== await statementCurrency(departmentId, client, true)) {
+          || nativeStatementCurrency !== await statementCurrency(departmentId, client, rememberSource ? "update" : "share")) {
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "The ledger account or currency has changed. Review this statement again." });
         }
       }
-      if (rememberSource && nativeSourceDigest) {
+      if (rememberSource && nativeSourceDigest && nativeSourceScope) {
+        await client.query(`INSERT INTO finance_settings(department_id,statement_mapping_scope)
+          VALUES($1,$2) ON CONFLICT(department_id) DO UPDATE SET statement_mapping_scope=EXCLUDED.statement_mapping_scope
+          WHERE finance_settings.statement_mapping_scope IS NULL`, [departmentId, nativeSourceScope]);
+        if (await statementMappingScope(departmentId, client) !== nativeSourceScope) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The statement mapping scope changed. Preview the file again." });
+        }
         const expected = rememberSource.expectedAccountId;
         const saved = expected === null
           ? await client.query(`INSERT INTO finance_bank_statement_account_mappings(department_id,source_digest,account_id)
