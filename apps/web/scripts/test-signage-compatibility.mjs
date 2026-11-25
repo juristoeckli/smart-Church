@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
-import {webcrypto} from 'node:crypto';
+import {createHash, webcrypto} from 'node:crypto';
 
 const source = await readFile(new URL('../public/signage-player.js', import.meta.url), 'utf8');
 assert.ok(!source.includes('?.'), 'TV engine cannot parse optional chaining');
@@ -36,7 +36,12 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
   if(blank){plan.shows=[];plan.media=[];plan.defaultShowId=null;}
   if(webpage){plan.media=[];plan.shows[0].slides=[{kind:'webpage',url:'https://example.com/noticeboard',duration:12}];}
   const context = {screen:{width:1920,height:1080},innerWidth:1920,innerHeight:1080,devicePixelRatio:1,performance, Map, Set, Blob: LegacyBlob, FileReader: LegacyFileReader,
-    crypto: webcrypto, AbortController, Response, URL: class extends URL {static createObjectURL(){return 'blob:test';} static revokeObjectURL(){}},
+    // Keep the digest promise but avoid depending on a libuv worker finishing in a fixed number of event turns.
+    crypto: {subtle: {async digest(algorithm, data) {
+      assert.equal(algorithm, 'SHA-256');
+      const digest = createHash('sha256').update(new Uint8Array(data)).digest();
+      return digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength);
+    }}}, AbortController, Response, URL: class extends URL {static createObjectURL(){return 'blob:test';} static revokeObjectURL(){}},
     document: {body:{classList:{toggle(){}}},documentElement:element(),getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element, addEventListener(name,handler) {listeners.set(name,handler);}},
     localStorage: {getItem: key => saved.get(key) || (paired && key.endsWith('connection') ? JSON.stringify(connection) : null),
       setItem(key,value) { if (blockedStorage) throw Error('storage blocked'); saved.set(key,value); }, removeItem(key) {saved.delete(key);}},
