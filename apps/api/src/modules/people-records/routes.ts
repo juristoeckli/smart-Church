@@ -248,15 +248,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         profileConflicts, customFieldConflicts, dateConflicts, blockers,
       };
     }
+    function validFieldCategory(category: unknown) {
+      return category === undefined || category === null ||
+        typeof category === "string" && category.trim().length <= 60 && !/[\x00-\x1f\x7f]/u.test(category);
+    }
+
     routes.get("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply); if (!d) return reply;
-      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility,tag_color AS \"tagColor\" FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label", [d,canManagePeopleFields(request)]); return result.rows;
+      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility,category,tag_color AS \"tagColor\" FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label", [d,canManagePeopleFields(request)]); return result.rows;
     });
-    routes.post<{ Body: { label: string; fieldKey: string; type: "text"|"date"|"boolean"|"select"; options?: string[]; required?: boolean; visibility?: CustomFieldVisibility } }>("/api/people-records/fields", async (request, reply) => {
+    routes.post<{ Body: { label: string; fieldKey: string; type: "text"|"date"|"boolean"|"select"; options?: string[]; required?: boolean; visibility?: CustomFieldVisibility; category?: string | null } }>("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply, true); if (!d) return reply; if (!validateMutation(request, reply)) return reply;
       const b = request.body; if (!b.label?.trim() || !/^[a-z][a-z0-9_]{0,39}$/.test(b.fieldKey) || !["text","date","boolean","select"].includes(b.type) || (b.type === "select" && (!Array.isArray(b.options) || b.options.length > 100))) return reply.code(400).send({ error: "Provide a valid field label, key, type, and options." });
       if (b.visibility !== undefined && !customFieldVisibilities.includes(b.visibility)) return reply.code(400).send({ error: "Choose a supported field visibility." });
-      const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position,visibility) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0),$8)", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false,b.visibility ?? "private_people"]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
+      if (!validFieldCategory(b.category)) return reply.code(400).send({ error: "Enter a field category of up to 60 characters." });
+      const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position,visibility,category) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0),$8,$9)", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false,b.visibility ?? "private_people",b.category?.trim() || null]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
       changed(d); return reply.code(201).send({ id });
     });
     const tagColorSchema = { anyOf: [{ type: "string", pattern: "^#[0-9a-f]{6}$" }, { type: "null" }] } as const;
@@ -354,10 +360,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         client.release();
       }
     });
-    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean; visibility?: CustomFieldVisibility } }>("/api/people-records/fields/:id", { schema: { params: { type:"object", required:["id"], properties:{id:uuid} } } }, async (request, reply) => {
+    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean; visibility?: CustomFieldVisibility; category?: string | null } }>("/api/people-records/fields/:id", { schema: { params: { type:"object", required:["id"], properties:{id:uuid} } } }, async (request, reply) => {
       const d=await department(request,reply,true); if(!d)return reply; if(!validateMutation(request,reply))return reply;
       if (request.body.visibility !== undefined && !customFieldVisibilities.includes(request.body.visibility)) return reply.code(400).send({ error: "Choose a supported field visibility." });
-      const r=await pool!.query("UPDATE people_record_fields SET label=COALESCE($3,label),options=COALESCE($4::jsonb,options),required=COALESCE($5,required),active=COALESCE($6,active),visibility=COALESCE($7,visibility),updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id",[d,request.params.id,request.body.label?.trim()||null,request.body.options===undefined?null:JSON.stringify(request.body.options),request.body.required??null,request.body.active??null,request.body.visibility??null]); if(!r.rowCount)return reply.code(404).send({error:"Custom field not found."}); changed(d); return {ok:true};
+      if (!validFieldCategory(request.body.category)) return reply.code(400).send({ error: "Enter a field category of up to 60 characters." });
+      const r=await pool!.query("UPDATE people_record_fields SET label=COALESCE($3,label),options=COALESCE($4::jsonb,options),required=COALESCE($5,required),active=COALESCE($6,active),visibility=COALESCE($7,visibility),category=CASE WHEN $8::boolean THEN $9::text ELSE category END,updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id",[d,request.params.id,request.body.label?.trim()||null,request.body.options===undefined?null:JSON.stringify(request.body.options),request.body.required??null,request.body.active??null,request.body.visibility??null,request.body.category!==undefined,request.body.category?.trim()||null]); if(!r.rowCount)return reply.code(404).send({error:"Custom field not found."}); changed(d); return {ok:true};
     });
     // Group lifecycle is supplied by the optional Community module. Older groups are active by default.
     const activeDirectoryGroup = "COALESCE(to_jsonb(g)->>'status','active')='active'";

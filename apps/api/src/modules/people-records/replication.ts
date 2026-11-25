@@ -4,7 +4,7 @@ import type { ModuleServerContext, ReplicationRestoreContext } from "../module-s
 import { isPortraitPng } from "./portrait-png.js";
 
 const tables = {
-  fields: { name: "people_record_fields", key: "id", columns: "id label field_key field_type options required active position created_at updated_at visibility tag_color" },
+  fields: { name: "people_record_fields", key: "id", columns: "id label field_key field_type options required active position created_at updated_at visibility tag_color category" },
   relationshipTypes: { name: "people_record_relationship_types", key: "id", columns: "id label reverse_label active created_by updated_at visibility historical_actor_id historical_actor_name" },
   households: { name: "people_record_households", key: "id", columns: "id label salutation postal_address created_at updated_at" },
   values: { name: "people_record_values", key: "contact_id,field_id", columns: "contact_id field_id value updated_by updated_at historical_actor_id historical_actor_name" },
@@ -154,7 +154,7 @@ function canonical(value: unknown): unknown {
 export function registerPeopleRecordsReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "2",
+    schemaVersion: "3",
     async requiresSnapshot(departmentId) {
       if (!pool || !isDatabaseReady()) return false;
       return Boolean((await readiness(pool, departmentId)).recordCount);
