@@ -260,9 +260,53 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         typeof category === "string" && category.trim().length <= 60 && !/[\x00-\x1f\x7f]/u.test(category);
     }
 
+    routes.post<{ Body: { fieldId: string; neighborId: string; direction: "up" | "down" } }>("/api/people-records/fields/reorder", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["fieldId", "neighborId", "direction"],
+        properties: { fieldId: uuid, neighborId: uuid, direction: { type: "string", enum: ["up", "down"] } } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const { fieldId, neighborId, direction } = request.body;
+      const client = await pool!.connect();
+      let committed = false;
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          return reply.code(409).send({ error: "This location is currently read-only." });
+        }
+        // Lock definitions by immutable ID, then read their latest ordering after any wait.
+        await client.query("SELECT id FROM people_record_fields WHERE department_id=$1 ORDER BY id FOR UPDATE", [departmentId]);
+        const { rows } = await client.query<{ id: string; category: string | null }>(
+          "SELECT id,category,position FROM people_record_fields WHERE department_id=$1 ORDER BY position,label,id",
+          [departmentId],
+        );
+        const fieldIndex = rows.findIndex((row) => row.id === fieldId);
+        const neighborIndex = rows.findIndex((row) => row.id === neighborId);
+        if (fieldIndex < 0 || neighborIndex < 0) return reply.code(404).send({ error: "Custom field not found." });
+        const category = rows[fieldIndex].category;
+        const categoryRows = rows.filter((row) => row.category === category);
+        const categoryIndex = categoryRows.findIndex((row) => row.id === fieldId);
+        if (categoryRows[categoryIndex + (direction === "up" ? -1 : 1)]?.id !== neighborId) {
+          return reply.code(409).send({ error: "The field order changed. Refresh the fields and try again." });
+        }
+        [rows[fieldIndex], rows[neighborIndex]] = [rows[neighborIndex], rows[fieldIndex]];
+        await client.query(
+          "UPDATE people_record_fields field SET position=ordered.position-1,updated_at=now() FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id,position) WHERE field.department_id=$1 AND field.id=ordered.id AND field.position<>ordered.position-1",
+          [departmentId, rows.map((row) => row.id)],
+        );
+        await client.query("COMMIT");
+        committed = true;
+      } finally {
+        try { if (!committed) await client.query("ROLLBACK"); }
+        finally { client.release(); }
+      }
+      changed(departmentId);
+      return { ok: true };
+    });
     routes.get("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply); if (!d) return reply;
-      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility,category,text_max_length AS \"textMaxLength\",tag_color AS \"tagColor\" FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label", [d,canManagePeopleFields(request)]); return result.rows;
+      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility,category,text_max_length AS \"textMaxLength\",tag_color AS \"tagColor\" FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label,id", [d,canManagePeopleFields(request)]); return result.rows;
     });
     routes.post<{ Body: { label: string; fieldKey: string; type: "text"|"date"|"boolean"|"select"; options?: string[]; required?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply, true); if (!d) return reply; if (!validateMutation(request, reply)) return reply;
@@ -847,7 +891,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       try{const filters=parseFieldFilters(request.query.filters,field,value);if(filters.length)fieldJson=JSON.stringify(await validateFieldFilters(d,filters,canManagePeopleFields(request)))}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid custom field filters."})} let relationshipJson:string|null=null;try{const filters=await validateRelationshipFilters(d,parseRelationshipFilters(request.query.relationshipFilters),canManagePeopleFields(request));if(filters.length)relationshipJson=JSON.stringify(filters)}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid relationship filters."})}
       let columns:string[];
       try{
-        if(request.query.columns===undefined){const active=await pool!.query<{field_key:string}>("SELECT field_key FROM people_record_fields WHERE department_id=$1 AND active=true AND ($2::boolean OR visibility='private_people') ORDER BY position,label",[d,canManagePeopleFields(request)]);columns=[...coreDirectoryColumns,...active.rows.map(row=>`custom:${row.field_key}`)]}
+        if(request.query.columns===undefined){const active=await pool!.query<{field_key:string}>("SELECT field_key FROM people_record_fields WHERE department_id=$1 AND active=true AND ($2::boolean OR visibility='private_people') ORDER BY position,label,id",[d,canManagePeopleFields(request)]);columns=[...coreDirectoryColumns,...active.rows.map(row=>`custom:${row.field_key}`)]}
         else{const parsed=JSON.parse(request.query.columns) as unknown;if(!Array.isArray(parsed)||parsed.some(column=>typeof column!=="string"))throw new Error("Choose a valid list of export columns.");columns=await validateDirectoryColumns(d,parsed,canManagePeopleFields(request))}
       }catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid export columns."})}
       const r=await pool!.query(`SELECT c.id,c.first_name,c.last_name,c.email,c.phone,c.status,c.postal_address,COALESCE((SELECT jsonb_object_agg(f.field_key,v.value) FROM people_record_values v JOIN people_record_fields f ON f.id=v.field_id AND f.department_id=v.department_id WHERE v.department_id=c.department_id AND v.contact_id=c.id AND f.active AND ($10::boolean OR f.visibility='private_people')),'{}'::jsonb) fields FROM contacts c WHERE c.department_id=$1 AND (c.archived_at IS NOT NULL)=$9::boolean AND ${directoryTextMatch} AND ($3::text IS NULL OR c.status=$3) AND ($4::jsonb IS NULL OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements($4::jsonb) requested WHERE NOT EXISTS(SELECT 1 FROM people_record_values v JOIN people_record_fields f ON f.id=v.field_id AND f.department_id=v.department_id WHERE v.department_id=c.department_id AND v.contact_id=c.id AND f.field_key=requested->>'field' AND f.active=true AND ($10::boolean OR f.visibility='private_people') AND CASE WHEN f.field_type='text' AND requested->>'operator'='contains' THEN (v.value #>> '{}') ILIKE '%'||(requested->>'value')||'%' WHEN f.field_type='date' AND requested->>'operator'='before' THEN (v.value #>> '{}') < (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='after' THEN (v.value #>> '{}') > (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='on' THEN (v.value #>> '{}') = (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='last_7_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-6,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='last_30_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-29,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='last_90_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-89,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_7_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+7,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_30_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+30,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_90_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+90,'YYYY-MM-DD') ELSE v.value=requested->'value' END))) AND ($5::jsonb IS NULL OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements($5::jsonb) requested WHERE (requested->>'exclude')::boolean=EXISTS(SELECT 1 FROM people_record_relationships relation WHERE relation.department_id=c.department_id AND (relation.person_id=c.id OR relation.related_person_id=c.id) AND ((requested ? 'relationshipTypeId' AND relation.relationship_type_id=(requested->>'relationshipTypeId')::uuid
