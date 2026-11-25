@@ -6,6 +6,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 export type MemberStatus = "active" | "paused" | "waitlist";
 export type RoutineStep =
   | { kind: "wait"; minutes: number }
+  | { kind: "wait"; duration: number; unit: "months" | "years" }
   | { kind: "followup"; subject: string; assigneeId: string; dueDays: number }
   | { kind: "membership"; role?: string; status?: MemberStatus }
   | { kind: "addToGroup"; targetGroupId: string; role: string; status: MemberStatus }
@@ -81,8 +82,21 @@ async function processCandidate(client: PoolClient, context: ModuleServerContext
   for (let next = job.next_step; next < job.steps.length; next += 1) {
     const step = job.steps[next];
     if (step.kind === "wait") {
-      await client.query("UPDATE group_automatic_routine_runs SET phase='waiting',next_step=$2,due_at=$3,updated_at=now() WHERE id=$1",
-        [job.id, next + 1, new Date(now.getTime() + step.minutes * 60_000)]);
+      let dueAt: Date;
+      if ("minutes" in step) {
+        dueAt = new Date(now.getTime() + step.minutes * 60_000);
+      } else {
+        const months = step.duration * (step.unit === "years" ? 12 : 1);
+        const { rows: [deadline] } = await client.query<{ due_at: Date }>(
+          `SELECT (($1::timestamptz AT TIME ZONE COALESCE(zone.name,'UTC')) + make_interval(months => $2::integer))
+                    AT TIME ZONE COALESCE(zone.name,'UTC') AS due_at
+             FROM departments site LEFT JOIN pg_timezone_names zone ON zone.name=site.time_zone WHERE site.id=$3`,
+          [now, months, departmentId],
+        );
+        dueAt = deadline.due_at;
+      }
+      await client.query("UPDATE group_automatic_routine_runs SET phase='waiting',next_step=$2,due_at=$3,updated_at=clock_timestamp() WHERE id=$1",
+        [job.id, next + 1, dueAt]);
       return result();
     }
     if (step.kind === "followup") {

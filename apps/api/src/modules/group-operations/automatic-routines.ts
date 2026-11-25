@@ -15,11 +15,15 @@ const base = "/api/modules/group-operations/automatic-routines/:groupId";
 const stepSchema = { type: "object", additionalProperties: false, required: ["kind"], properties: {
   kind: { type: "string", enum: ["wait", "followup", "membership", "addToGroup", "removeMembership"] },
   minutes: { type: "integer", minimum: 1, maximum: 525600 },
+  duration: { type: "integer", minimum: 1, maximum: 120 }, unit: { type: "string", enum: ["months", "years"] },
   subject: { type: "string", minLength: 1, maxLength: 160 },
   assigneeId: uuid, dueDays: { type: "integer", minimum: 0, maximum: 365 },
   role: roleText, status: membershipStatus, targetGroupId: uuid,
 }, oneOf: [
-  { properties: { kind: { const: "wait" } }, required: ["minutes"] },
+  { properties: { kind: { const: "wait" } }, oneOf: [
+    { required: ["minutes"], not: { anyOf: [{ required: ["duration"] }, { required: ["unit"] }] } },
+    { required: ["duration", "unit"], not: { required: ["minutes"] } },
+  ] },
   { properties: { kind: { const: "followup" } }, required: ["subject", "assigneeId", "dueDays"] },
   { properties: { kind: { const: "membership" } }, anyOf: [{ required: ["role"] }, { required: ["status"] }] },
   { properties: { kind: { const: "addToGroup" } }, required: ["targetGroupId", "role", "status"] },
@@ -145,6 +149,9 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
         reply.code(400).send({ error: "Choose a different active native group from this location for each destination." }); return null;
       }
     }
+    if (steps.some((step) => step.kind === "wait" && "unit" in step && step.unit === "years" && step.duration > 10)) {
+      reply.code(400).send({ error: "Choose a delay of up to ten years." }); return null;
+    }
     const followups = steps.filter((step) => step.kind === "followup");
     if (followups.some((step) => !step.subject.trim())) { reply.code(400).send({ error: "Enter a follow-up subject." }); return null; }
     const assigneeIds = [...new Set(followups.map(({ assigneeId }) => assigneeId.toLowerCase()))];
@@ -160,7 +167,7 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
       if (step.kind === "membership") return { kind: step.kind, role: step.role?.trim() || undefined, status: step.status };
       if (step.kind === "addToGroup") return { kind: step.kind, targetGroupId: step.targetGroupId.toLowerCase(), role: step.role.trim(), status: step.status };
       if (step.kind === "removeMembership") return { kind: step.kind };
-      return { kind: step.kind, minutes: step.minutes };
+      return "minutes" in step ? { kind: step.kind, minutes: step.minutes } : { kind: step.kind, duration: step.duration, unit: step.unit };
     });
     const id = randomUUID();
     const saved = await client.query(`INSERT INTO group_automatic_routines
@@ -200,11 +207,41 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
     return { action: "automatic-routine-activation", response: { enabled } };
   }));
 
-  app.post<{ Params: GroupParams & { runId: string } }>(base + "/runs/:runId/skip-wait", { schema: {
+  app.patch<{ Params: GroupParams & { runId: string }; Body: { dueAt: string; expectedUpdatedAt: string } }>(
+    base + "/runs/:runId/wait", { schema: {
+      params: { ...groupParams, required: ["groupId", "runId"], properties: { groupId: uuid, runId: uuid } },
+      body: { type: "object", additionalProperties: false, required: ["dueAt", "expectedUpdatedAt"], properties: {
+        dueAt: { type: "string", format: "date-time", maxLength: 32 },
+        expectedUpdatedAt: { type: "string", format: "date-time", maxLength: 32 },
+      } },
+    } }, async (request, reply) => mutate(request, reply, async (client, { departmentId, groupId, actorId, active }) => {
+      if (!active) { reply.code(409).send({ error: "Activate the group before changing this wait." }); return null; }
+      const { dueAt, expectedUpdatedAt } = request.body;
+      const now = new Date();
+      const horizon = new Date(now);
+      horizon.setUTCFullYear(now.getUTCFullYear() + 10);
+      const end = new Date(dueAt);
+      if (Number.isNaN(end.getTime()) || end <= now || end > horizon) {
+        reply.code(400).send({ error: "Choose a future wait end within ten years." }); return null;
+      }
+      const { runId } = request.params;
+      const saved = await client.query(`UPDATE group_automatic_routine_runs
+          SET due_at=$4,updated_at=clock_timestamp()
+        WHERE department_id=$1 AND group_id=$2 AND id=$3 AND phase='waiting'
+          AND updated_at=$5::timestamptz RETURNING id`, [departmentId, groupId, runId, end, expectedUpdatedAt]);
+      if (!saved.rowCount) { reply.code(409).send({ error: "This wait changed. Reload the routine before rescheduling it." }); return null; }
+      await client.query(`INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details)
+        VALUES($1,$2,$3,$4,'automatic_routine_reschedule',$5,jsonb_build_object('dueAt',$6::timestamptz))`,
+        [randomUUID(), departmentId, groupId, actorId, runId, end]);
+      return { action: "automatic-routine-wait-rescheduled", response: { dueAt: end.toISOString() } };
+    }));
+
+  app.post<{ Params: GroupParams & { runId: string }; Querystring: { expectedUpdatedAt?: string } }>(base + "/runs/:runId/skip-wait", { schema: {
     params: { ...groupParams, required: ["groupId", "runId"], properties: { groupId: uuid, runId: uuid } },
+    querystring: { type: "object", properties: { expectedUpdatedAt: { type: "string", format: "date-time", maxLength: 32 } } },
   } }, async (request, reply) => mutate(request, reply, async (client, { departmentId, groupId }) => {
-    const waiting = await client.query(`UPDATE group_automatic_routine_runs SET due_at=LEAST(due_at,now()),updated_at=now()
-      WHERE id=$1 AND department_id=$2 AND group_id=$3 AND phase='waiting' RETURNING id`, [request.params.runId, departmentId, groupId]);
+    const waiting = await client.query(`UPDATE group_automatic_routine_runs SET due_at=LEAST(due_at,now()),updated_at=clock_timestamp()
+      WHERE id=$1 AND department_id=$2 AND group_id=$3 AND phase='waiting' AND ($4::timestamptz IS NULL OR updated_at=$4::timestamptz) RETURNING id`, [request.params.runId, departmentId, groupId, request.query.expectedUpdatedAt ?? null]);
     if (!waiting.rowCount) { reply.code(409).send({ error: "This member is no longer waiting in the routine." }); return null; }
     return { action: "automatic-routine-wait-released", response: { released: true } };
   }));

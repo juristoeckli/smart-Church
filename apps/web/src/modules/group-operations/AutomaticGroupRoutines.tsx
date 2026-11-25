@@ -4,6 +4,7 @@ import type { ModuleContext } from "../../module-registry";
 type Status = "active" | "paused" | "waitlist";
 type Step =
   | { kind: "wait"; minutes: number }
+  | { kind: "wait"; duration: number; unit: "months" | "years" }
   | { kind: "followup"; subject: string; dueDays: number; assigneeId: string }
   | { kind: "membership"; role?: string; status?: Status }
   | { kind: "addToGroup"; targetGroupId: string; role: string; status: Status }
@@ -40,7 +41,10 @@ const stepTitles: Record<Step["kind"], string> = {
 };
 
 function stepLabel(step: Step, groups: Data["targetGroups"] = []) {
-  if (step.kind === "wait") return `Wait ${step.minutes} minutes`;
+  if (step.kind === "wait") {
+    if ("minutes" in step) return `Wait ${step.minutes} ${step.minutes === 1 ? "minute" : "minutes"}`;
+    return `Wait ${step.duration} ${step.duration === 1 ? step.unit.slice(0, -1) : step.unit}`;
+  }
   if (step.kind === "followup") return `Create follow-up: ${step.subject}`;
   if (step.kind === "removeMembership") return "End membership in this group";
   if (step.kind === "addToGroup") return `Add to ${groups.find(({ id }) => id === step.targetGroupId)?.name ?? "another group"} as ${step.role} · ${statuses[step.status]}`;
@@ -51,6 +55,7 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
   const [data, setData] = useState<Data | null>(null);
   const [draft, setDraft] = useState(emptyDraft);
   const [templateId, setTemplateId] = useState("");
+  const [editWait, setEditWait] = useState<{ runId: string; version: string; localEnd: string } | null>(null);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
@@ -164,8 +169,16 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
         </select></label>
         {draft.steps.map((step, index) => <fieldset key={index}>
           <legend>{index + 1}. {stepTitles[step.kind]}</legend>
-          {step.kind === "wait" && <label>Wait minutes<input type="number" min={1} max={525600} required value={step.minutes}
-            onChange={(event) => sendStep(index, { ...step, minutes: Number(event.target.value) })} /></label>}
+          {step.kind === "wait" && <>
+            <label>Delay unit<select value={"minutes" in step ? "minutes" : step.unit} onChange={(event) => {
+              const unit = event.target.value;
+              sendStep(index, unit === "minutes" ? { kind: "wait", minutes: 1440 } : { kind: "wait", unit: unit as "months" | "years", duration: 1 });
+            }}><option value="minutes">Minutes</option><option value="months">Months</option><option value="years">Years</option></select></label>
+            {"minutes" in step ? <label>Wait minutes<input type="number" min={1} max={525600} required value={step.minutes}
+              onChange={(event) => sendStep(index, { ...step, minutes: Number(event.target.value) })} /></label>
+              : <label>Wait {step.unit}<input type="number" min={1} max={step.unit === "months" ? 120 : 10} required value={step.duration}
+                onChange={(event) => sendStep(index, { ...step, duration: Number(event.target.value) })} /></label>}
+          </>}
           {step.kind === "followup" && <>
             <label>Follow-up subject<input required maxLength={160} value={step.subject} onChange={(event) => sendStep(index, { ...step, subject: event.target.value })} /></label>
             <label>Assigned member<select required value={step.assigneeId} onChange={(event) => sendStep(index, { ...step, assigneeId: event.target.value })}>
@@ -244,8 +257,28 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
             <button className="button button-secondary" type="button" disabled={busy} onClick={() => recover("retry")}>Retry failed step</button>
             {canSkip && <button className="button button-secondary" type="button" disabled={busy} onClick={() => recover("skip")}>Skip failed step</button>}
           </div>}
-          {run.phase === "waiting" && <button className="button button-secondary" type="button" disabled={busy}
-            onClick={() => void mutate("POST", "/runs/" + run.id + "/skip-wait", {}, "Wait released.")}>Skip wait</button>}
+          {run.phase === "waiting" && (editWait?.runId === run.id ? <form className="go-form" onSubmit={(event) => {
+            event.preventDefault();
+            const deadline = new Date(editWait.localEnd);
+            if (Number.isNaN(deadline.getTime())) { setError("Choose a valid local date and time."); return; }
+            void mutate("PATCH", "/runs/" + run.id + "/wait", { dueAt: deadline.toISOString(), expectedUpdatedAt: editWait.version },
+              "Wait rescheduled.").then((success) => { if (success) setEditWait(null); });
+          }}>
+            <label>Wait end in your local time<input type="datetime-local" required value={editWait.localEnd}
+              onChange={(event) => setEditWait({ ...editWait, localEnd: event.target.value })} /></label>
+            <div className="form-actions">
+              <button className="button button-secondary" type="button" onClick={() => setEditWait(null)}>Cancel</button>
+              <button className="button button-primary" type="submit" disabled={busy}>Save wait end</button>
+            </div>
+          </form> : <div className="form-actions">
+            <button className="button button-secondary" type="button" disabled={busy} onClick={() => {
+              const due = new Date(run.dueAt);
+              const localEnd = new Date(due.getTime() - due.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+              setEditWait({ runId: run.id, version: run.updatedAt, localEnd });
+            }}>Change wait end</button>
+            <button className="button button-secondary" type="button" disabled={busy}
+              onClick={() => void mutate("POST", "/runs/" + run.id + "/skip-wait?" + new URLSearchParams({ expectedUpdatedAt: run.updatedAt }), {}, "Wait released.")}>Skip wait</button>
+          </div>)}
         </article>;
       })}</div>
       {!data.runs.length && <p className="go-empty">No members have started a routine yet.</p>}
