@@ -12,6 +12,7 @@ import { CalendarTagManager, type CalendarTagDefinition } from "./CalendarTagMan
 import { CalendarMeetingRequests } from "./CalendarMeetingRequests";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, MapPin, Pencil, Plus, Printer, Repeat2, RotateCcw, Trash2, X } from "lucide-react";
+import { checkInAppointmentTarget } from "../../check-in-navigation";
 import type { ModuleContext } from "../../module-registry";
 import { CalendarResourceRequest } from "./CalendarResourceRequest";
 import { CalendarGroupMeeting } from "./CalendarGroupMeeting";
@@ -111,7 +112,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
-export function ChurchCalendarModule({ departmentId, accountId, csrfToken, department, canManageSite, language, realtime, onNavigateEntity, state, onStateChange, calendarAppointmentNavigation, onCalendarAppointmentOpened }: ModuleContext) {
+export function ChurchCalendarModule({ departmentId, accountId, csrfToken, department, canManageSite, language, realtime, onNavigateEntity, state, onStateChange, calendarAppointmentNavigation, onCalendarAppointmentOpened, onOpenCheckInAppointment }: ModuleContext) {
   const viewerPreference = displayPreference(state);
   const locationTimeZone = validNamedZone(department.timeZone) ?? "UTC";
   const deviceTimeZone = validNamedZone(Intl.DateTimeFormat().resolvedOptions().timeZone) ?? "UTC";
@@ -740,6 +741,11 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
   const canManageCalendarResources = Boolean(editing?.canManage && editing.calendarScope !== "personal" && department.enabledModules?.includes("resource-scheduler")
     && (department.role === "site_admin" || (department.permissions ?? []).includes("resources_manage") || (department.modulePermissions?.["resource-scheduler"] ?? []).includes("manage")));
   const linkedResourceBookings = editedOccurrence?.resourceBookings ?? editing?.resourceBookings ?? [];
+  const canOpenCheckIn = (item: Appointment) => canManageGroups && item.calendarScope !== "personal" &&
+    Boolean(onOpenCheckInAppointment && department.enabledModules?.includes("check-in"));
+  function openCheckIn(item: Appointment) {
+    if (canOpenCheckIn(item)) onOpenCheckInAppointment?.(checkInAppointmentTarget(item, departmentId, locationTimeZone));
+  }
   function appointmentLinks(item: Appointment, showBookingSummary = true) {
     const occurrenceBookings = item.resourceBookings?.filter((booking) => booking.scope === "occurrence") ?? [];
     const approvedBookings = occurrenceBookings.filter((booking) => booking.status === "approved").length;
@@ -758,6 +764,8 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
       {showBookingSummary && occurrenceBookings.length > 0 && <span className="church-calendar-signup-link">{approvedBookings + pendingBookings
         ? `${approvedBookings} confirmed · ${pendingBookings} pending resource bookings`
         : "Resource bookings declined or cancelled"}</span>}
+      {showBookingSummary && canOpenCheckIn(item) && <button type="button" className="church-calendar-event-link"
+        aria-label={"Open Check-in for " + item.title} onClick={() => openCheckIn(item)}>Open Check-in</button>}
       {item.linkedEventCancelled && <span className="church-calendar-signup-link">Linked event cancelled</span>}
       {linkedEventId && onNavigateEntity && <button type="button" className="church-calendar-event-link" aria-label={`Open event for ${item.title}`} onClick={() => onNavigateEntity("event", linkedEventId)}>Open linked event</button>}
     </>;
@@ -871,7 +879,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
             open: () => openEdit(item),
           }))}
           formatHour={(hour) => clockFormatter.format(new Date(Date.UTC(2000, 0, 1, hour)))}
-        /> : dayOrWeek ? <div className={`church-calendar-columns church-calendar-columns-${view}`}>{Array.from({ length: view === "day" ? 1 : 7 }, (_, index) => { const day = new Date(anchor); if (view === "week") day.setDate(day.getDate()-((day.getDay()+6)%7)+index); return <section key={index} className="church-calendar-column"><header><strong>{dayLabel(day, language)}</strong><button type="button" aria-label={`New appointment ${dateInput(day)}`} onClick={() => openNew(day)}><Plus size={14} /></button></header>{eventsForDay(day).map(appointmentButton)}{!eventsForDay(day).length && <button type="button" className="church-calendar-add-slot" onClick={() => openNew(day)}>Add appointment</button>}</section>; })}</div> : view === "year" ? <div className="church-calendar-year">{Array.from({ length: 12 }, (_, month) => { const first = new Date(anchor.getFullYear(), month, 1); const count = visibleAppointments.filter((event) => Number(displayStart(event).slice(5,7)) === month + 1).length; return <button type="button" key={month} onClick={() => { setAnchor(first); setView("month"); }}><strong>{new Intl.DateTimeFormat(locale, { month: "long" }).format(first)}</strong><span>{count} appointments</span></button>; })}</div> : <div className="church-calendar-list-view">{visibleAppointments.map((item) => <Fragment key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`}><button type="button" onClick={() => openEdit(item)}><span className="church-calendar-list-date">{dayLabel(dateFromLocal(displayStart(item)), language)}</span><span className="church-calendar-list-title"><strong>{item.title}</strong>{item.myMeetingResponse && <small>Meeting request · {requestLabels[item.myMeetingResponse]}</small>}<small>{item.calendarName}{item.place ? ` · ${item.place}` : ""}{item.responsiblePersonName ? ` · On behalf of ${item.responsiblePersonName}` : ""}</small></span><span>{timeLabel(item)}</span><ChevronRight size={16} /></button>{(item.signupGroupName || item.linkedEventId || item.resourceBookings?.some((booking) => booking.scope === "occurrence")) && <div className="church-calendar-list-links">{appointmentLinks(item)}</div>}</Fragment>)}</div>}
+        /> : dayOrWeek ? <div className={`church-calendar-columns church-calendar-columns-${view}`}>{Array.from({ length: view === "day" ? 1 : 7 }, (_, index) => { const day = new Date(anchor); if (view === "week") day.setDate(day.getDate()-((day.getDay()+6)%7)+index); return <section key={index} className="church-calendar-column"><header><strong>{dayLabel(day, language)}</strong><button type="button" aria-label={`New appointment ${dateInput(day)}`} onClick={() => openNew(day)}><Plus size={14} /></button></header>{eventsForDay(day).map(appointmentButton)}{!eventsForDay(day).length && <button type="button" className="church-calendar-add-slot" onClick={() => openNew(day)}>Add appointment</button>}</section>; })}</div> : view === "year" ? <div className="church-calendar-year">{Array.from({ length: 12 }, (_, month) => { const first = new Date(anchor.getFullYear(), month, 1); const count = visibleAppointments.filter((event) => Number(displayStart(event).slice(5,7)) === month + 1).length; return <button type="button" key={month} onClick={() => { setAnchor(first); setView("month"); }}><strong>{new Intl.DateTimeFormat(locale, { month: "long" }).format(first)}</strong><span>{count} appointments</span></button>; })}</div> : <div className="church-calendar-list-view">{visibleAppointments.map((item) => <Fragment key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`}><button type="button" onClick={() => openEdit(item)}><span className="church-calendar-list-date">{dayLabel(dateFromLocal(displayStart(item)), language)}</span><span className="church-calendar-list-title"><strong>{item.title}</strong>{item.myMeetingResponse && <small>Meeting request · {requestLabels[item.myMeetingResponse]}</small>}<small>{item.calendarName}{item.place ? ` · ${item.place}` : ""}{item.responsiblePersonName ? ` · On behalf of ${item.responsiblePersonName}` : ""}</small></span><span>{timeLabel(item)}</span><ChevronRight size={16} /></button>{(canOpenCheckIn(item) || item.signupGroupName || item.linkedEventId || item.resourceBookings?.some((booking) => booking.scope === "occurrence")) && <div className="church-calendar-list-links">{appointmentLinks(item)}</div>}</Fragment>)}</div>}
         {!loading && !visibleAppointments.length && <div className="church-calendar-empty-state"><CalendarDays size={28} /><strong>No appointments in this view</strong><span>{selectedTags?.size ? "Choose another tag or date to show more appointments." : "Try another date or add an appointment."}</span><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div>}
       </section></div>
     {calendarEdit?.departmentId === departmentId && <div className="church-calendar-modal-backdrop" role="presentation">
@@ -929,6 +937,9 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
           </>}
           {editing.reminder && <button type="button" className="button button-secondary" disabled={busy} onClick={() => void changeReminder(true)}>Remove reminder</button>}
         </div>
+      </div>}
+      {editing && canOpenCheckIn(editing) && <div className="church-calendar-extra-date wide">
+        <button type="button" className="button button-secondary" onClick={() => openCheckIn(editing)}>Open Check-in</button>
       </div>}
       {editing?.calendarScope === "group" && editing.groupId && canManageGroups && <CalendarGroupMeeting
         key={departmentId + ":" + editing.appointmentId + ":" + (editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt)}

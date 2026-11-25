@@ -12,6 +12,8 @@ export interface ModuleRealtime {
 
 export type CalendarAppointmentTarget = { appointmentId: string; originalStartAt: string; date: string };
 export type CalendarAppointmentNavigation = CalendarAppointmentTarget & { departmentId: string; requestId: number };
+export type CheckInAppointmentTarget = CalendarAppointmentTarget & { departmentId: string };
+export type CheckInAppointmentNavigation = CheckInAppointmentTarget & { accountId: string; requestId: number };
 
 export type DirectorySearchNavigation = { query: string; requestId: number; onHandled: (requestId: number) => void };
 
@@ -35,6 +37,9 @@ export interface ModuleContext {
   onOpenCalendarAppointment?: (target: CalendarAppointmentTarget) => void;
   calendarAppointmentNavigation?: CalendarAppointmentNavigation | null;
   onCalendarAppointmentOpened?: (requestId: number) => void;
+  onOpenCheckInAppointment?: (target: CheckInAppointmentTarget) => void;
+  checkInAppointmentNavigation?: CheckInAppointmentNavigation | null;
+  onCheckInAppointmentOpened?: (requestId: number) => void;
   onNavigateEntity?: (type: "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking", id: string) => void;
 }
 

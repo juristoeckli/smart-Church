@@ -47,7 +47,7 @@ import { smartChurchBuildInfo } from "./build-info";
 import { Groups } from "./Groups";
 import { GlobalSearch, type FullSearchDestination } from "./GlobalSearch";
 import { BookableResources } from "./BookableResources";
-import { type CalendarAppointmentTarget, type CalendarAppointmentNavigation, loadRegisteredModules, ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleTranslation, registeredModules, translateModuleText, type ModuleContext } from "./module-registry";
+import { type CalendarAppointmentTarget, type CalendarAppointmentNavigation, type CheckInAppointmentTarget, type CheckInAppointmentNavigation, loadRegisteredModules, ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleTranslation, registeredModules, translateModuleText, type ModuleContext } from "./module-registry";
 import { translateKnownModuleMessage, translateModuleMessage, translationsForModule } from "./modules/translations";
 import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 import { LocationAccess } from "./LocationAccess";
@@ -307,6 +307,7 @@ function WorkspaceApp() {
   const [sharedPlanHash, setSharedPlanHash] = useState(window.location.hash);
   const openedSharedPlan = useRef("");
   const [calendarAppointmentNavigation, setCalendarAppointmentNavigation] = useState<CalendarAppointmentNavigation | null>(null);
+  const [checkInAppointmentNavigation, setCheckInAppointmentNavigation] = useState<CheckInAppointmentNavigation | null>(null);
   const [pendingEventNavigation, setPendingEventNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [pendingResourceNavigation, setPendingResourceNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [pendingDirectorySearch, setPendingDirectorySearch] = useState<{ destination: FullSearchDestination; departmentId: string; query: string; requestId: number } | null>(null);
@@ -402,6 +403,9 @@ function WorkspaceApp() {
   const [newAccountRole, setNewAccountRole] = useState<"server_admin" | "user">("user");
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthenticatedUser | null>(null);
+  useEffect(() => {
+    setCheckInAppointmentNavigation(current => current?.departmentId === department.id && current.accountId === authUser?.id ? current : null);
+  }, [department.id, authUser?.id]);
   const appliedStartPageUserId = useRef("");
   const [csrfToken, setCsrfToken] = useState("");
   const [setupRequired, setSetupRequired] = useState(false);
@@ -1643,6 +1647,7 @@ function WorkspaceApp() {
       setPage(modulePage(quickCreateWikiModule.id));
     }
   };
+  const checkInDestination = canManageGroups ? enabledDynamicModules.find(module => module.id === "check-in") : undefined;
   const moduleContext = {
     language: activeLanguage,
     department,
@@ -1661,6 +1666,13 @@ function WorkspaceApp() {
     directorySearch: directorySearch?.destination === "wiki" ? directorySearch : undefined,
     onOpenGroupPeople: openPeopleGroup,
     calendarAppointmentNavigation,
+    checkInAppointmentNavigation,
+    onCheckInAppointmentOpened: (requestId: number) => setCheckInAppointmentNavigation(current => current?.requestId === requestId ? null : current),
+    onOpenCheckInAppointment: checkInDestination ? (target: CheckInAppointmentTarget) => {
+      if (target.departmentId !== department.id || !authUser?.id) return;
+      setCheckInAppointmentNavigation({ ...target, accountId: authUser.id, requestId: ++entityNavigationRequestId.current });
+      setPage(modulePage(checkInDestination.id));
+    } : undefined,
     onCalendarAppointmentOpened: (requestId: number) => setCalendarAppointmentNavigation((current) => current?.requestId === requestId ? null : current),
     onOpenCalendarAppointment: (target: CalendarAppointmentTarget) => {
       const calendarModule = enabledDynamicModules.find((module) => module.id === "church-calendar");

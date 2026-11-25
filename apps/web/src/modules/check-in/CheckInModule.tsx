@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Check, ChevronDown, Printer, RotateCcw, Search, UserPlus, Users } from "lucide-react";
-import type { ModuleContext } from "../../module-registry";
+import type { CheckInAppointmentNavigation, ModuleContext } from "../../module-registry";
 import "./module.css";
 import { CheckInLabelTemplateEditor, useCheckInLabelTemplates } from "./CheckInLabelTemplates";
 import { CalendarGroupAttendance } from "./CalendarGroupAttendance";
@@ -23,10 +23,26 @@ function deskCode(departmentId: string, eventId: string, personId: string) {
   return (hash >>> 0).toString(16).toUpperCase().padStart(8, "0");
 }
 
-export function CheckInModule({ csrfToken, department, departmentId, realtime, state, onStateChange }: ModuleContext) {
+export function CheckInModule({ csrfToken, department, departmentId, accountId, realtime, state, onStateChange, checkInAppointmentNavigation, onCheckInAppointmentOpened }: ModuleContext) {
   const [groupAttendanceOpen, setGroupAttendanceOpen] = useState(false);
   const [calendarAttendanceOpen, setCalendarAttendanceOpen] = useState(false);
+  const [linkedAppointment, setLinkedAppointment] = useState<CheckInAppointmentNavigation | null>(null);
   const canManageGroupAttendance = department.role === "site_admin" || (department.permissions ?? []).includes("groups_manage");
+  const canUseCalendarAttendance = Boolean(canManageGroupAttendance && department.enabledModules?.includes("church-calendar") &&
+    department.enabledModules.includes("check-in"));
+  const incoming = canUseCalendarAttendance && checkInAppointmentNavigation?.departmentId === departmentId &&
+    checkInAppointmentNavigation.accountId === accountId ? checkInAppointmentNavigation : null;
+  const calendarTarget = incoming ?? (canUseCalendarAttendance && linkedAppointment?.departmentId === departmentId &&
+    linkedAppointment.accountId === accountId ? linkedAppointment : null);
+  useEffect(() => {
+    if (!incoming) return;
+    setLinkedAppointment(incoming);
+    onCheckInAppointmentOpened?.(incoming.requestId);
+  }, [incoming, onCheckInAppointmentOpened]);
+  useEffect(() => {
+    setLinkedAppointment(current => canUseCalendarAttendance && current?.departmentId === departmentId &&
+      current.accountId === accountId ? current : null);
+  }, [canUseCalendarAttendance, departmentId, accountId]);
   const [events, setEvents] = useState<EventRow[]>([]); const [groups, setGroups] = useState<GroupRow[]>([]);
   const [eventId, setEventId] = useState(""); const [groupIds, setGroupIds] = useState<string[]>([]); const [attendees, setAttendees] = useState<Attendee[]>([]);
   const [hierarchyAvailable, setHierarchyAvailable] = useState(false); const [includeChildGroups, setIncludeChildGroups] = useState(false);
@@ -325,12 +341,16 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
       departmentId={departmentId} csrfToken={csrfToken} current={labelTemplates} />}
   </details>;
 
-  const canUseCalendarAttendance = canManageGroupAttendance && department.enabledModules?.includes("church-calendar");
-  if (canUseCalendarAttendance && calendarAttendanceOpen) {
-    return <CalendarGroupAttendance key={departmentId} departmentId={departmentId} csrfToken={csrfToken}
+  if (canUseCalendarAttendance && (calendarAttendanceOpen || calendarTarget)) {
+    return <CalendarGroupAttendance key={JSON.stringify([departmentId, accountId, calendarTarget?.requestId])}
+      departmentId={departmentId} csrfToken={csrfToken} initialTarget={calendarTarget ?? undefined}
       timeZone={department.timeZone} realtime={realtime}
       parentByGroup={new Map(groups.flatMap(group => group.parentGroupId ? [[group.id, group.parentGroupId]] : []))}
-      onBack={() => setCalendarAttendanceOpen(false)} />;
+      onBack={() => {
+        if (incoming) onCheckInAppointmentOpened?.(incoming.requestId);
+        setLinkedAppointment(null);
+        setCalendarAttendanceOpen(false);
+      }} />;
   }
   if (canManageGroupAttendance && groupAttendanceOpen) {
     return <GroupMeetingAttendance key={departmentId} departmentId={departmentId} csrfToken={csrfToken} realtime={realtime} showAttendanceCodes printOptions={printOptions} onBack={() => setGroupAttendanceOpen(false)} />;

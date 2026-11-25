@@ -1,27 +1,27 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
 import { setGroupAttendanceCompletion, type CompletionFeedbackDraft, type GroupAttendanceStatus } from "../../group-attendance";
-import type { ModuleRealtime } from "../../module-registry";
+import { checkInLocationDate, checkInOccurrenceKey } from "../../check-in-navigation";
+import type { CalendarAppointmentTarget, ModuleRealtime } from "../../module-registry";
 
-type Appointment = { appointmentId: string; originalOccurrenceStartAt: string; occurrenceStartAt: string; viewStartsAt?: string; title: string; calendarName: string; calendarScope: string; groupId?: string };
+type Appointment = { appointmentId: string; originalOccurrenceStartAt: string; occurrenceStartAt: string; viewStartsAt?: string; title: string; calendarName: string; calendarScope: string; groupId?: string | null; signupGroupId?: string | null };
 type Group = { id: string; name: string; status?: string; importedFrom?: string };
 type Attendee = { groupId: string; contactId: string; firstName: string; lastName: string; role: string | null; status: GroupAttendanceStatus };
 type Roster = { groups: Group[]; meetings: { id: string; groupId: string; completedAt: string | null }[]; attendees: Attendee[] };
 
-function dateInLocation(timeZone: string) {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
-  return ["year", "month", "day"].map(type => parts.find(part => part.type === type)?.value).join("-");
-}
+const occurrenceValue = (appointment: Appointment) =>
+  checkInOccurrenceKey({ appointmentId: appointment.appointmentId, originalStartAt: appointment.originalOccurrenceStartAt });
 
-const occurrenceValue = (appointment: Appointment) => appointment.appointmentId + ":" + appointment.originalOccurrenceStartAt;
-
-export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, parentByGroup, realtime, onBack }: {
-  departmentId: string; csrfToken: string; timeZone: string; parentByGroup: ReadonlyMap<string, string>; realtime?: ModuleRealtime; onBack: () => void;
+export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, parentByGroup, realtime, initialTarget, onBack }: {
+  departmentId: string; csrfToken: string; timeZone: string; parentByGroup: ReadonlyMap<string, string>; realtime?: ModuleRealtime; initialTarget?: CalendarAppointmentTarget; onBack: () => void;
 }) {
-  const [date, setDate] = useState(() => dateInLocation(timeZone));
-  const [groups, setGroups] = useState<Group[]>([]);
+  const [date, setDate] = useState(() => initialTarget?.date ?? checkInLocationDate(timeZone));
+  const [linkedTarget, setLinkedTarget] = useState(initialTarget);
+  const [groupDirectory, setGroups] = useState<Group[]>();
+  const groups = groupDirectory ?? [];
   const [appointments, setAppointments] = useState<{ date: string; rows: Appointment[] }>();
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState(() => initialTarget ? checkInOccurrenceKey(initialTarget) : "");
+  const preselected = useRef("");
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const [includeChildren, setIncludeChildren] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -55,14 +55,39 @@ export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, par
     if (!date) return;
     const controller = new AbortController();
     const query = new URLSearchParams({ from: date + "T00:00:00", to: date + "T23:59:59", displayTimeZone: "location" });
-    void request<Appointment[]>("/api/modules/church-calendar/appointments?" + query, controller.signal).then(rows => {
-      if (!controller.signal.aborted) setAppointments({ date, rows: rows.filter(row => row.calendarScope !== "personal") });
-    }).catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
+    async function loadAppointments() {
+      const endpoint = "/api/modules/church-calendar/appointments?";
+      const rows = (await request<Appointment[]>(endpoint + query, controller.signal)).filter(row => row.calendarScope !== "personal");
+      if (controller.signal.aborted) return;
+      if (linkedTarget?.date === date) {
+        const key = checkInOccurrenceKey(linkedTarget);
+        if (!rows.some(row => occurrenceValue(row) === key)) {
+          const exactQuery = new URLSearchParams(query);
+          exactQuery.set("appointmentId", linkedTarget.appointmentId);
+          const exact = (await request<Appointment[]>(endpoint + exactQuery, controller.signal))
+            .find(row => row.calendarScope !== "personal" && occurrenceValue(row) === key);
+          if (controller.signal.aborted) return;
+          if (exact) rows.unshift(exact);
+          else {
+            setSelected("");
+            setError("The linked appointment is no longer available for Check-in on this date.");
+          }
+        }
+      }
+      setAppointments({ date, rows });
+    }
+    void loadAppointments().catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
     return () => controller.abort();
-  }, [date, request]);
+  }, [date, linkedTarget, request]);
 
   const choices = appointments?.date === date ? appointments.rows : [];
   const appointment = choices.find(item => occurrenceValue(item) === selected);
+  useEffect(() => {
+    if (!appointment || !groupDirectory || preselected.current === selected) return;
+    preselected.current = selected;
+    const group = [appointment.groupId, appointment.signupGroupId].find(id => groupDirectory.some(item => item.id === id));
+    if (group) setGroupIds([group]);
+  }, [appointment, groupDirectory, selected]);
   const path = appointment ? "/api/modules/church-calendar/appointments/" + appointment.appointmentId + "/check-in/" + encodeURIComponent(appointment.originalOccurrenceStartAt) : "";
   const selectedGroups = new Set(groupIds);
   if (includeChildren) {
@@ -157,12 +182,10 @@ export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, par
     </header>
     <section className="checkin-setup">
       <label>Date<input type="date" value={date} disabled={busy} onChange={event => {
-        setDate(event.target.value); setSelected(""); setError(""); setNotice("");
+        setLinkedTarget(undefined); preselected.current = ""; setDate(event.target.value); setSelected(""); setError(""); setNotice("");
       }} /></label>
       <label>Calendar appointment<select value={selected} disabled={busy || appointments?.date !== date} onChange={event => {
-        const item = choices.find(choice => occurrenceValue(choice) === event.target.value);
-        setSelected(event.target.value); setError(""); setNotice("");
-        if (item?.groupId && groups.some(group => group.id === item.groupId)) setGroupIds([item.groupId]);
+        setLinkedTarget(undefined); preselected.current = ""; setSelected(event.target.value); setError(""); setNotice("");
       }}>
         <option value="">Select a calendar appointment</option>
         {choices.map(item => <option key={occurrenceValue(item)} value={occurrenceValue(item)}>
