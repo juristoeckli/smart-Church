@@ -1,3 +1,4 @@
+import { canReadPrivateContactDetails } from "../../location-grants.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { completedCheckInError, isCheckInComplete, lockCheckInEvent } from "../../event-attendance.js";
@@ -74,26 +75,26 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (groups.rowCount !== groupIds.length) return reply.code(403).send({ error: "One or more groups are outside this location." });
     const hierarchyAvailable = (await pool!.query<{ present: boolean }>("SELECT to_regclass('public.group_hierarchy_history') IS NOT NULL AS present")).rows[0]?.present ?? false;
     const includeChildren = Boolean(request.query.includeChildGroups && hierarchyAvailable);
+    const canViewPrivatePeople = canReadPrivateContactDetails(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null);
     const roster = await pool!.query(includeChildren ? `WITH RECURSIVE selected_groups(id) AS (
       SELECT g.id FROM church_groups g WHERE g.department_id=$1 AND g.id=ANY($3::uuid[]) AND g.status='active'
       UNION
       SELECT child.id FROM church_groups child JOIN selected_groups parent ON child.parent_group_id=parent.id WHERE child.department_id=$1 AND child.status='active'
-    ) SELECT DISTINCT c.id,c.first_name AS "firstName",c.last_name AS "lastName",c.email,c.phone,
+    ) SELECT DISTINCT c.id,c.first_name AS "firstName",c.last_name AS "lastName",CASE WHEN $4::boolean THEN c.email ELSE NULL END AS email,CASE WHEN $4::boolean THEN c.phone ELSE NULL END AS phone,
       COALESCE(ch.first_time_visitor,false) AS "firstTimeVisitor",ch.checked_in_at AS "checkedInAt",
       array_agg(DISTINCT g.name ORDER BY g.name) AS groups
       FROM group_members gm JOIN church_groups g ON g.id=gm.group_id AND g.department_id=$1 AND g.status='active'
       JOIN contacts c ON c.id=gm.contact_id AND c.department_id=$1 AND c.status='member'
       LEFT JOIN event_attendance_checkins ch ON ch.event_id=$2 AND ch.contact_id=c.id
       WHERE gm.group_id IN (SELECT id FROM selected_groups) AND gm.status='active'
-      GROUP BY c.id,ch.first_time_visitor,ch.checked_in_at ORDER BY c.last_name,c.first_name` : `SELECT DISTINCT c.id,c.first_name AS "firstName",c.last_name AS "lastName",c.email,c.phone,
+      GROUP BY c.id,ch.first_time_visitor,ch.checked_in_at ORDER BY c.last_name,c.first_name` : `SELECT DISTINCT c.id,c.first_name AS "firstName",c.last_name AS "lastName",CASE WHEN $4::boolean THEN c.email ELSE NULL END AS email,CASE WHEN $4::boolean THEN c.phone ELSE NULL END AS phone,
       COALESCE(ch.first_time_visitor,false) AS "firstTimeVisitor",ch.checked_in_at AS "checkedInAt",
       array_agg(DISTINCT g.name ORDER BY g.name) AS groups
       FROM group_members gm JOIN church_groups g ON g.id=gm.group_id AND g.department_id=$1 AND g.status='active'
       JOIN contacts c ON c.id=gm.contact_id AND c.department_id=$1 AND c.status='member'
       LEFT JOIN event_attendance_checkins ch ON ch.event_id=$2 AND ch.contact_id=c.id
       WHERE gm.group_id=ANY($3::uuid[]) AND gm.status='active'
-      GROUP BY c.id,ch.first_time_visitor,ch.checked_in_at ORDER BY c.last_name,c.first_name`, [departmentId, request.params.eventId, groupIds]);
-    const canViewPrivatePeople = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
+      GROUP BY c.id,ch.first_time_visitor,ch.checked_in_at ORDER BY c.last_name,c.first_name`, [departmentId, request.params.eventId, groupIds, canViewPrivatePeople]);
     const visitors = await pool!.query(`SELECT contact.id,contact.first_name AS "firstName",contact.last_name AS "lastName",
         CASE WHEN $3::boolean THEN contact.email ELSE NULL END AS email,CASE WHEN $3::boolean THEN contact.phone ELSE NULL END AS phone,
         checkin.first_time_visitor AS "firstTimeVisitor",checkin.checked_in_at AS "checkedInAt",ARRAY['Visitor']::text[] AS groups,true AS "isVisitor"
