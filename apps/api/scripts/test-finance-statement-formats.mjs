@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { parseCamt053 } from "../src/modules/finance/camt053.ts";
 import { parseMt940 } from "../src/modules/finance/mt940.ts";
+import { parsePaypalActivity } from "../src/modules/finance/paypal-activity.ts";
 
 const mt940 = [
   ":20:STATEMENT-FIXTURE",
@@ -61,5 +62,30 @@ assert.match(parseCamt053(camt.replace("108.05", "108.01")), /closing balance/);
 assert.match(parseCamt053(camt.replace("10.05", "10.051")), /exact cents/);
 assert.match(parseCamt053(camt.replace("<Cd>BOOK</Cd>", "<Cd>PDNG</Cd>")), /booked/i);
 assert.equal(typeof parseCamt053(camt.replace("camt.053", "camt.052")), "string");
+
+const paypalHeader = [
+  "Date", "Gross", "Fee", "Net", "Currency", "Balance", "Transaction ID", "Balance Impact", "Status", "Description",
+];
+const paypalRow = ["2026-01-02", "105.00", "-2.00", "103.00", "CHF", "203.00", "FIX-ENTRY-100", "Credit", "Completed", "Synthetic receipt"];
+const paypalMemo = ["2026-01-02", "", "", "", "", "", "", "Memo", "", "Synthetic note"];
+const parsePaypal = (rows, order) => parsePaypalActivity(
+  rows,
+  order,
+  value => /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null,
+  value => value.trim(),
+);
+const paypal = parsePaypal([paypalHeader, paypalRow, paypalMemo, paypalRow]);
+assert.equal(typeof paypal, "object");
+assert.equal(paypal.currency, "CHF");
+assert.equal(paypal.duplicateCount, 1);
+assert.equal(paypal.ignoredCount, 1);
+assert.equal(paypal.entries.length, 1);
+assert.deepEqual([paypal.entries[0].gross, paypal.entries[0].fee, paypal.entries[0].amount], [10500, -200, 10300]);
+assert.match(paypal.entries[0].fingerprint, /^[a-f0-9]{64}$/);
+assert.ok(!JSON.stringify(paypal).includes(paypalRow[6]));
+assert.match(parsePaypal([paypalHeader, ["01/02/2026", ...paypalRow.slice(1)]]), /date order/);
+assert.match(parsePaypal([paypalHeader, paypalRow.map((value, index) => index === 3 ? "104.00" : value)]), /gross, fee, net/);
+assert.match(parsePaypal([paypalHeader, paypalRow.map((value, index) => index === 8 ? "Pending" : value)]), /not settled/);
+assert.match(parsePaypal([paypalHeader, paypalRow, ["2026-01-03", ...paypalRow.slice(1)]]), /inconsistent booking data/);
 
 console.log("Finance statement format regressions passed.");
