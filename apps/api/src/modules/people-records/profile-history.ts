@@ -7,7 +7,11 @@ type Category = typeof categories[number];
 type TimelineQuery = { category?: Category; from?: string; through?: string; beforeTime?: string; beforeKey?: string };
 const pageSize = 50;
 
-export const visibleProfileHistory = `($3::boolean OR NOT h.managers_only) AND ($3::boolean OR h.action<>'field_updated' OR EXISTS (
+export const visibleProfileHistory = `($3::boolean OR NOT h.managers_only) AND ($3::boolean OR h.action NOT IN ('relationship_added','relationship_removed') OR NOT EXISTS (
+  SELECT 1 FROM people_record_relationship_types kind
+   WHERE kind.department_id=h.department_id AND kind.visibility='people_managers'
+     AND kind.id::text IN (h.before_value->>'relationship_type_id',h.after_value->>'relationshipTypeId')
+)) AND ($3::boolean OR h.action<>'field_updated' OR EXISTS (
   SELECT 1 FROM people_record_fields field
    WHERE field.department_id=h.department_id AND field.visibility='private_people'
      AND h.subject IN (field.id::text,field.field_key,'bulk:'||field.field_key)
