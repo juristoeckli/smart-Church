@@ -61,6 +61,8 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   const subscriptionRequest = useRef(false);
   const [groupId, setGroupId] = useState("");
   const [groupFilter, setGroupFilter] = useState("");
+  const [postSearch, setPostSearch] = useState("");
+  const [submittedPostSearch, setSubmittedPostSearch] = useState("");
   const [feedScope, setFeedScope] = useState<"all" | "mine" | "groups" | "following" | "hidden" | "expired">("all");
   const [visibility, setVisibility] = useState<"location" | "members">("location");
   const [title, setTitle] = useState("");
@@ -115,7 +117,8 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
     setError("");
     try {
       const parameters = new URLSearchParams({ scope: feedScope });
-      if (groupFilter) parameters.set("groupId", groupFilter);
+      if (feedScope === "groups" && groupFilter) parameters.set("groupId", groupFilter);
+      if (submittedPostSearch) parameters.set("q", submittedPostSearch);
       const sharedPostId = new URLSearchParams(window.location.search).get("communityPost")?.toLowerCase();
       const sharedPostKey = sharedPostId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(sharedPostId)
         ? departmentId + ":" + sharedPostId : "";
@@ -135,7 +138,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
     } catch (reason) {
       if (!signal?.aborted) setError(reason instanceof Error ? t(reason.message) : t("Could not load the community feed."));
     } finally { if (!signal?.aborted) setLoading(false); }
-  }, [departmentId, feedScope, groupFilter, language]);
+  }, [departmentId, feedScope, groupFilter, submittedPostSearch, language]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -422,7 +425,15 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
       {notifications.length ? <ul>{notifications.slice(0, 8).map((item) => <li key={item.id} className={item.readAt ? "is-read" : "is-unread"}><button type="button" onClick={() => void openNotification(item)}><span>{item.actorName ? `${item.actorName} ${t(item.summary)}` : item.summary}{item.postTitle ? ` · ${item.postTitle}` : ""}</span><time dateTime={item.createdAt}>{formatPostDate(item.createdAt)}</time></button></li>)}</ul> : <p>{t("You have no community notifications yet.")}</p>}
       <EmailHistory key={departmentId} departmentId={departmentId} t={t} />
     </section>
-    <div className="community-feed-filters"><label>{t("Show")}<select value={feedScope} onChange={(event) => setFeedScope(event.target.value as "all" | "mine" | "groups" | "following" | "hidden" | "expired")}><option value="all">{t("All posts")}</option><option value="groups">{t("Group posts")}</option><option value="following">{t("Following")}</option><option value="mine">{t("My posts")}</option><option value="hidden">{t("Hidden posts")}</option>{canReviewReports && <option value="expired">{t("Expired posts")}</option>}</select></label>{feedScope === "groups" && <label>{t("Group")}<select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="">{t("All my groups")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}{canReviewReports && <button type="button" className="community-post-details" onClick={() => { const next = !showReports; setShowReports(next); if (next) void loadReports(); }}>{showReports ? t("Hide reports") : t("Review reports")}</button>}</div>
+    <div className="community-feed-filters">
+      <form className="community-post-search" role="search" onSubmit={(event) => { event.preventDefault(); setSubmittedPostSearch(postSearch.trim()); }}>
+        <label>{t("Search posts")}<input type="search" value={postSearch} maxLength={100} onChange={(event) => {
+          setPostSearch(event.target.value);
+          if (!event.target.value.trim()) setSubmittedPostSearch("");
+        }} /></label>
+        <button type="submit" className="community-post-details">{t("Search")}</button>
+      </form>
+      <label>{t("Show")}<select value={feedScope} onChange={(event) => setFeedScope(event.target.value as "all" | "mine" | "groups" | "following" | "hidden" | "expired")}><option value="all">{t("All posts")}</option><option value="groups">{t("Group posts")}</option><option value="following">{t("Following")}</option><option value="mine">{t("My posts")}</option><option value="hidden">{t("Hidden posts")}</option>{canReviewReports && <option value="expired">{t("Expired posts")}</option>}</select></label>{feedScope === "groups" && <label>{t("Group")}<select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="">{t("All my groups")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}{canReviewReports && <button type="button" className="community-post-details" onClick={() => { const next = !showReports; setShowReports(next); if (next) void loadReports(); }}>{showReports ? t("Hide reports") : t("Review reports")}</button>}</div>
     {groupsLocationId === departmentId && <GroupSubscriptions key={departmentId} groups={groups} busy={subscriptionBusy}
       language={language} t={t} onToggle={(group) => void toggleSubscription(group)} />}
     {showReports && <section className="community-post-list" aria-label={t("Post reports")}><div className="community-feed-filters"><label>{t("Report status")}<select value={reportStatus} onChange={(event) => { const next = event.target.value as FeedReport["status"]; setReportStatus(next); void loadReports(next); }}><option value="open">{t("Open")}</option><option value="dismissed">{t("Dismissed")}</option><option value="actioned">{t("Actioned")}</option></select></label></div>{reports.length ? reports.map((report) => <article className="community-post-card" key={report.id}><header className="community-post-header"><div className="community-post-author"><strong>{report.title || t("Community update")}</strong><time>{t("Reported by")} {report.reporterName} · {formatPostDate(report.createdAt)}</time></div></header><p>{t("Post by")} {report.authorName} · {t(report.reason)}{report.details ? ` — ${report.details}` : ""}</p><p className="community-post-body">{report.body}</p>{report.status === "open" && <div className="community-post-actions"><button type="button" className="community-post-details" onClick={() => void reviewReport(report, "dismissed")}>{t("Dismiss report")}</button><button type="button" className="community-post-details" onClick={() => void reviewReport(report, "actioned")}>{t("Mark actioned")}</button></div>}</article>) : <p className="community-feed-empty">{t("There are no reports in this status.")}</p>}</section>}

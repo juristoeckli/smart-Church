@@ -618,8 +618,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.header("Cache-Control", "private, no-store").send({ posts: rows });
   });
 
-  app.get<{ Querystring: { scope?: "all" | "mine" | "groups" | "following" | "hidden" | "expired"; groupId?: string; postId?: string } }>("/api/modules/community-feed/posts", {
-    schema: { querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["all", "mine", "groups", "following", "hidden", "expired"] }, groupId: { type: "string", format: "uuid" }, postId: { type: "string", format: "uuid" } } } },
+  app.get<{ Querystring: { scope?: "all" | "mine" | "groups" | "following" | "hidden" | "expired"; groupId?: string; postId?: string; q?: string } }>("/api/modules/community-feed/posts", {
+    schema: { querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["all", "mine", "groups", "following", "hidden", "expired"] }, groupId: { type: "string", format: "uuid" }, postId: { type: "string", format: "uuid" }, q: { type: "string", maxLength: 100 } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     const departmentId = await resolveDepartmentId(request, reply);
@@ -635,7 +635,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             ON link.link_type='wiki' AND wiki_page.id=link.entity_id AND wiki_page.department_id=post.department_id
          WHERE link.post_id=post.id AND link.department_id=post.department_id
            AND (link.link_type<>'wiki' OR (wiki_page.id IS NOT NULL AND wiki_page.status='active' AND (
-             $7::boolean OR wiki_page.audience='location' OR (wiki_page.audience='group' AND EXISTS (
+             $8::boolean OR wiki_page.audience='location' OR (wiki_page.audience='group' AND EXISTS (
                SELECT 1 FROM group_members wiki_member JOIN department_memberships wiki_membership ON wiki_membership.contact_id=wiki_member.contact_id AND wiki_membership.department_id=post.department_id
                 WHERE wiki_member.group_id=wiki_page.audience_group_id AND wiki_member.status='active' AND wiki_membership.user_id=$2
              ))
@@ -668,8 +668,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND (COALESCE($4,'all')<>'following' OR EXISTS (SELECT 1 FROM community_post_subscriptions subscription WHERE subscription.user_id=$2 AND subscription.department_id=$1 AND subscription.group_id=post.group_id))
           AND ($5::uuid IS NULL OR post.group_id=$5)
           AND (CASE WHEN $4='hidden' THEN EXISTS (SELECT 1 FROM community_post_hidden hidden_row WHERE hidden_row.post_id=post.id AND hidden_row.user_id=$2) WHEN $4='expired' THEN TRUE ELSE NOT EXISTS (SELECT 1 FROM community_post_hidden hidden_row WHERE hidden_row.post_id=post.id AND hidden_row.user_id=$2) END)
+          AND ($7::text IS NULL OR post.id=$6::uuid OR strpos(lower(post.title),lower($7))>0 OR strpos(lower(post.body),lower($7))>0)
         ORDER BY (post.id=$6::uuid) DESC NULLS LAST,COALESCE(post.publish_at,post.created_at) DESC,post.id DESC LIMIT 100`,
-      [departmentId, currentUserId, request.activeDepartmentRole === "site_admin", request.query.scope ?? "all", request.query.groupId ?? null, request.query.postId ?? null, ...(wikiSchema.rows[0]?.present ? [canReadRestrictedWiki] : [])],
+      [departmentId, currentUserId, request.activeDepartmentRole === "site_admin", request.query.scope ?? "all", request.query.groupId ?? null, request.query.postId ?? null, request.query.q?.trim() || null, ...(wikiSchema.rows[0]?.present ? [canReadRestrictedWiki] : [])],
     );
     return result.rows;
   });
