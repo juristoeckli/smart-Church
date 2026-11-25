@@ -1,3 +1,4 @@
+import { registerCalendarBookingDecisions } from "./booking-decisions.js";
 import { addResourcesToNewCalendarAppointment, type CalendarCreatedBooking } from "./new-appointment-resources.js";
 import { resourceSelectionListSchema, type ResourceSelection } from "../../resource-booking-series-write.js";
 import { calendarImageMetadataSchema, defaultCalendarImageMetadata, normalizeCalendarImageMetadata, type CalendarImageMetadata } from "./image-metadata.js";
@@ -275,6 +276,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   registerCalendarTagDefinitions(app, context, (request) => canManageCalendar(request, "community", null));
   registerCalendarMeetingRequests(app, context, canManageCalendar);
   registerCalendarBookingDescriptions(app, context, canManageCalendar);
+  registerCalendarBookingDecisions(app, context, canManageCalendar);
   registerCalendarAgendaPublications(app, context, (request) => canManageCalendar(request, "community", null), hashFeedToken);
   const unavailable = (reply: Parameters<typeof responseError>[0]) => responseError(reply, 503, "The calendar is unavailable.");
   const userId = (request: FastifyRequest) => request.authenticatedUser!.id;
@@ -1006,13 +1008,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     const resourceLinks = await context.pool.query<{
       appointment_id: string; resource_booking_id: string; occurrence_start: string | null; name: string; status: string;
-      lead_in_minutes: number; cleanup_minutes: number; starts_at: Date; ends_at: Date;
+      lead_in_minutes: number; cleanup_minutes: number; starts_at: Date; ends_at: Date; can_manage_status: boolean;
     }>(
       `SELECT link.appointment_id,link.resource_booking_id,to_char(link.occurrence_start,'YYYY-MM-DD"T"HH24:MI:SS') AS occurrence_start,
               resource.name,booking.status,
               COALESCE((to_jsonb(booking)->>'lead_in_minutes')::int,0) AS lead_in_minutes,
               COALESCE((to_jsonb(booking)->>'cleanup_minutes')::int,0) AS cleanup_minutes,
-              booking.starts_at,booking.ends_at
+              booking.starts_at,booking.ends_at,
+              ($4 AND link.occurrence_start IS NOT NULL AND booking.ends_at>now() AND booking.status IN ('requested','approved')
+                AND NOT COALESCE((to_jsonb(booking)->>'is_intake_request')::boolean,false)
+                AND NOT EXISTS (SELECT 1 FROM church_calendar_resource_links other WHERE other.resource_booking_id=booking.id
+                  AND (other.appointment_id<>link.appointment_id OR other.occurrence_start IS DISTINCT FROM link.occurrence_start))) AS can_manage_status
          FROM church_calendar_resource_links link
          JOIN resource_bookings booking ON booking.id=link.resource_booking_id AND booking.department_id=$2
          JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=$2
@@ -1125,7 +1131,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const resourceBookings = [...seriesBookings, ...(links.get(`${row.id}:${original}`) ?? [])].map((booking) => ({
           id: booking.resource_booking_id, name: booking.name, status: booking.status,
           leadInMinutes: booking.lead_in_minutes, cleanupMinutes: booking.cleanup_minutes,
-          ...(booking.occurrence_start ? { scope: "occurrence", timeMismatch: !resourceWindow
+          ...(booking.occurrence_start ? { scope: "occurrence", canManageStatus: booking.can_manage_status, timeMismatch: !resourceWindow
             || booking.starts_at.getTime() !== Date.parse(resourceWindow.startsAtUtc) || booking.ends_at.getTime() !== Date.parse(resourceWindow.endsAtUtc) } : { scope: "series" }),
         }));
         output.push({

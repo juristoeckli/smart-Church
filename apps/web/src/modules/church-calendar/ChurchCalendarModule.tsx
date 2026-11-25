@@ -1,3 +1,4 @@
+import { CalendarBookingDecision } from "./CalendarBookingDecision";
 import { CalendarDraftResources, type CalendarDraftResource } from "./CalendarDraftResources";
 import { NewAppointmentImage, SavedAppointmentImage, emptyAppointmentImageMetadata } from "./AppointmentImage";
 import { CalendarEmailUpdates } from "./CalendarEmailUpdates";
@@ -26,7 +27,7 @@ type Recurrence = { frequency: Frequency; interval: number; weekdays: number[]; 
 type EventRegistration = { token: string; capacity: number | null; open: boolean; registered: number; waitlisted: number };
 type LinkedResourceBooking = {
   id: string; name: string; status: string; scope: "series" | "occurrence";
-  leadInMinutes: number; cleanupMinutes: number; timeMismatch?: boolean;
+  leadInMinutes: number; cleanupMinutes: number; timeMismatch?: boolean; canManageStatus?: boolean;
 };
 type MeetingRequestScope = "all" | "mine" | "invitations";
 const requestLabels = { pending: "Awaiting response", accepted: "Accepted", declined: "Declined" } as const;
@@ -943,6 +944,19 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
               appointmentId={editing.appointmentId} originalStart={editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}
               bookingId={booking.id} departmentId={departmentId} csrfToken={csrfToken}
             />}
+          {canManageCalendarResources && editing && booking.scope === "occurrence" && booking.canManageStatus
+            && (booking.status === "requested" || booking.status === "approved") && <CalendarBookingDecision
+            key={JSON.stringify([departmentId, accountId, editing.appointmentId, editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt, booking.id])}
+            appointmentId={editing.appointmentId} originalStart={editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}
+            bookingId={booking.id} departmentId={departmentId} csrfToken={csrfToken} status={booking.status}
+            timeMismatch={booking.timeMismatch} onChanged={(status) => {
+              setEditing((current) => current?.appointmentId === editing.appointmentId
+                ? { ...current, resourceBookings: current.resourceBookings?.map((item) => item.id === booking.id ? { ...item, status } : item) }
+                : current);
+              setNotice("Resource reservation " + status + ".");
+              void load();
+            }}
+          />}
           {onNavigateEntity && <button className="button button-secondary" type="button" onClick={() => onNavigateEntity("booking", booking.id)}>Open booking</button>}
         </li>)}</ul>
       </div>}

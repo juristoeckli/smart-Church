@@ -1,12 +1,13 @@
+import { canonicalTimeZone } from "../../calendar-time.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
-import { calendarOccurrenceExists, cleanLocalDateTime, type Recurrence } from "../../calendar-occurrences.js";
+import { calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, wallDate, type Recurrence } from "../../calendar-occurrences.js";
 import { isResourceBookingManager } from "../../resource-booking-policy.js";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 
 type CalendarScope = "personal" | "community" | "group";
-type CalendarPermission = (request: FastifyRequest, scope: CalendarScope, ownerId: string | null) => boolean;
+export type CalendarPermission = (request: FastifyRequest, scope: CalendarScope, ownerId: string | null) => boolean;
 type DescriptionParams = { id: string; originalStart: string; bookingId: string };
 type DescriptionInput = { description: string; expectedRevision: string };
 
@@ -17,9 +18,11 @@ const params = {
 } as const;
 const missing = "This linked reservation is no longer available to edit.";
 
-async function loadCalendarOccurrence(client: PoolClient, departmentId: string, appointmentId: string, originalStart: string, apply: boolean) {
-  const { rows: [appointment] } = await client.query<{ starts_at: string; recurrence: Recurrence | null; scope: CalendarScope; owner_user_id: string | null }>(
-    `SELECT to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,appointment.recurrence,calendar.scope,calendar.owner_user_id
+export async function loadCalendarOccurrence(client: PoolClient, departmentId: string, appointmentId: string, originalStart: string, apply: boolean) {
+  const { rows: [appointment] } = await client.query<{ starts_at: string; ends_at: string; all_day: boolean; time_zone: string | null; location_time_zone: string; recurrence: Recurrence | null; scope: CalendarScope; owner_user_id: string | null }>(
+    `SELECT to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
+            to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,
+            appointment.all_day,appointment.time_zone,site.time_zone AS location_time_zone,appointment.recurrence,calendar.scope,calendar.owner_user_id
        FROM church_calendar_appointments appointment
        JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
        JOIN departments site ON site.id=appointment.department_id AND 'resource-scheduler'=ANY(site.enabled_modules)
@@ -28,13 +31,24 @@ async function loadCalendarOccurrence(client: PoolClient, departmentId: string, 
       ${apply ? "FOR UPDATE OF appointment FOR SHARE OF calendar" : ""}`, [appointmentId, departmentId],
   );
   if (!appointment) return null;
-  const { rows: [occurrence] } = await client.query<{ cancelled: boolean; extra: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions
-          WHERE appointment_id=$1 AND original_start=$2::timestamp AND cancelled) AS cancelled,
-        EXISTS (SELECT 1 FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at=$2::timestamp) AS extra`,
+  const { rows: [occurrence] } = await client.query<{
+    cancelled: boolean; overrides: Record<string, unknown> | null; extraEnd: string | null;
+  }>(
+    `SELECT COALESCE(exception.cancelled,false) AS cancelled,exception.overrides,
+            to_char(extra.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS "extraEnd"
+       FROM (SELECT $1::uuid AS id,$2::timestamp AS original) target
+       LEFT JOIN church_calendar_appointment_exceptions exception ON exception.appointment_id=target.id AND exception.original_start=target.original
+       LEFT JOIN church_calendar_extra_dates extra ON extra.appointment_id=target.id AND extra.starts_at=target.original`,
     [appointmentId, originalStart],
   );
-  return !occurrence.cancelled && (occurrence.extra || calendarOccurrenceExists(appointment, originalStart)) ? appointment : null;
+  if (occurrence.cancelled || (!occurrence.extraEnd && !calendarOccurrenceExists(appointment, originalStart))) return null;
+  const override = occurrence.overrides ?? {};
+  const duration = wallDate(appointment.ends_at).getTime() - wallDate(appointment.starts_at).getTime();
+  const start = cleanLocalDateTime(override.startsAt) ?? originalStart;
+  const end = cleanLocalDateTime(override.endsAt) ?? occurrence.extraEnd ?? localDateTime(new Date(wallDate(originalStart).getTime() + duration));
+  const allDay = (override.allDay ?? appointment.all_day) === true;
+  const timeZone = appointment.time_zone ?? canonicalTimeZone(appointment.location_time_zone) ?? "UTC";
+  return { ...appointment, window: calendarBookingWindow(start, end, allDay, timeZone) };
 }
 
 export function registerCalendarBookingDescriptions(app: FastifyInstance, context: ModuleServerContext, canManageCalendar: CalendarPermission) {
