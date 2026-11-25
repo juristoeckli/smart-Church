@@ -1,3 +1,4 @@
+import { calendarSongUsageSql, overallSongUsageSql, songCalendarTablesSql } from "./song-usage.js";
 import { groupTypeDevelopmentSql, historicalGroupTypeOptionsSql } from "./group-type-development.js";
 import { monthlyRecordedFactsSql } from "./monthly-recorded-facts.js";
 import { groupAttendanceByRoleSql } from "./group-attendance-by-role.js";
@@ -13,7 +14,7 @@ import { groupGrowthSql, validGroupGrowthRange } from "./group-growth.js";
 import { canonicalTimeZone } from "../../calendar-time.js";
 
 type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-type-development" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-recorded-facts-monthly" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
-type ReportFilters = { from?: string; to?: string; groupId?: string; groupType?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week" };
+type ReportFilters = { from?: string; to?: string; groupId?: string; groupType?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week"; songBreakdown?: "calendar" };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null; run_history: { ranAt: string; status: string }[] };
 
@@ -43,7 +44,7 @@ const catalog = [
   { key: "event-registration-details" as const, title: "Event registration list", description: "Registrants, status and check-in details; requires private People access.", permission: "events" as const },
   { key: "check-in-trend" as const, title: "Check-in trend", description: "Daily check-in and first-time visitor totals.", permission: "events" as const },
   { key: "visitor-follow-up" as const, title: "Visitor follow-up", description: "First-time visitors and their follow-up state.", permission: "events" as const },
-  { key: "worship-song-usage" as const, title: "Worship song usage", description: "Songs used in service plans and the latest use date.", permission: "events" as const },
+  { key: "worship-song-usage" as const, title: "Worship song usage", description: "Songs used in service plans, with an optional community calendar and campus breakdown.", permission: "events" as const },
   { key: "resource-bookings" as const, title: "Resource bookings", description: "Booking volume and status by resource.", permission: "resources" as const },
   { key: "resource-utilization" as const, title: "Resource utilization", description: "Monthly approved/requested booking hours and booking status by resource.", permission: "resources" as const },
   { key: "finance-account-summary" as const, title: "Finance account summary", description: "Posted debit and credit totals by account and year.", permission: "finance" as const },
@@ -77,7 +78,7 @@ function validDate(value: unknown) {
 function normalizeFilters(input: unknown): ReportFilters | string {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  for (const key of Object.keys(value)) if (!["from", "to", "groupId", "groupType", "status", "followUpStatus", "accountingYear", "period"].includes(key)) return "This report includes an unsupported filter.";
+  for (const key of Object.keys(value)) if (!["from", "to", "groupId", "groupType", "status", "followUpStatus", "accountingYear", "period", "songBreakdown"].includes(key)) return "This report includes an unsupported filter.";
   const filters: ReportFilters = {};
   if (value.from !== undefined) { if (!validDate(value.from)) return "Choose a valid start date."; filters.from = String(value.from); }
   if (value.to !== undefined) { if (!validDate(value.to)) return "Choose a valid end date."; filters.to = String(value.to); }
@@ -103,6 +104,10 @@ function normalizeFilters(input: unknown): ReportFilters | string {
   if (value.period !== undefined) {
     if (value.period !== "month" && value.period !== "week") return "Choose weekly or monthly grouping.";
     filters.period = value.period;
+  }
+  if (value.songBreakdown !== undefined) {
+    if (value.songBreakdown !== "calendar") return "Choose a valid song breakdown.";
+    filters.songBreakdown = value.songBreakdown;
   }
   return filters;
 }
@@ -483,17 +488,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await db.query("SELECT event.event_date::text AS \"eventDate\",event.title AS \"eventTitle\",contact.first_name AS \"firstName\",contact.last_name AS \"lastName\",checkin.follow_up_status AS \"followUpStatus\",checkin.checked_in_at AS \"checkedInAt\" FROM event_attendance_checkins checkin JOIN service_events event ON event.id=checkin.event_id JOIN contacts contact ON contact.id=checkin.contact_id WHERE event.department_id=$1 AND contact.department_id=$1 AND checkin.first_time_visitor=TRUE AND ($2::date IS NULL OR event.event_date >= $2::date) AND ($3::date IS NULL OR event.event_date <= $3::date) AND ($4::text IS NULL OR checkin.follow_up_status=$4) ORDER BY event.event_date DESC,contact.last_name,contact.first_name LIMIT 3000", [departmentId, filters.from ?? null, filters.to ?? null, filters.followUpStatus ?? null]);
       rows = result.rows.map((row) => ({ ...row, checkedInAt: row.checkedInAt instanceof Date ? row.checkedInAt.toISOString() : String(row.checkedInAt ?? "") }));
     } else if (reportKey === "worship-song-usage") {
-      columns = [{ key: "songTitle", label: "Song" }, { key: "uses", label: "Uses" }, { key: "latestUse", label: "Latest use" }];
+      const breakdown = filters.songBreakdown === "calendar";
+      columns = [{ key: "songTitle", label: "Song" },
+        ...(breakdown ? [{ key: "calendar", label: "Community calendar" }, { key: "campus", label: "Campus" }] : []),
+        { key: "uses", label: "Uses" }, { key: "latestUse", label: "Latest use" }];
       const present = await db.query<{ present: boolean }>("SELECT to_regclass('public.worship_songs') IS NOT NULL AND to_regclass('public.worship_song_arrangements') IS NOT NULL AS present");
       if (!present.rows[0]?.present) throw new Error("Worship Planning is not installed for this site.");
-      const result = await db.query(
-        `SELECT song.title AS "songTitle",count(*)::int AS uses,max(event.event_date)::text AS "latestUse"
-           FROM service_events event CROSS JOIN LATERAL jsonb_array_elements(event.time_plan) item(value)
-           JOIN worship_songs song ON song.id=NULLIF(item.value->>'songId','')::uuid AND song.department_id=event.department_id
-          WHERE event.department_id=$1 AND ($2::date IS NULL OR event.event_date >= $2::date) AND ($3::date IS NULL OR event.event_date <= $3::date)
-          GROUP BY song.id,song.title ORDER BY uses DESC,song.title LIMIT 2000`,
-        [departmentId, filters.from ?? null, filters.to ?? null],
-      );
+      const calendar = breakdown && isServerModuleEnabled("church-calendar")
+        ? (await db.query<{ appointments: boolean; generations: boolean }>(songCalendarTablesSql)).rows[0] : undefined;
+      const sql = breakdown ? calendarSongUsageSql(Boolean(calendar?.appointments), Boolean(calendar?.generations)) : overallSongUsageSql;
+      const result = await db.query(sql, [departmentId, filters.from ?? null, filters.to ?? null]);
       rows = result.rows;
     } else if (reportKey === "resource-bookings") {
       columns = [{ key: "resourceName", label: "Resource" }, { key: "category", label: "Category" }, { key: "bookings", label: "Bookings" }, { key: "requested", label: "Requested" }, { key: "approved", label: "Approved" }, { key: "declined", label: "Declined" }, { key: "cancelled", label: "Cancelled" }];
@@ -602,7 +606,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.header("Cache-Control","private, no-store").send(result.rows.map(row => row.label));
   });
   app.get<{ Querystring: ExportFormatQuery & ReportFilters & { reportKey?: ReportKey } }>("/api/modules/reports/run", {
-    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { ...exportFormatQuery.properties, reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, groupType: { type: "string", maxLength: 85 }, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 }, period: { type: "string", enum: ["month", "week"] } } } },
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { ...exportFormatQuery.properties, reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, groupType: { type: "string", maxLength: 85 }, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 }, period: { type: "string", enum: ["month", "week"] }, songBreakdown: { type: "string", enum: ["calendar"] } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;

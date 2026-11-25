@@ -11,7 +11,7 @@ type ReportDefinition = { key: ReportKey; title: string; description: string; pe
 type ReportColumn = { key: string; label: string };
 type ReportResult = { reportKey: ReportKey; title: string; generatedAt: string; columns: ReportColumn[]; rows: Array<Record<string, string | number | boolean | null>> };
 type GroupOption = { id: string; name: string };
-type Filters = { from?: string; to?: string; groupId?: string; groupType?: string; status?: string; followUpStatus?: string; accountingYear?: string; period?: string };
+type Filters = { from?: string; to?: string; groupId?: string; groupType?: string; status?: string; followUpStatus?: string; accountingYear?: string; period?: string; songBreakdown?: string };
 type ScheduleStatus = "ready" | "unavailable" | "failed" | "too_large";
 const scheduleStatusLabels: Record<ScheduleStatus, string> = { ready: "Ready", unavailable: "Report unavailable", failed: "Failed", too_large: "Result too large" };
 type ScheduleFields = { notifyWhenReady?: boolean | null; scheduleDays?: 1 | 7 | null; nextRunAt?: string | null; lastRunAt?: string | null; lastRunStatus?: ScheduleStatus | null; runHistory?: { ranAt: string; status: ScheduleStatus }[] | null };
@@ -395,6 +395,13 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
         <label>Report<select value={reportKey} onChange={(event) => { setReportKey(event.target.value as ReportKey); setResult(null); }}><option value="">Select a report</option>{definitions.map((item) => <option key={item.key} value={item.key}>{item.title}</option>)}</select></label>
         {selected && <p className="reports-description">{selected.description}</p>}
         {["people-directory", "people-consent-history", "people-status-changes", "people-first-contact-trend", "group-growth", "group-type-development", "group-meeting-attendance", "group-attendance-by-role", "group-meeting-feedback", "group-lifecycle", "event-attendance", "event-recorded-facts-monthly", "event-staffing", "event-absence-conflicts", "event-service-plan", "event-registration-summary", "event-registration-details", "check-in-trend", "visitor-follow-up", "worship-song-usage", "resource-bookings", "resource-utilization", "finance-account-summary", "finance-donor-giving"].includes(reportKey) && <div className="reports-date-filters"><label>From<input required={reportKey === "event-absence-conflicts" || reportKey === "group-growth"} type="date" value={filters.from ?? ""} onChange={(event) => setFilter("from", event.target.value)} /></label><label>To<input required={reportKey === "event-absence-conflicts" || reportKey === "group-growth"} type="date" value={filters.to ?? ""} onChange={(event) => setFilter("to", event.target.value)} /></label></div>}
+        {reportKey === "worship-song-usage" && <div className="reports-date-filters">
+          <label>Break down by
+            <select value={filters.songBreakdown ?? ""} onChange={event => setFilter("songBreakdown", event.target.value)}>
+              <option value="">Overall</option><option value="calendar">Community calendar and campus</option>
+            </select>
+          </label>
+        </div>}
         {reportKey === "people-first-contact-trend" && <small>Choose a start and end date, up to 731 calendar days.</small>}
         {reportKey === "group-attendance-by-role" && <small>Choose a start and end date, up to 731 calendar days. Roles appear as Unknown when the records cannot establish a stable role for the meeting date.</small>}
         {reportKey === "event-recorded-facts-monthly" && <small>Choose a start and end date, up to 731 calendar days. Collection totals are shown separately for each currency.</small>}
