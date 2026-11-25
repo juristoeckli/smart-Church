@@ -105,3 +105,10 @@
 .schedule-calendar-absence{display:block;margin-top:3px;border-inline-start:2px solid currentColor;padding-inline-start:3px;color:#a82d3e;font-size:8px;font-weight:650;overflow-wrap:anywhere}
 .service-position-row .service-role-swap{grid-column:1/-1;display:flex;align-items:center;gap:6px}
 .worship-position .worship-position-swap{display:flex;align-items:center;gap:6px}
+
+.run-sheet-drag-handle{display:inline-grid;place-items:center;min-width:23px;color:var(--muted);cursor:grab}
+.run-sheet-drag-handle:not([draggable="true"]){cursor:default;opacity:.4}
+.run-sheet-drag-handle:active{cursor:grabbing}
+[data-run-sheet-drop="before"]{box-shadow:inset 0 2px var(--green)}
+[data-run-sheet-drop="after"]{box-shadow:inset 0 -2px var(--green)}
+.service-timeplan-order,.worship-plan-item-heading>div{flex-wrap:wrap}
