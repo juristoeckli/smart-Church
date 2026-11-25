@@ -92,7 +92,7 @@ type BankRow = { id: string; accountId: string; lineNumber: number; bookingDate:
 type StatementCounterLine = { key: string; accountId: string; costCenterId: string; amount: string };
 const newCounterLine = (): StatementCounterLine => ({ key: crypto.randomUUID(), accountId: "", costCenterId: "", amount: "" });
 type BankSuggestionRule = { id: string; accountId: string; accountCode: string; accountName: string; name: string; statementContains: string; transactionContains: string; priority: number; active: boolean };
-type BankPreview = { format?: "mt940"; accountEnding?: string; currency?: string; headers: string[]; rowCount: number; duplicate: boolean; sample: string[][] };
+type BankPreview = { format?: "mt940" | "camt053"; accountEnding?: string; currency?: string; headers: string[]; rowCount: number; duplicate: boolean; sample: string[][] };
 
 const money = (cents: number | string, currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(cents || 0) / 100);
 const today = () => new Date().toISOString().slice(0, 10);
@@ -187,7 +187,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [bankRows, setBankRows] = useState<BankRow[]>([]);
   const [selectedBankImportId, setSelectedBankImportId] = useState("");
   const [bankText, setBankText] = useState("");
-  const [bankFormat, setBankFormat] = useState<"csv" | "mt940">("csv");
+  const [bankFormat, setBankFormat] = useState<"csv" | "mt940" | "camt053">("csv");
   const [bankSourceConfirmed, setBankSourceConfirmed] = useState(false);
   const bankFileRead = useRef(0);
   const bankDepartment = useRef(departmentId);
@@ -475,13 +475,23 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
       const bytes = await file.arrayBuffer();
       const utf8 = new TextDecoder("utf-8");
       let content = utf8.decode(bytes);
+      const hasUtf16Bom = new Uint8Array(bytes).slice(0, 2);
+      const utf16 = hasUtf16Bom[0] === 0xff && hasUtf16Bom[1] === 0xfe ? "utf-16le"
+        : hasUtf16Bom[0] === 0xfe && hasUtf16Bom[1] === 0xff ? "utf-16be" : null;
+      if (utf16) content = new TextDecoder(utf16, { fatal: true }).decode(bytes);
+      const isCamt = /\.(?:xml|camt|053)$/i.test(file.name) || content.trimStart().startsWith("<");
       const isMt940 = /\.(mt940|sta|swi)$/i.test(file.name) || /(?:^|\r?\n):60[FM]:/.test(content);
-      if (isMt940) {
+      if (isCamt && !utf16) {
+        const declared = /^\s*<\?xml\s+[^?]*\bencoding\s*=\s*["']([^"']+)/i.exec(content.slice(0, 200))?.[1]?.toLowerCase();
+        const encoding = declared === "windows-1252" || declared === "iso-8859-1" ? declared : "utf-8";
+        if (declared && declared !== "utf-8" && encoding === "utf-8") throw new Error("Use a UTF-8 or supported XML statement encoding.");
+        content = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+      } else if (isMt940 && !isCamt) {
         try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
         catch { content = new TextDecoder("windows-1252").decode(bytes); }
       }
       if (read !== bankFileRead.current || bankDepartment.current !== departmentId) return;
-      setBankFormat(isMt940 ? "mt940" : "csv");
+      setBankFormat(isCamt ? "camt053" : isMt940 ? "mt940" : "csv");
       setBankText(content);
       setBankFileName(file.name);
     } catch {
@@ -503,10 +513,10 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
 
   async function importBankStatement() {
     if (!bankPreview || bankPreview.duplicate ||
-      (bankPreview.format === "mt940" ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)) return;
+      (bankPreview.format ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)) return;
     setSaving(true); setError(""); setFeedback("");
     try {
-      const result = await send<{ id: string; rowCount: number; suggestedCount: number }>("/api/modules/finance/bank-statements/import", "POST", { accountId: bankAccountId, fileName: bankFileName, [bankFormat]: bankText, ...(bankFormat === "mt940"
+      const result = await send<{ id: string; rowCount: number; suggestedCount: number }>("/api/modules/finance/bank-statements/import", "POST", { accountId: bankAccountId, fileName: bankFileName, [bankFormat]: bankText, ...(bankFormat !== "csv"
           ? { confirmSourceAccount: bankSourceConfirmed }
           : { mapping: { date: Number(bankMapping.date), amount: Number(bankMapping.amount),
             description: bankMapping.description === "" ? null : Number(bankMapping.description),
@@ -805,16 +815,16 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
           void action(() => send(`/api/modules/finance/accounting-years/${item.accountingYear}/journal-numbering`,"PUT",{enabled}),"Receipt numbering updated.");
         }} /> Automatic receipt numbers</label><button className="finance-text-button" type="button" disabled={saving} onClick={() => item.status === "open" ? void openAccountingYearSummary(item.accountingYear) : void setAccountingYearStatus(item, "open")}>{item.status === "open" ? "Close and carry forward" : "Reopen"}</button></div></td></tr>; })}</tbody></table></div> : <p className="finance-empty">No accounting years configured.</p>}
     </section>}
-    {tab === "bank-statements" && <section className="finance-section"><div className="finance-section-heading"><div><h2>Bank statements</h2><p>Import a CSV or MT940 statement, review matching suggestions, and link statement rows to existing ledger entries. Imports never create postings.</p></div><button className="button button-secondary" type="button" onClick={() => void openBankStatements()}><RefreshCw size={15} />Refresh</button></div>{canManage && <div className="finance-bank-import"><h3>Import a bank statement</h3><div className="finance-form-grid"><label>Bank asset account<select value={bankAccountId} disabled={saving} onChange={(event) => { setBankAccountId(event.target.value); setBankPreview(null); setBankSourceConfirmed(false); }}><option value="">Choose an account</option>{bootstrap.accounts.filter((account) => account.active && account.accountType === "asset").map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select></label><label>CSV or MT940 file
-      <input type="file" accept=".csv,.mt940,.sta,.swi,.txt,text/csv,text/plain" disabled={saving}
+    {tab === "bank-statements" && <section className="finance-section"><div className="finance-section-heading"><div><h2>Bank statements</h2><p>Import a CSV, MT940, or CAMT.053 statement, review matching suggestions, and link statement rows to existing ledger entries. Imports never create postings.</p></div><button className="button button-secondary" type="button" onClick={() => void openBankStatements()}><RefreshCw size={15} />Refresh</button></div>{canManage && <div className="finance-bank-import"><h3>Import a bank statement</h3><div className="finance-form-grid"><label>Bank asset account<select value={bankAccountId} disabled={saving} onChange={(event) => { setBankAccountId(event.target.value); setBankPreview(null); setBankSourceConfirmed(false); }}><option value="">Choose an account</option>{bootstrap.accounts.filter((account) => account.active && account.accountType === "asset").map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select></label><label>CSV, MT940, or CAMT.053 file
+      <input type="file" accept=".csv,.mt940,.sta,.swi,.txt,.xml,.camt,.053,text/csv,text/plain,application/xml,text/xml" disabled={saving}
         onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void readBankStatement(file); }} />
-    </label></div>{bankText && <div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => void previewBankStatement()} disabled={saving || !bankAccountId}>Preview file</button><span>{bankFileName}</span></div>}{bankPreview && <><p>{bankPreview.rowCount} statement rows found.{bankPreview.duplicate ? " This exact file was already imported for this account." : ""}</p>{bankPreview.format === "mt940" && <p>MT940 source account ending in {bankPreview.accountEnding} · {bankPreview.currency}</p>}
-    {bankPreview.format !== "mt940" && bankPreview.headers.length > 0 && <div className="finance-form-grid"><label>Date column<select value={bankMapping.date} onChange={(event) => setBankMapping({ ...bankMapping, date: event.target.value })}><option value="">Choose date column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label><label>Amount column<select value={bankMapping.amount} onChange={(event) => setBankMapping({ ...bankMapping, amount: event.target.value })}><option value="">Choose amount column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label>{(["description", "reference"] as const).map((key) => <label key={key}>{key === "description" ? "Description" : "Reference"} column<select value={bankMapping[key]} onChange={(event) => setBankMapping({ ...bankMapping, [key]: event.target.value })}><option value="">No column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label>)}</div>}{bankPreview.sample.length > 0 && <div className="finance-table-wrap"><table className="finance-table">
-      {bankPreview.format === "mt940" && <thead><tr>{bankPreview.headers.map(heading => <th key={heading} scope="col">{heading}</th>)}</tr></thead>}
-      <tbody>{bankPreview.sample.map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{value}</td>)}</tr>)}</tbody></table></div>}{bankPreview.format === "mt940" && <label>
+    </label></div>{bankText && <div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => void previewBankStatement()} disabled={saving || !bankAccountId}>Preview file</button><span>{bankFileName}</span></div>}{bankPreview && <><p>{bankPreview.rowCount} statement rows found.{bankPreview.duplicate ? " This exact file was already imported for this account." : ""}</p>{bankPreview.format && <p>{bankPreview.format === "mt940" ? "MT940" : "CAMT.053"} source account ending in {bankPreview.accountEnding} · {bankPreview.currency}</p>}
+    {!bankPreview.format && bankPreview.headers.length > 0 && <div className="finance-form-grid"><label>Date column<select value={bankMapping.date} onChange={(event) => setBankMapping({ ...bankMapping, date: event.target.value })}><option value="">Choose date column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label><label>Amount column<select value={bankMapping.amount} onChange={(event) => setBankMapping({ ...bankMapping, amount: event.target.value })}><option value="">Choose amount column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label>{(["description", "reference"] as const).map((key) => <label key={key}>{key === "description" ? "Description" : "Reference"} column<select value={bankMapping[key]} onChange={(event) => setBankMapping({ ...bankMapping, [key]: event.target.value })}><option value="">No column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label>)}</div>}{bankPreview.sample.length > 0 && <div className="finance-table-wrap"><table className="finance-table">
+      {bankPreview.format && <thead><tr>{bankPreview.headers.map(heading => <th key={heading} scope="col">{heading}</th>)}</tr></thead>}
+      <tbody>{bankPreview.sample.map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{value}</td>)}</tr>)}</tbody></table></div>}{bankPreview.format && <label>
       <input type="checkbox" checked={bankSourceConfirmed} onChange={event => setBankSourceConfirmed(event.target.checked)} />
       I confirm the statement belongs to the selected ledger account.
-    </label>}<div className="finance-action-row"><button className="button button-primary" type="button" onClick={() => void importBankStatement()} disabled={saving || bankPreview.duplicate || (bankPreview.format === "mt940" ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)}>Import and suggest matches</button></div></>}</div>}
+    </label>}<div className="finance-action-row"><button className="button button-primary" type="button" onClick={() => void importBankStatement()} disabled={saving || bankPreview.duplicate || (bankPreview.format ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)}>Import and suggest matches</button></div></>}</div>}
       <h3>Imported statements</h3>{bankImports.length ? <div className="finance-bank-import-list">{bankImports.map((item) => <button type="button" key={item.id} className={selectedBankImportId === item.id ? "is-selected" : ""} onClick={() => void openBankImport(item.id)}><strong>{item.fileName}</strong><small>{item.accountCode} · {item.accountName} · {new Date(item.importedAt).toLocaleString()}</small><small>{item.rowCount} rows · {item.matched} matched · {item.suggested} suggested · {item.unmatched} unmatched · {item.ignored} ignored</small></button>)}</div> : <p className="finance-empty">No statement imports yet.</p>}
       {selectedBankImportId && <><h3>Statement rows</h3>{bankRows.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>Date</th><th>Description / reference</th><th>Amount</th><th>Status</th><th>Ledger match</th>{canManage && <th>Action</th>}</tr></thead><tbody>{bankRows.map((row) => <tr key={row.id}><td>{new Date(`${row.bookingDate.slice(0, 10)}T00:00:00`).toLocaleDateString()}</td><td>{row.description}{row.reference && <small>{row.reference}</small>}</td><td>{money(row.amountCents, bootstrap.currency)}</td><td>{row.status}</td><td>{row.status === "matched" ? `${row.transactionReceipt ?? row.matchedTransactionId ?? "Matched"} · ${row.transactionText ?? ""}` : canManage && row.status !== "ignored" ? <select aria-label={`Ledger match for statement row ${row.lineNumber}`} value={bankMatchChoice[row.id] ?? ""} onChange={(event) => setBankMatchChoice({ ...bankMatchChoice, [row.id]: event.target.value })}><option value="">Choose a posting</option>{row.suggestedTransactionId && <option value={row.suggestedTransactionId}>Suggested: {row.transactionReceipt} · {row.transactionText}</option>}{transactions.map((transaction) => <option key={transaction.id} value={transaction.id}>{transaction.bookingDate} · {transaction.receiptNumber} · {transaction.bookingText}</option>)}</select> : row.status === "ignored" ? "Ignored" : row.transactionText ?? "No unique suggestion"}</td>{canManage && <td>{row.status !== "matched" && row.status !== "ignored" && <div className="finance-action-row"><button className="finance-text-button" type="button" disabled={saving || !(bankMatchChoice[row.id] ?? row.suggestedTransactionId)} onClick={() => void reconcileBankRow(row, "match")}>Match</button><button className="finance-text-button" type="button" disabled={saving} onClick={() => void reconcileBankRow(row, "ignore")}>Ignore</button>{row.status === "unmatched" && row.amountCents !== 0 &&
       transitAccounts.some(account => account.id === row.accountId) &&
