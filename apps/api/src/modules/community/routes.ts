@@ -12,7 +12,7 @@ import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.j
 import { completionFeedbackSchema, groupFeedbackEnabled, readGroupLeaderFeedback, saveGroupLeaderFeedback, type CompletionFeedback } from "../../group-leader-feedback.js";
 import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
 import { groupMemberDraftSchema, groupMembershipState, groupWaitlist, type GroupMembershipDraft } from "./group-waitlist.js";
-import { captureSignupAnswers, prepareSignupQuestions, readSignupForm, signupAnswerFields, signupSettingsSchema, type SignupSettings } from "./signup-form.js";
+import { setGroupPublicSignup, captureSignupAnswers, prepareSignupQuestions, readSignupForm, signupAnswerFields, signupSettingsSchema, type SignupSettings } from "./signup-form.js";
 import { previewGroupWaitlistPromotion, promotionBatchSize } from "./group-waitlist-promotion.js";
 import { checkGroupAdmissionCapacity } from "./signup-capacity.js";
 import { defaultSignupPolicy, editableSignupPolicy, normalizeSignupPolicy, signupState } from "./signup-policy.js";
@@ -494,13 +494,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
       if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "This group is managed by an external sync." });
       if (request.body.enabled && existing.rows[0].status !== "active") return reply.code(400).send({ error: "Public signup can only be enabled for active groups." });
-      const result = await pool!.query<{ public_signup_enabled: boolean; public_signup_token: string | null }>(
-        `UPDATE church_groups SET public_signup_enabled=$3,
-           public_signup_token=CASE WHEN $3 THEN COALESCE(public_signup_token,$4::uuid) ELSE NULL END, updated_at=now()
-         WHERE id=$1 AND department_id=$2 RETURNING public_signup_enabled,public_signup_token`,
-        [request.params.id, departmentId, request.body.enabled, randomUUID()],
-      );
-      return { enabled: result.rows[0].public_signup_enabled, ...(result.rows[0].public_signup_token ? { token: result.rows[0].public_signup_token } : {}) };
+      const result = await setGroupPublicSignup(pool!, departmentId, request.params.id, request.body.enabled);
+      if (!result) return reply.code(409).send({ error: "Group signup changed. Reload the group and try again." });
+      return { enabled: result.public_signup_enabled, ...(result.public_signup_token ? { token: result.public_signup_token } : {}) };
     });
 
     const signupFormParams = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;

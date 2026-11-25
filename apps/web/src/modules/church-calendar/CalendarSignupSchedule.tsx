@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-type Schedule = { leadDays: number; templateGroupId?: string | null };
+type Schedule = { leadDays: number; templateGroupId?: string | null; autoPublish?: boolean };
 
 export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken, templates }: {
   appointmentId: string; departmentId: string; csrfToken: string; templates: Array<{ id: string; name: string }>;
@@ -9,6 +9,7 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
   const [schedule, setSchedule] = useState<Schedule | null>();
   const [leadDays, setLeadDays] = useState("14");
   const [templateGroupId, setTemplateGroupId] = useState("");
+  const [autoPublish, setAutoPublish] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -22,6 +23,7 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
       setSchedule(body.schedule);
       setLeadDays(String(body.schedule?.leadDays ?? 14));
       setTemplateGroupId(body.schedule?.templateGroupId ?? "");
+      setAutoPublish(body.schedule?.autoPublish === true);
     }).catch((reason) => {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not load registration scheduling.");
     });
@@ -40,7 +42,7 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
       const body = await response.json() as { schedule: Schedule | null; error?: string };
       if (!response.ok) throw new Error(body.error ?? "Could not save registration scheduling.");
       setSchedule(body.schedule);
-      setMessage(next ? "Draft signup scheduling saved." : "Draft signup scheduling disabled.");
+      setMessage(next ? "Signup scheduling saved." : "Signup scheduling disabled.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save registration scheduling.");
     } finally { setBusy(false); }
@@ -48,12 +50,12 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
 
   const days = Number(leadDays);
   return <div className="church-calendar-extra-date wide">
-    <strong>Scheduled draft registration groups</strong>
-    <p>Create unpublished drafts as dates fall within the lead time. Disabling this schedule keeps existing groups.</p>
+    <strong>Scheduled registration groups</strong>
+    <p>Generate groups as dates fall within the lead time. Disabling this schedule keeps existing groups and leaves their current signup settings in place.</p>
     {error && <p role="alert">{error}</p>}
     {message && <p role="status">{message}</p>}
     {schedule !== undefined && <>
-      <small>{schedule ? `Scheduled ${schedule.leadDays} days ahead` : "Scheduling is disabled"}</small>
+      <small>{schedule ? `Scheduled ${schedule.leadDays} days ahead · ${schedule.autoPublish ? "Public signup" : "Unpublished drafts"}` : "Scheduling is disabled"}</small>
       <label>Days before each appointment
         <input inputMode="numeric" value={leadDays} onChange={(event) => setLeadDays(event.target.value)} />
       </label>
@@ -64,9 +66,13 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
           {templates.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
         </select>
       </label>}
+      <label className="church-calendar-check">
+        <input type="checkbox" checked={autoPublish} onChange={(event) => setAutoPublish(event.target.checked)} /> Publish signup automatically
+      </label>
+      {autoPublish && <small>The appointment title and signup form will be public. Requests use manager review. Signup closes when a timed appointment starts, or at the end of an all-day occurrence’s date.</small>}
       <button type="button" disabled={busy || !leadDays || !Number.isInteger(days) || days < 0 || days > 365}
-        onClick={() => void save({ leadDays: days, ...(templateGroupId ? { templateGroupId } : {}) })}>Save draft schedule</button>
-      {schedule && <button type="button" disabled={busy} onClick={() => void save(null)}>Disable draft schedule</button>}
+        onClick={() => void save({ leadDays: days, autoPublish, ...(templateGroupId ? { templateGroupId } : {}) })}>Save signup schedule</button>
+      {schedule && <button type="button" disabled={busy} onClick={() => void save(null)}>Disable signup schedule</button>}
     </>}
   </div>;
 }

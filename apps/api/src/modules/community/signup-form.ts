@@ -72,3 +72,13 @@ export function captureSignupAnswers(form: Pick<SignupForm, "revision" | "questi
   }
   return { saved } as const;
 }
+
+export async function setGroupPublicSignup(db: Pick<PoolClient, "query">, departmentId: string, groupId: string, enabled: boolean) {
+  return (await db.query<{ public_signup_enabled: boolean; public_signup_token: string | null }>(
+    `UPDATE church_groups SET public_signup_enabled=$3,
+       public_signup_token=CASE WHEN $3 THEN COALESCE(public_signup_token,$4::uuid) ELSE NULL END, updated_at=now()
+     WHERE id=$1 AND department_id=$2 AND source_system IS NULL AND (NOT $3 OR status='active')
+     RETURNING public_signup_enabled,public_signup_token`,
+    [groupId, departmentId, enabled, enabled ? randomUUID() : null],
+  )).rows[0];
+}

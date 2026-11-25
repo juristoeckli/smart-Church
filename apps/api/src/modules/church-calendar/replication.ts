@@ -7,7 +7,7 @@ const tables = {
   calendars: { name: "church_calendar_calendars", key: "id", columns: "id name scope group_id owner_user_id color created_by created_at updated_at archived_at sort_order allow_member_appointments default_service_plan_template_id historical_actor_id historical_actor_name" },
   appointments: { name: "church_calendar_appointments", key: "id", columns: "id calendar_id title subtitle description starts_at ends_at all_day place url internal_only tags recurrence linked_event_id signup_group_id responsible_contact_id time_zone created_by created_at updated_at archived_at historical_actor_id historical_actor_name" },
   exceptions: { name: "church_calendar_appointment_exceptions", key: "appointment_id,original_start", columns: "appointment_id original_start cancelled overrides updated_by updated_at historical_actor_id historical_actor_name", child: true },
-  signupSchedules: { name: "church_calendar_signup_schedules", key: "appointment_id", columns: "appointment_id lead_days template_group_id created_by", child: true },
+  signupSchedules: { name: "church_calendar_signup_schedules", key: "appointment_id", columns: "appointment_id lead_days template_group_id created_by auto_publish", child: true },
   dates: { name: "church_calendar_extra_dates", key: "appointment_id,starts_at", columns: "appointment_id starts_at ends_at created_by historical_actor_id historical_actor_name", child: true },
   images: { name: "church_calendar_appointment_images", key: "appointment_id", columns: "appointment_id content_type filename content uploaded_by updated_at historical_actor_id historical_actor_name image_metadata revision" },
   templates: { name: "church_calendar_appointment_templates", key: "id", columns: "id calendar_id name title subtitle description place url internal_only tags" },
@@ -24,7 +24,7 @@ const tables = {
 } satisfies Record<string, { name: string; columns: string; key: string; child?: boolean }>;
 type Table = keyof typeof tables;
 type Row = Record<string, unknown>;
-type Snapshot = { version: 5; calendarBookingEvidence?: string } & Record<Table, Row[]>;
+type Snapshot = { version: 6; calendarBookingEvidence?: string } & Record<Table, Row[]>;
 const keys = Object.keys(tables) as Table[];
 const wallTimes = new Set(["starts_at", "ends_at", "original_start", "occurrence_start"]);
 const tokenTables = ["feeds", "agendaPublications", "subscriptions"] as const;
@@ -39,7 +39,7 @@ function record(value: unknown): value is Row {
 }
 
 function readSnapshot(input: unknown): Snapshot {
-  if (!record(input) || input.version !== 5) throw new Error("The Church Calendar snapshot is invalid.");
+  if (!record(input) || input.version !== 6) throw new Error("The Church Calendar snapshot is invalid.");
   for (const key of keys) {
     const columns = tables[key].columns.split(" ");
     const rows = input[key];
@@ -99,7 +99,7 @@ function assertDependencies(snapshot: Snapshot, core: unknown) {
     throw new Error("Church Calendar references missing calendars, appointments, group audiences, service templates or agenda publications.");
   }
   if (snapshot.signupSchedules.some((row) => !Number.isInteger(row.lead_days) || Number(row.lead_days) < 0
-      || Number(row.lead_days) > 365 || (row.template_group_id !== null && !groups.has(row.template_group_id)))) {
+      || Number(row.lead_days) > 365 || typeof row.auto_publish !== "boolean" || (row.template_group_id !== null && !groups.has(row.template_group_id)))) {
     throw new Error("A Church Calendar signup schedule has an invalid lead time or references a template outside the Core location.");
   }
   const fields = [
@@ -129,7 +129,7 @@ function assertDependencies(snapshot: Snapshot, core: unknown) {
 }
 
 async function collect(client: Pick<PoolClient, "query">, departmentId: string): Promise<Snapshot> {
-  const snapshot = { version: 5 } as Snapshot;
+  const snapshot = { version: 6 } as Snapshot;
   for (const key of keys) {
     const table = tables[key];
     const columns = table.columns.split(" ").map((column) => {
@@ -188,7 +188,7 @@ export function registerCalendarReplication(context: ModuleServerContext) {
     return totals.rows[0].count;
   };
   context.replication.register({
-    schemaVersion: "5",
+    schemaVersion: "6",
     async requiresSnapshot(departmentId) {
       if (!pool || !isDatabaseReady()) return false;
       return Boolean(await count(pool, departmentId) || (await blockers(pool, departmentId)).length);

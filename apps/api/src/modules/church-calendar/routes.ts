@@ -1556,9 +1556,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").header("X-Calendar-Image-Revision", file.revision).send(file.content);
   });
 
-  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string; newResourceBookings?: ResourceSelection[]; newSignupGroup?: { templateGroupId?: string; throughDate?: string; leadDays?: number } } }>("/api/modules/church-calendar/appointments", { schema: { body: {
+  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string; newResourceBookings?: ResourceSelection[]; newSignupGroup?: { templateGroupId?: string; throughDate?: string; leadDays?: number; autoPublish?: boolean } } }>("/api/modules/church-calendar/appointments", { schema: { body: {
     type: "object", additionalProperties: false, required: ["calendarId", "title", "startsAt", "endsAt"],
-    properties: { newSignupGroup: { type: "object", additionalProperties: false, properties: { templateGroupId: { type: "string", format: "uuid" }, throughDate: { type: "string", format: "date" }, leadDays: signupLeadDaysSchema } }, newResourceBookings: resourceSelectionListSchema, createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
+    properties: { newSignupGroup: { type: "object", additionalProperties: false, properties: { templateGroupId: { type: "string", format: "uuid" }, throughDate: { type: "string", format: "date" }, leadDays: signupLeadDaysSchema, autoPublish: { type: "boolean" } } }, newResourceBookings: resourceSelectionListSchema, createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
   } } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -1593,6 +1593,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return responseError(reply, 400, "Create registration groups from a community appointment without an existing signup link or internal visibility.");
       }
       const throughDate = newSignupGroup.throughDate;
+      if (newSignupGroup.autoPublish && newSignupGroup.leadDays === undefined) {
+        return responseError(reply, 400, "Automatic public signup requires a lead-day schedule.");
+      }
       if (newSignupGroup.leadDays !== undefined && throughDate) {
         return responseError(reply, 400, "Choose either scheduled draft creation or immediate creation through a date.");
       }
@@ -1750,7 +1753,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         createdSignupGroupIds.push(groupId);
       }
       if (newSignupGroup?.leadDays !== undefined) {
-        await setSignupSchedule(client, id, userId(request), { leadDays: newSignupGroup.leadDays, templateGroupId: newSignupGroup.templateGroupId });
+        await setSignupSchedule(client, id, userId(request), { leadDays: newSignupGroup.leadDays, templateGroupId: newSignupGroup.templateGroupId, autoPublish: newSignupGroup.autoPublish });
       }
       if (newSignupGroup?.templateGroupId && createdSignupGroupIds.length) {
         await copyRegistrationForm(client, departmentId, newSignupGroup.templateGroupId, createdSignupGroupIds);
@@ -1965,8 +1968,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           [newId, departmentId, row.calendar_id, values.title, values.subtitle, values.description, next.startsAt, next.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, JSON.stringify(plan.futureRule), eventId, signupGroupId, responsibleContactId, userId(request), timeZone],
         );
         await client.query(
-          `INSERT INTO church_calendar_signup_schedules(appointment_id,lead_days,template_group_id,created_by)
-            SELECT $2,lead_days,template_group_id,created_by FROM church_calendar_signup_schedules WHERE appointment_id=$1`,
+          `INSERT INTO church_calendar_signup_schedules(appointment_id,lead_days,template_group_id,created_by,auto_publish)
+            SELECT $2,lead_days,template_group_id,created_by,auto_publish FROM church_calendar_signup_schedules WHERE appointment_id=$1`,
           [row.id, newId],
         );
         await client.query("UPDATE church_calendar_extra_dates SET appointment_id=$2 WHERE appointment_id=$1 AND starts_at>$3::timestamp", [row.id, newId, occurrenceStart]);
