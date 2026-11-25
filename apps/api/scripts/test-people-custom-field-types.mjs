@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { parsePeopleNumber, validPeopleNumber } from "../src/modules/people-records/number-field.ts";
 import { normalizeMultilineField } from "../src/modules/people-records/multiline-field.ts";
 import { normalizePeopleLocalDateTime } from "../src/modules/people-records/local-datetime.ts";
+import { parsePeopleChoices, validPeopleChoices } from "../src/modules/people-records/multiselect-field.ts";
 
 assert.equal(parsePeopleNumber(" -12.75 "), -12.75);
 assert.equal(parsePeopleNumber("+2.5e2"), 250);
@@ -31,5 +32,16 @@ assert.equal(normalizePeopleLocalDateTime("2026-10-25T02:30:45"), "2026-10-25T02
 for (const invalid of [null, "0000-01-01T00:00", "2025-02-29T08:15", "2026-01-02", "2026-01-02T24:00", "2026-01-02T08:15Z", "2026-01-02T08:15+01:00"]) {
   assert.equal(normalizePeopleLocalDateTime(invalid), null);
 }
+
+const allowedChoices = ["One", "Two, also", "Three"];
+assert.deepEqual(parsePeopleChoices('["Two, also","One"]', allowedChoices), ["Two, also", "One"]);
+assert.deepEqual(parsePeopleChoices("[]", allowedChoices), []);
+assert.equal(parsePeopleChoices('["One","One"]', allowedChoices), null);
+assert.equal(parsePeopleChoices('["Two"]', allowedChoices), null);
+assert.equal(parsePeopleChoices('"One"', allowedChoices), null);
+assert.equal(parsePeopleChoices("[1]", allowedChoices), null);
+assert.equal(parsePeopleChoices("unquoted", allowedChoices), null);
+const tooMany = Array.from({ length: 101 }, (_, index) => String(index));
+assert.ok(!validPeopleChoices(tooMany, tooMany));
 
 console.log("People custom field type regressions passed.");
