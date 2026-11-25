@@ -151,7 +151,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
   const [view, setView] = useState<View>("month");
   const [confirmRemoval, setConfirmRemoval] = useState(false);
   const [createEventTemplateId, setCreateEventTemplateId] = useState("");
-  const [newSignupGroup, setNewSignupGroup] = useState<{ templateGroupId: string; throughDate: string; scheduled: boolean; leadDays: string; autoPublish: boolean }>();
+  const [newSignupGroup, setNewSignupGroup] = useState<{ templateGroupId: string; throughDate: string; scheduled: boolean; leadDays: string; autoPublish: boolean; deactivateAfterDays: string }>();
   const [newResourceBookings, setNewResourceBookings] = useState<CalendarDraftResource[]>([]);
   const layoutScope = JSON.stringify([accountId, departmentId]);
   const layoutKey = accountId ? "smart-church-calendar-compact:" + layoutScope : undefined;
@@ -476,7 +476,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
         ? { signupGroupId: draft.signupGroupId || null } : {}),
       ...(canCreateSignupGroup && newSignupGroup ? { newSignupGroup: {
         ...(newSignupGroup.templateGroupId ? { templateGroupId: newSignupGroup.templateGroupId } : {}),
-        ...(newSignupGroup.scheduled ? { leadDays: Number(newSignupGroup.leadDays), autoPublish: newSignupGroup.autoPublish } : draft.repeat ? { throughDate: newSignupGroup.throughDate } : {}),
+        ...(newSignupGroup.scheduled ? { leadDays: Number(newSignupGroup.leadDays), autoPublish: newSignupGroup.autoPublish, ...(newSignupGroup.autoPublish && newSignupGroup.deactivateAfterDays ? { deactivateAfterDays: Number(newSignupGroup.deactivateAfterDays) } : {}) } : draft.repeat ? { throughDate: newSignupGroup.throughDate } : {}),
       } } : {}),
       ...(choices.canSelectPeople ? { responsibleContactId: draft.responsibleContactId || null } : {}),
     } : {}), ...(editing ? { occurrenceStartAt: editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt, ...(editing.canManage && notifyCreator ? { notifyCreator } : {}) } : {}) };
@@ -1001,7 +1001,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
           <option value={editing.signupGroupId}>{editing.signupGroupName ?? "Linked registration group"}</option>}
         {choices.signupGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select><small>Existing public group signup page.</small></label>{canCreateSignupGroup && <div className="church-calendar-extra-date wide">
         <label className="church-calendar-check"><input type="checkbox" checked={!!newSignupGroup}
-          onChange={(event) => setNewSignupGroup(event.target.checked ? { templateGroupId: "", throughDate: draft.endsOn, scheduled: false, leadDays: "14", autoPublish: false } : undefined)} /> {draft.repeat ? "Create registration groups for this series" : "Create a registration group"}</label>
+          onChange={(event) => setNewSignupGroup(event.target.checked ? { templateGroupId: "", throughDate: draft.endsOn, scheduled: false, leadDays: "14", autoPublish: false, deactivateAfterDays: "" } : undefined)} /> {draft.repeat ? "Create registration groups for this series" : "Create a registration group"}</label>
         {newSignupGroup && <>
           <label>When to create registration drafts
             <select value={newSignupGroup.scheduled ? "scheduled" : "now"}
@@ -1020,6 +1020,11 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
                 onChange={(event) => setNewSignupGroup({ ...newSignupGroup, autoPublish: event.target.checked })} /> Publish signup automatically
             </label>
             {newSignupGroup.autoPublish && <small>The appointment title and signup form will be public. Requests use manager review. Signup closes when a timed appointment starts, or at the end of an all-day occurrence’s date.</small>}
+            {newSignupGroup.autoPublish && <label>End group this many days after signup closes
+              <input type="number" min={0} max={365} placeholder="Leave active" value={newSignupGroup.deactivateAfterDays}
+                onChange={(event) => setNewSignupGroup({ ...newSignupGroup, deactivateAfterDays: event.target.value })} />
+              <small>Optional. Ending removes the public signup link and keeps members and history.</small>
+            </label>}
           </>}
           {draft.repeat && !newSignupGroup.scheduled && <label>Generate registration groups through
             <input type="date" required min={draft.startsAt.slice(0, 10)} value={newSignupGroup.throughDate}

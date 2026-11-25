@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-type Schedule = { leadDays: number; templateGroupId?: string | null; autoPublish?: boolean };
+type Schedule = { leadDays: number; templateGroupId?: string | null; autoPublish?: boolean; deactivateAfterDays?: number | null };
 
 export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken, templates }: {
   appointmentId: string; departmentId: string; csrfToken: string; templates: Array<{ id: string; name: string }>;
@@ -10,6 +10,7 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
   const [leadDays, setLeadDays] = useState("14");
   const [templateGroupId, setTemplateGroupId] = useState("");
   const [autoPublish, setAutoPublish] = useState(false);
+  const [deactivateAfterDays, setDeactivateAfterDays] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -24,6 +25,7 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
       setLeadDays(String(body.schedule?.leadDays ?? 14));
       setTemplateGroupId(body.schedule?.templateGroupId ?? "");
       setAutoPublish(body.schedule?.autoPublish === true);
+      setDeactivateAfterDays(body.schedule?.deactivateAfterDays == null ? "" : String(body.schedule.deactivateAfterDays));
     }).catch((reason) => {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not load registration scheduling.");
     });
@@ -49,6 +51,8 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
   }
 
   const days = Number(leadDays);
+  const deactivationDays = Number(deactivateAfterDays);
+  const validDeactivation = !autoPublish || !deactivateAfterDays || (Number.isInteger(deactivationDays) && deactivationDays >= 0 && deactivationDays <= 365);
   return <div className="church-calendar-extra-date wide">
     <strong>Scheduled registration groups</strong>
     <p>Generate groups as dates fall within the lead time. Disabling this schedule keeps existing groups and leaves their current signup settings in place.</p>
@@ -70,8 +74,12 @@ export function CalendarSignupSchedule({ appointmentId, departmentId, csrfToken,
         <input type="checkbox" checked={autoPublish} onChange={(event) => setAutoPublish(event.target.checked)} /> Publish signup automatically
       </label>
       {autoPublish && <small>The appointment title and signup form will be public. Requests use manager review. Signup closes when a timed appointment starts, or at the end of an all-day occurrence’s date.</small>}
-      <button type="button" disabled={busy || !leadDays || !Number.isInteger(days) || days < 0 || days > 365}
-        onClick={() => void save({ leadDays: days, autoPublish, ...(templateGroupId ? { templateGroupId } : {}) })}>Save signup schedule</button>
+      {autoPublish && <label>End group this many days after signup closes
+        <input inputMode="numeric" placeholder="Leave active" value={deactivateAfterDays} onChange={(event) => setDeactivateAfterDays(event.target.value)} />
+        <small>Optional. Use 0–365 days. Ending removes the public signup link and keeps members and history.</small>
+      </label>}
+      <button type="button" disabled={busy || !leadDays || !Number.isInteger(days) || days < 0 || days > 365 || !validDeactivation}
+        onClick={() => void save({ leadDays: days, autoPublish, ...(autoPublish && deactivateAfterDays ? { deactivateAfterDays: deactivationDays } : {}), ...(templateGroupId ? { templateGroupId } : {}) })}>Save signup schedule</button>
       {schedule && <button type="button" disabled={busy} onClick={() => void save(null)}>Disable signup schedule</button>}
     </>}
   </div>;

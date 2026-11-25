@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { setGroupPublicSignup } from "../community/signup-form.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -6,13 +7,14 @@ import { appointmentWallTime, canonicalTimeZone, resolveAppointmentWallTime } fr
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import { copyRegistrationForm, createDraftRegistrationGroup, lockRegistrationTemplate } from "./registration-groups.js";
 
-type SignupSchedule = { leadDays: number; templateGroupId?: string; autoPublish?: boolean };
+type SignupSchedule = { leadDays: number; templateGroupId?: string; autoPublish?: boolean; deactivateAfterDays?: number };
 type Appointment = {
   id: string; department_id: string; title: string; time_zone: string | null; site_zone: string;
   starts_at: string; recurrence: Recurrence | null; signup_group_id: string | null; internal_only: boolean; all_day: boolean;
 };
-type StoredSchedule = { lead_days: number; template_group_id: string | null; created_by: string | null; auto_publish: boolean };
+type StoredSchedule = { lead_days: number; template_group_id: string | null; created_by: string | null; auto_publish: boolean; deactivate_after_days: number | null };
 type Occurrence = { original: string; scheduled: string; all_day: boolean };
+export const signupDeactivateDaysSchema = { type: "integer", minimum: 0, maximum: 365 } as const;
 export const signupLeadDaysSchema = { type: "integer", minimum: 0, maximum: 365 } as const;
 const format = `'YYYY-MM-DD"T"HH24:MI:SS'`;
 
@@ -22,10 +24,10 @@ export async function setSignupSchedule(client: PoolClient, appointmentId: strin
     return;
   }
   await client.query(
-    `INSERT INTO church_calendar_signup_schedules(appointment_id,lead_days,template_group_id,created_by,auto_publish)
-       VALUES($1,$2,$3,$4,$5) ON CONFLICT(appointment_id) DO UPDATE
-       SET lead_days=EXCLUDED.lead_days,template_group_id=EXCLUDED.template_group_id,created_by=EXCLUDED.created_by,auto_publish=EXCLUDED.auto_publish`,
-    [appointmentId, schedule.leadDays, schedule.templateGroupId ?? null, actorId, schedule.autoPublish === true],
+    `INSERT INTO church_calendar_signup_schedules(appointment_id,lead_days,template_group_id,created_by,auto_publish,deactivate_after_days)
+       VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(appointment_id) DO UPDATE
+       SET lead_days=EXCLUDED.lead_days,template_group_id=EXCLUDED.template_group_id,created_by=EXCLUDED.created_by,auto_publish=EXCLUDED.auto_publish,deactivate_after_days=EXCLUDED.deactivate_after_days`,
+    [appointmentId, schedule.leadDays, schedule.templateGroupId ?? null, actorId, schedule.autoPublish === true, schedule.deactivateAfterDays ?? null],
   );
 }
 
@@ -45,7 +47,7 @@ export function registerCalendarSignupSchedule(app: FastifyInstance, context: Mo
     if (!canManage(request)) return reply.code(403).send({ error: "Calendar and group management access is required." });
     if (!context.pool || !context.isDatabaseReady()) return reply.code(503).send({ error: "Church Calendar is unavailable." });
     const result = await context.pool.query(
-      `SELECT schedule.lead_days AS "leadDays",schedule.template_group_id AS "templateGroupId",schedule.auto_publish AS "autoPublish"
+      `SELECT schedule.lead_days AS "leadDays",schedule.template_group_id AS "templateGroupId",schedule.auto_publish AS "autoPublish",schedule.deactivate_after_days AS "deactivateAfterDays"
        ${scopedAppointment} LEFT JOIN church_calendar_signup_schedules schedule ON schedule.appointment_id=appointment.id
        WHERE ${communityAppointment}`, [request.params.id, departmentId],
     );
@@ -55,7 +57,7 @@ export function registerCalendarSignupSchedule(app: FastifyInstance, context: Mo
   app.put<Req>(url, { schema: { params, body: {
     type: "object", additionalProperties: false, required: ["schedule"], properties: { schedule: {
       anyOf: [{ type: "null" }, { type: "object", additionalProperties: false, required: ["leadDays"],
-        properties: { leadDays: signupLeadDaysSchema, autoPublish: { type: "boolean" }, templateGroupId: { type: "string", format: "uuid" } } }],
+        properties: { leadDays: signupLeadDaysSchema, autoPublish: { type: "boolean" }, deactivateAfterDays: signupDeactivateDaysSchema, templateGroupId: { type: "string", format: "uuid" } } }],
     } },
   } } }, async (request, reply) => {
     if (!context.validateMutation(request, reply)) return reply;
@@ -79,6 +81,10 @@ export function registerCalendarSignupSchedule(app: FastifyInstance, context: Mo
         return reply.code(404).send({ error: "The appointment was not found." });
       }
       const schedule = request.body.schedule;
+      if (schedule?.deactivateAfterDays !== undefined && !schedule.autoPublish) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Automatic group ending requires automatic public signup." });
+      }
       if (schedule && (row.internal_only || row.signup_group_id || !row.groupsEnabled || !isServerModuleEnabled("community"))) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "Scheduling requires a community appointment without a series-wide signup link and Groups enabled." });
@@ -112,7 +118,9 @@ async function canPublishScheduledSignup(client: PoolClient, departmentId: strin
   return Boolean(result.rowCount);
 }
 
-async function publishScheduledSignup(client: PoolClient, departmentId: string, groupId: string, closesAt: Date) {
+const signupTokenHash = (token: string) => createHash("sha256").update(token).digest("hex");
+
+async function publishScheduledSignup(client: PoolClient, departmentId: string, groupId: string, closesAt: Date, deactivateAt: Date | null) {
   // The native signup form retains manager review and rejects requests once its window closes.
   await client.query(
     `INSERT INTO group_signup_forms(group_id,department_id,revision,questions,closes_at)
@@ -121,9 +129,12 @@ async function publishScheduledSignup(client: PoolClient, departmentId: string, 
     [groupId, departmentId, closesAt],
   );
   const active = await client.query("UPDATE church_groups SET status='active',updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system IS NULL AND status='draft'", [groupId, departmentId]);
-  if (active.rowCount !== 1 || !await setGroupPublicSignup(client, departmentId, groupId, true)) {
-    throw new Error("Could not activate the scheduled registration group.");
-  }
+  const published = active.rowCount === 1 ? await setGroupPublicSignup(client, departmentId, groupId, true) : null;
+  if (!published?.public_signup_token) throw new Error("Could not activate the scheduled registration group.");
+  if (deactivateAt) await client.query(
+    `INSERT INTO church_calendar_signup_deactivations(group_id,department_id,deactivate_at,signup_closes_at,signup_token_hash)
+      VALUES($1,$2,$3,$4,$5)`, [groupId, departmentId, deactivateAt, closesAt, signupTokenHash(published.public_signup_token)],
+  );
 }
 
 async function generate(client: PoolClient, appointment: Appointment, schedule: StoredSchedule, now: number) {
@@ -178,7 +189,7 @@ async function generate(client: PoolClient, appointment: Appointment, schedule: 
   if (schedule.template_group_id && await lockRegistrationTemplate(client, appointment.department_id, schedule.template_group_id)) return 0;
   await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [schedule.created_by]);
   const created: string[] = [];
-  const toPublish: Array<{ id: string; closesAt: Date }> = [];
+  const toPublish: Array<{ id: string; closesAt: Date; deactivateAt: Date | null }> = [];
   for (const { original, scheduled, closesAt } of due) {
     const groupId = await createDraftRegistrationGroup(client, appointment.department_id, appointment.id, appointment.title, scheduled, original);
     if (!appointment.recurrence && original === appointment.starts_at && scheduled === original) {
@@ -191,16 +202,73 @@ async function generate(client: PoolClient, appointment: Appointment, schedule: 
       [appointment.id, original, groupId, schedule.created_by],
     );
     created.push(groupId);
-    if (closesAt) toPublish.push({ id: groupId, closesAt });
+    if (closesAt) {
+      let deactivateAt: Date | null = null;
+      if (schedule.deactivate_after_days !== null) {
+        const cutoff = wallDate(appointmentWallTime(closesAt.getTime(), zone));
+        const ending = localDateTime(addDays(cutoff, schedule.deactivate_after_days));
+        const resolved = resolveAppointmentWallTime(ending, zone);
+        if (!resolved || resolved.instant < closesAt.getTime()) throw new Error("Could not resolve the scheduled group ending time.");
+        deactivateAt = new Date(resolved.instant);
+      }
+      toPublish.push({ id: groupId, closesAt, deactivateAt });
+    }
   }
   if (schedule.template_group_id) await copyRegistrationForm(client, appointment.department_id, schedule.template_group_id, created);
-  for (const { id, closesAt } of toPublish) await publishScheduledSignup(client, appointment.department_id, id, closesAt);
+  for (const { id, closesAt, deactivateAt } of toPublish) await publishScheduledSignup(client, appointment.department_id, id, closesAt, deactivateAt);
   return created.length;
+}
+
+async function endExpiredSignupGroups(context: ModuleServerContext, now: Date, onError: (error: unknown) => void) {
+  const { pool } = context;
+  if (!pool) return;
+  const jobs = (await pool.query<{ group_id: string; department_id: string }>(
+    `SELECT group_id,department_id FROM church_calendar_signup_deactivations
+      WHERE deactivate_at<=$1 ORDER BY deactivate_at,group_id`, [now],
+  )).rows;
+  for (const { group_id, department_id } of jobs) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, department_id)) {
+        await client.query("ROLLBACK");
+        continue;
+      }
+      // Native group operations lock the group before a cascade, so use the same order.
+      const group = (await client.query<{ public_signup_token: string | null }>(
+        `SELECT public_signup_token FROM church_groups WHERE id=$1 AND department_id=$2
+          AND source_system IS NULL AND status='active' AND public_signup_enabled FOR UPDATE`, [group_id, department_id],
+      )).rows[0];
+      const task = (await client.query<{ signup_token_hash: string; same_close: boolean }>(
+        `DELETE FROM church_calendar_signup_deactivations WHERE group_id=$1 AND department_id=$2 AND deactivate_at<=$3
+          RETURNING signup_token_hash,EXISTS (
+            SELECT 1 FROM group_signup_forms form WHERE form.group_id=$1 AND form.department_id=$2
+              AND form.closes_at=church_calendar_signup_deactivations.signup_closes_at
+          ) AS same_close`, [group_id, department_id, now],
+      )).rows[0];
+      const ended = Boolean(group?.public_signup_token && task?.same_close && task.signup_token_hash === signupTokenHash(group.public_signup_token));
+      if (ended) await client.query(
+        `UPDATE church_groups SET status='ended',public_signup_enabled=false,public_signup_token=NULL,updated_at=now()
+          WHERE id=$1 AND department_id=$2`, [group_id, department_id],
+      );
+      await client.query("COMMIT");
+      if (ended) context.realtime.publish("core:groups:changed", department_id, { action: "scheduled-registration-group-ended", groupId: group_id });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      onError(error);
+    } finally { client.release(); }
+  }
 }
 
 export async function runScheduledCalendarSignupGroups(context: ModuleServerContext, now: number, onError: (error: unknown) => void) {
   const { pool } = context;
-  if (!pool || !context.isDatabaseReady() || !isServerModuleEnabled("church-calendar") || !isServerModuleEnabled("community")) return;
+  if (!pool || !context.isDatabaseReady()) return;
+  const installed = await pool.query<{ installed: boolean }>(
+    "SELECT to_regclass('public.church_calendar_signup_deactivations') IS NOT NULL AS installed",
+  );
+  if (!installed.rows[0]?.installed) return;
+  await endExpiredSignupGroups(context, new Date(now), onError);
+  if (!isServerModuleEnabled("church-calendar") || !isServerModuleEnabled("community")) return;
   const candidates = (await pool.query<{ id: string; department_id: string }>(
     `SELECT appointment.id,appointment.department_id FROM church_calendar_signup_schedules schedule
      JOIN church_calendar_appointments appointment ON appointment.id=schedule.appointment_id
@@ -224,7 +292,7 @@ export async function runScheduledCalendarSignupGroups(context: ModuleServerCont
          FOR UPDATE OF appointment FOR SHARE OF calendar`, [id, department_id],
       )).rows[0];
       const schedule = (await client.query<StoredSchedule>(
-        "SELECT lead_days,template_group_id,created_by,auto_publish FROM church_calendar_signup_schedules WHERE appointment_id=$1 FOR SHARE", [id],
+        "SELECT lead_days,template_group_id,created_by,auto_publish,deactivate_after_days FROM church_calendar_signup_schedules WHERE appointment_id=$1 FOR SHARE", [id],
       )).rows[0];
       const created = appointment && schedule ? await generate(client, appointment, schedule, now) : 0;
       await client.query("COMMIT");
