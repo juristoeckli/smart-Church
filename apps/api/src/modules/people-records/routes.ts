@@ -1,3 +1,4 @@
+import { applyChoiceRename, inspectChoiceRename, lockChoiceDefinitionWrite, lockChoiceRenameContacts, withChoiceDefinitionWrite } from "./choice-rename.js";
 import { registerPersonalFollowups } from "./personal-followups.js";
 import { registerGrowthTrajectory } from "./growth-trajectory.js";
 import { personTagMatch } from "./tag-search.js";
@@ -105,13 +106,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     registerPersonServiceWorkload(routes, context, department);
     registerGrowthTrajectory(routes, context, department);
     registerPersonalFollowups(routes, context, department);
-    async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[],canManage:boolean):Promise<Array<{field:string;operator:string;value:unknown}>>{
+    async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[],canManage:boolean,transaction?:PoolClient):Promise<Array<{field:string;operator:string;value:unknown}>>{
       if(filters.length>10)throw new Error("Choose up to 10 custom field filters.");
       if(new Set(filters.map(item=>item.field)).size!==filters.length)throw new Error("Use each custom field only once in a filter list.");
       const normalized:Array<{field:string;operator:string;value:unknown}>=[];
       for(const item of filters){
         if(!/^[a-z][a-z0-9_]{0,39}$/.test(item.field))throw new Error("Choose a valid custom field.");
-        const record=await pool!.query<{field_type:string;options:unknown}>("SELECT field_type,options FROM people_record_fields WHERE department_id=$1 AND field_key=$2 AND active=true AND ($3::boolean OR visibility='private_people')",[departmentId,item.field,canManage]);
+        const record=await (transaction ?? pool!).query<{field_type:string;options:unknown}>("SELECT field_type,options FROM people_record_fields WHERE department_id=$1 AND field_key=$2 AND active=true AND ($3::boolean OR visibility='private_people')" + (transaction ? " FOR SHARE" : ""),[departmentId,item.field,canManage]);
         const filter=record.rowCount?normalizeFieldFilter(record.rows[0].field_type,record.rows[0].options,item.value,item.operator):null;
         if(filter===null)throw new Error("Choose an active custom field at this location, a supported operator, and a value valid for its type.");
         normalized.push({field:item.field,...filter});
@@ -348,6 +349,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       let committed = false;
       try {
         await client.query("BEGIN");
+        await lockChoiceDefinitionWrite(client, departmentId);
         if (!await context.lockDepartmentForWrite(client, departmentId)) {
           return reply.code(409).send({ error: "This location cannot be changed on this installation." });
         }
@@ -373,37 +375,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           if (current === undefined || !option || next.includes(option)) {
             return reply.code(400).send({ error: "Enter a new non-empty name for this choice." });
           }
-          const values = [current, option];
-          const usage = await client.query<{ in_use: boolean }>(
-            `SELECT EXISTS (
-              SELECT 1 FROM people_record_values WHERE department_id=$1 AND field_id=$2 AND jsonb_typeof(value)='string' AND value #>> '{}' = ANY($4::text[])
-            ) OR EXISTS (
-              SELECT 1 FROM people_record_saved_views v WHERE v.department_id=$1 AND (
-                (v.criteria->>'field'=$3 AND v.criteria->>'value'=ANY($4::text[])) OR EXISTS (
-                  SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v.criteria->'filters')='array' THEN v.criteria->'filters' ELSE '[]'::jsonb END) filter
-                  WHERE filter->>'field'=$3 AND filter->>'value'=ANY($4::text[])
-                )
-              )
-            ) AS in_use`,
-            [departmentId, fieldId, field.field_key, values],
-          );
-          if (usage.rows[0]?.in_use) {
-            return reply.code(409).send({ error: "This name is referenced by existing People records or saved views." });
-          }
-          const tables = await client.query<{ installed: boolean }>("SELECT to_regclass('public.saved_designer_reports') IS NOT NULL AS installed");
-          if (tables.rows[0]?.installed) {
-            const reportField = "custom_" + fieldId.replace(/-/g, "");
-            const reportFilters = await client.query(
-              `SELECT 1 FROM saved_designer_reports report WHERE report.department_id=$1 AND report.definition->>'dataset'='people'
-                AND EXISTS (
-                  SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(report.definition->'filters')='array'
-                    THEN report.definition->'filters' ELSE '[]'::jsonb END) filter WHERE filter->>'field'=$2
-                ) LIMIT 1`,
-              [departmentId, reportField],
-            );
-            if (reportFilters.rowCount) {
-              return reply.code(409).send({ error: "This choice field is used by a saved report filter." });
-            }
+          const plan = await inspectChoiceRename(client, {
+            departmentId, fieldId, fieldKey: field.field_key, oldName: current, newName: option, options: expected,
+          });
+          if ("error" in plan) return reply.code(409).send({ error: plan.error });
+          if (plan.profiles.length || plan.views.length) {
+            return reply.code(409).send({ error: "This name is referenced by existing People records or saved views. Use the reviewed rename." });
           }
           next[change.from] = option;
         } else {
@@ -424,6 +401,64 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         finally { client.release(); }
       }
     });
+    routes.post<{ Params: { id: string }; Body: { expected: string[]; from: number; rename: string; reviewToken?: string } }>(
+      "/api/people-records/fields/:id/options/rename",
+      { schema: {
+        params: { type: "object", required: ["id"], properties: { id: uuid } },
+        body: { type: "object", additionalProperties: false, required: ["expected", "from", "rename"], properties: {
+          expected: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
+          from: { type: "integer", minimum: 0, maximum: 99 },
+          rename: { type: "string", minLength: 1, maxLength: 120 },
+          reviewToken: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        } },
+      } },
+      async (request, reply) => {
+        const departmentId = await department(request, reply, true);
+        if (!departmentId || !validateMutation(request, reply)) return reply;
+        const { expected, from, reviewToken } = request.body;
+        const oldName = expected[from];
+        const newName = request.body.rename.trim();
+        if (oldName === undefined || !newName || expected.includes(newName) || expected.indexOf(oldName) !== expected.lastIndexOf(oldName)) {
+          return reply.code(400).send({ error: "Choose a distinct option and enter a new non-empty name." });
+        }
+        const fieldId = request.params.id;
+        let applied = false;
+        const result = await withChoiceDefinitionWrite(pool!, departmentId, async (client) => {
+          if (!await context.lockDepartmentForWrite(client, departmentId)) {
+            return reply.code(409).send({ error: "This location cannot be changed on this installation." });
+          }
+          // Profile updates lock a contact before sharing the field definition.
+          const contacts = reviewToken ? await lockChoiceRenameContacts(client, departmentId, fieldId, oldName) : null;
+          const { rows: [field] } = await client.query<{ options: unknown; field_key: string }>(
+            "SELECT options,field_key FROM people_record_fields WHERE department_id=$1 AND id=$2 AND field_type='select' FOR UPDATE",
+            [departmentId, fieldId],
+          );
+          if (!field) return reply.code(404).send({ error: "Choice field not found at this location." });
+          if (!Array.isArray(field.options) || field.options.length !== expected.length || field.options.some((option, index) => option !== expected[index])) {
+            return reply.code(409).send({ error: "These options changed. Refresh before editing them again." });
+          }
+          const rename = { departmentId, fieldId, fieldKey: field.field_key, oldName, newName, options: expected };
+          const plan = await inspectChoiceRename(client, rename, !!reviewToken);
+          if ("error" in plan) return reply.code(409).send({ error: plan.error });
+          const counts = {
+            profiles: plan.profiles.length,
+            archivedProfiles: plan.profiles.filter((person) => person.archived).length,
+            savedViews: plan.views.length,
+          };
+          if (!reviewToken) return { ...counts, reviewToken: plan.reviewToken };
+          if (plan.reviewToken !== reviewToken || plan.profiles.some((person) => !contacts?.has(person.id))) {
+            return reply.code(409).send({ error: "The choice usage changed. Review the rename again before applying it." });
+          }
+          const options = [...expected];
+          options[from] = newName;
+          await applyChoiceRename(client, rename, plan, request.authenticatedUser?.id ?? null, options);
+          applied = true;
+          return { ...counts, options };
+        });
+        if (applied) changed(departmentId);
+        return result;
+      },
+    );
     const tagColorSchema = { anyOf: [{ type: "string", pattern: "^#[0-9a-f]{6}$" }, { type: "null" }] } as const;
     const tagLabelSchema = { type: "string", minLength: 1, maxLength: 100 } as const;
     const tagPresentationSchema = { type: "object", additionalProperties: false, required: ["label", "color"], properties: {
@@ -809,49 +844,51 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const d=await department(request,reply); if(!d)return reply;
       if(!validateMutation(request,reply))return reply;
       const name=request.body.name.trim(); if(!name)return reply.code(400).send({error:"Enter a name for this saved view."});
-      const updating=id!==undefined;
-      const renameOnly=updating&&Object.keys(request.body).length===1;
-      let criteria:string|null=null;
-      if(!renameOnly){
-        const body=request.body;
-        if(!await canFilterFormerGroup(request,reply,d,body.formerGroupId))return reply;
-        if(!await canFilterAttendedMeeting(request,reply,d,body.attendedMeetingId))return reply;
-        const joinError=membershipJoinRangeError(body);
-        if(joinError)return reply.code(400).send({error:joinError});
-        try{
-          let filters=parseFieldFilters(body.filters===undefined?undefined:JSON.stringify(body.filters),body.field,body.value);
-          const normalized=await validateFieldFilters(d,filters,canManagePeopleFields(request));
-          filters=filters.map((item,index)=>({...item,operator:normalized[index].operator}));
-          const relationshipFilters=await validateRelationshipFilters(d,body.relationshipFilters??[],canManagePeopleFields(request));
-          const columns=await validateDirectoryColumns(d,body.columns,canManagePeopleFields(request));
-          if(body.groupId){
-            const group=await pool!.query("SELECT id FROM church_groups g WHERE g.department_id=$1 AND g.id=$2 AND "+activeDirectoryGroup,[d,body.groupId]);
-            if(!group.rowCount)throw new Error("Choose an active group at this location.");
+      return withChoiceDefinitionWrite(pool!, d, async (client) => {
+        const updating=id!==undefined;
+        const renameOnly=updating&&Object.keys(request.body).length===1;
+        let criteria:string|null=null;
+        if(!renameOnly){
+          const body=request.body;
+          if(!await canFilterFormerGroup(request,reply,d,body.formerGroupId))return reply;
+          if(!await canFilterAttendedMeeting(request,reply,d,body.attendedMeetingId))return reply;
+          const joinError=membershipJoinRangeError(body);
+          if(joinError)return reply.code(400).send({error:joinError});
+          try{
+            let filters=parseFieldFilters(body.filters===undefined?undefined:JSON.stringify(body.filters),body.field,body.value);
+            const normalized=await validateFieldFilters(d,filters,canManagePeopleFields(request),client);
+            filters=filters.map((item,index)=>({...item,operator:normalized[index].operator}));
+            const relationshipFilters=await validateRelationshipFilters(d,body.relationshipFilters??[],canManagePeopleFields(request));
+            const columns=await validateDirectoryColumns(d,body.columns,canManagePeopleFields(request));
+            if(body.groupId){
+              const group=await pool!.query("SELECT id FROM church_groups g WHERE g.department_id=$1 AND g.id=$2 AND "+activeDirectoryGroup,[d,body.groupId]);
+              if(!group.rowCount)throw new Error("Choose an active group at this location.");
+            }
+            criteria=JSON.stringify({
+              q:body.q?.trim()??"",status:body.status??"",
+              field:filters.length===1?filters[0].field:"",value:filters.length===1?filters[0].value:"",
+              filters,relationshipFilters,groupId:body.groupId??null,groupType:body.groupType??null,
+              groupRole:body.groupRole?.trim()||null,groupJoinedFrom:body.groupJoinedFrom??null,
+              groupJoinedThrough:body.groupJoinedThrough??null,formerGroupId:body.formerGroupId??null,attendedMeetingId:body.attendedMeetingId??null,sort:body.sort??"lastName",layout:body.layout??"cards",pageSize:body.pageSize??100,columns,
+            });
+          }catch(error){
+            return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid saved view options."});
           }
-          criteria=JSON.stringify({
-            q:body.q?.trim()??"",status:body.status??"",
-            field:filters.length===1?filters[0].field:"",value:filters.length===1?filters[0].value:"",
-            filters,relationshipFilters,groupId:body.groupId??null,groupType:body.groupType??null,
-            groupRole:body.groupRole?.trim()||null,groupJoinedFrom:body.groupJoinedFrom??null,
-            groupJoinedThrough:body.groupJoinedThrough??null,formerGroupId:body.formerGroupId??null,attendedMeetingId:body.attendedMeetingId??null,sort:body.sort??"lastName",layout:body.layout??"cards",pageSize:body.pageSize??100,columns,
-          });
-        }catch(error){
-          return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid saved view options."});
         }
-      }
-      try{
-        const values=[id??randomUUID(),d,request.authenticatedUser!.id,name,criteria];
-        const statement=updating
-          ? `UPDATE people_record_saved_views SET name=$4,criteria=COALESCE($5::jsonb,criteria),updated_at=now()
-              WHERE id=$1 AND department_id=$2 AND user_id=$3 AND ($5::jsonb IS NOT NULL OR ${savedViewAllowed("$6")})`
-          : "INSERT INTO people_record_saved_views(id,department_id,user_id,name,criteria) VALUES($1,$2,$3,$4,$5::jsonb)";
-        const result=await pool!.query(`${statement} RETURNING id,name,criteria->>'q' AS q,criteria->>'status' AS status,criteria->>'field' AS field,criteria->>'value' AS value,criteria->'filters' AS filters,criteria->'relationshipFilters' AS "relationshipFilters",criteria->>'groupId' AS "groupId",criteria->>'groupType' AS "groupType",criteria->>'groupRole' AS "groupRole",criteria->>'groupJoinedFrom' AS "groupJoinedFrom",criteria->>'groupJoinedThrough' AS "groupJoinedThrough",criteria->>'formerGroupId' AS "formerGroupId",criteria->>'attendedMeetingId' AS "attendedMeetingId",criteria->>'sort' AS sort,COALESCE(criteria->>'layout','cards') AS layout,COALESCE(criteria->'pageSize','100'::jsonb) AS "pageSize",criteria->'columns' AS columns,created_at AS "createdAt",updated_at AS "updatedAt"`,updating?[...values,canManagePeopleFields(request)]:values);
-        if(!result.rowCount)return reply.code(404).send({error:"Saved view not found."});
-        return reply.code(updating?200:201).send(result.rows[0]);
-      } catch(error) {
-        if((error as {code?:string}).code==="23505")return reply.code(409).send({error:"A saved view with that name already exists."});
-        throw error;
-      }
+        try{
+          const values=[id??randomUUID(),d,request.authenticatedUser!.id,name,criteria];
+          const statement=updating
+            ? `UPDATE people_record_saved_views SET name=$4,criteria=COALESCE($5::jsonb,criteria),updated_at=now()
+                WHERE id=$1 AND department_id=$2 AND user_id=$3 AND ($5::jsonb IS NOT NULL OR ${savedViewAllowed("$6")})`
+            : "INSERT INTO people_record_saved_views(id,department_id,user_id,name,criteria) VALUES($1,$2,$3,$4,$5::jsonb)";
+          const result=await client.query(`${statement} RETURNING id,name,criteria->>'q' AS q,criteria->>'status' AS status,criteria->>'field' AS field,criteria->>'value' AS value,criteria->'filters' AS filters,criteria->'relationshipFilters' AS "relationshipFilters",criteria->>'groupId' AS "groupId",criteria->>'groupType' AS "groupType",criteria->>'groupRole' AS "groupRole",criteria->>'groupJoinedFrom' AS "groupJoinedFrom",criteria->>'groupJoinedThrough' AS "groupJoinedThrough",criteria->>'formerGroupId' AS "formerGroupId",criteria->>'attendedMeetingId' AS "attendedMeetingId",criteria->>'sort' AS sort,COALESCE(criteria->>'layout','cards') AS layout,COALESCE(criteria->'pageSize','100'::jsonb) AS "pageSize",criteria->'columns' AS columns,created_at AS "createdAt",updated_at AS "updatedAt"`,updating?[...values,canManagePeopleFields(request)]:values);
+          if(!result.rowCount)return reply.code(404).send({error:"Saved view not found."});
+          reply.code(updating?200:201); return result.rows[0];
+        } catch(error) {
+          if((error as {code?:string}).code==="23505")return reply.code(409).send({error:"A saved view with that name already exists."});
+          throw error;
+        }
+      });
     }
     routes.post<{Body:SavedViewBody}>("/api/people-records/saved-views",{schema:savedViewSchema},(request,reply)=>writeSavedView(request,reply));
     routes.patch<{Params:{id:string};Body:SavedViewBody}>("/api/people-records/saved-views/:id",{
