@@ -1,15 +1,24 @@
 import { useState } from "react";
 
+function escapeAttribute(value: string) {
+  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
 export function CalendarEmbedCode({ url }: { url: string }) {
   const [days, setDays] = useState(60);
   const [entries, setEntries] = useState(20);
   const [searchEntry, setSearchEntry] = useState("");
+  const [title, setTitle] = useState("");
+  const [darkMode, setDarkMode] = useState(false);
   const [feedback, setFeedback] = useState("");
   const source = new URL(url, window.location.origin);
   source.searchParams.set("days", String(days));
   source.searchParams.set("entries", String(entries));
   if (searchEntry.trim()) source.searchParams.set("searchEntry", searchEntry.trim());
-  const code = `<iframe src="${source.toString().replaceAll("&", "&amp;").replaceAll('"', "&quot;")}" title="Church calendar" width="100%" height="500" loading="lazy" sandbox referrerpolicy="no-referrer"></iframe>`;
+  const customTitle = title.trim();
+  if (customTitle) source.searchParams.set("title", customTitle);
+  if (darkMode) source.searchParams.set("darkmode", "true");
+  const code = `<iframe src="${escapeAttribute(source.toString())}" title="${escapeAttribute(customTitle || "Church calendar")}" width="100%" height="500" loading="lazy" sandbox referrerpolicy="no-referrer"></iframe>`;
 
   async function copy() {
     try { await navigator.clipboard.writeText(code); setFeedback("Embed code copied."); }
@@ -27,6 +36,12 @@ export function CalendarEmbedCode({ url }: { url: string }) {
     <label>Filter by search terms<input type="search" maxLength={240} value={searchEntry} onChange={(event) => {
       setSearchEntry(event.target.value); setFeedback("");
     }} /><small>Separate terms with commas. An appointment appears if its title, subtitle or place matches any term.</small></label>
+    <label>Display title<input type="text" maxLength={120} value={title} onChange={(event) => {
+      setTitle(event.target.value); setFeedback("");
+    }} placeholder="Use the calendar or agenda name" /></label>
+    <label className="church-calendar-check"><input type="checkbox" checked={darkMode} onChange={(event) => {
+      setDarkMode(event.target.checked); setFeedback("");
+    }} /> Force dark mode</label>
     <label>Website embed code<textarea rows={4} value={code} readOnly onFocus={(event) => event.target.select()} /></label>
     <div className="church-calendar-feed-actions">
       <a href={source.toString()} target="_blank" rel="noreferrer">Preview public agenda</a>

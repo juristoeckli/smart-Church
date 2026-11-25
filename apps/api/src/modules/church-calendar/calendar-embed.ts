@@ -1,6 +1,6 @@
 export const calendarEmbedContentPolicy = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors *; sandbox; base-uri 'none'; form-action 'none'";
 
-export type EmbedSettings = { days?: number; entries?: number; searchEntry?: string };
+export type EmbedSettings = { days?: number; entries?: number; searchEntry?: string; title?: string; darkmode?: boolean };
 export type EmbedAppointment = {
   id: string; originalStart: string; startsAt: string; endsAt: string; allDay: boolean; title: string; subtitle: string; place: string;
   calendarName?: string; calendarOrder?: number;
@@ -14,7 +14,9 @@ function searchText(value: string) {
   return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
 }
 
-export function renderCalendarEmbed(title: string, appointments: EmbedAppointment[], timeZone: string, entries: number, searchEntry = "") {
+export function renderCalendarEmbed(calendarName: string, appointments: EmbedAppointment[], timeZone: string, settings: EmbedSettings) {
+  const { entries = 20, searchEntry = "", darkmode = false } = settings;
+  const title = settings.title?.trim() || calendarName;
   const terms = searchEntry.split(",").map((value) => searchText(value.trim())).filter(Boolean);
   const matching = terms.length ? appointments.filter((appointment) => {
     const fields = [appointment.title, appointment.subtitle, appointment.place].map(searchText);
@@ -39,7 +41,7 @@ export function renderCalendarEmbed(title: string, appointments: EmbedAppointmen
     }).join("")}</ol></section>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(title)}</title><style>
-:root{font-family:system-ui,sans-serif;color-scheme:light dark}
+:root{font-family:system-ui,sans-serif;color-scheme:${darkmode ? "only dark;background:Canvas;color:CanvasText" : "light dark"}}
 body{margin:0;padding:clamp(.75rem,3vw,1.5rem)}main{max-width:52rem;margin:auto}
 h1{margin:0;font-size:1.5rem}h2{font-size:1rem;margin:1.3rem 0 .35rem}
 p{margin:.25rem 0 .5rem}ol{list-style:none;padding:0;margin:0}

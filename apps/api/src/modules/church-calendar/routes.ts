@@ -487,7 +487,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.type("text/html; charset=utf-8")
         .header("Content-Security-Policy", calendarEmbedContentPolicy)
         .header("X-Robots-Tag", "noindex, nofollow")
-        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed.entries ?? 20, embed.searchEntry));
+        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed));
     }
     // Expand wall times using each appointment's time zone before exporting UTC instants.
     // Batch conversions to keep query size bounded even for large feeds.
@@ -527,7 +527,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     params: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" } } },
     querystring: { type: "object", additionalProperties: false, properties: {
       days: { type: "integer", minimum: 1, maximum: 120 }, entries: { type: "integer", minimum: 1, maximum: 50 },
-      searchEntry: { type: "string", maxLength: 240 },
+      searchEntry: { type: "string", maxLength: 240 }, title: { type: "string", maxLength: 120 }, darkmode: { type: "boolean" },
     } },
   } as const;
   app.get<{ Params: { token: string }; Querystring: EmbedSettings }>("/api/public/church-calendar/embed/:token", { schema: publicAgendaSchema },
