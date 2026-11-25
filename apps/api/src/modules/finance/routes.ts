@@ -1,3 +1,4 @@
+import { parsePaypalActivity, type PaypalDateOrder, type PaypalEntry, isPaypalActivityHeader } from "./paypal-activity.js";
 import { bankStatementSuggestions, currentBankStatus, currentBankSuggestion } from "./bank-suggestions.js";
 import { registerFinanceReplication } from "./replication.js";
 import { parseCamt053 } from "./camt053.js";
@@ -84,7 +85,7 @@ function sendFinanceExport(request: FastifyRequest, reply: FastifyReply, filenam
 }
 function asMoney(value: string | number) { const number = Number(value); return Number.isSafeInteger(number) ? number : 0; }
 
-function parseCsvRows(csv: string): string[][] | string {
+function parseCsvRows(csv: string, maxColumns = 50): string[][] | string {
   if (typeof csv !== "string" || csv.length > 2_000_000) return "CSV must be 2 MiB or smaller.";
   const firstLine = csv.split(/\r?\n/, 1)[0] ?? "";
   const delimiter = (firstLine.match(/;/g)?.length ?? 0) > (firstLine.match(/,/g)?.length ?? 0) ? ";" : ",";
@@ -109,7 +110,7 @@ function parseCsvRows(csv: string): string[][] | string {
   while (rows.length && rows.at(-1)!.every((value) => !value.trim())) rows.pop();
   if (rows.length < 2) return "CSV needs a header and at least one statement row.";
   const width = rows[0]!.length;
-  if (width < 2 || width > 50 || rows.some((value) => value.length !== width)) return "CSV rows must have the same 2 to 50 columns.";
+  if (width < 2 || width > maxColumns || rows.some((value) => value.length !== width)) return `CSV rows must have the same 2 to ${maxColumns} columns.`;
   return rows;
 }
 
@@ -1314,11 +1315,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   type NativeStatementUpload = { mt940?: string; camt053?: string };
-  type StatementUpload = NativeStatementUpload & { accountId: string; fileName: string; csv?: string };
+  type StatementUpload = NativeStatementUpload & { accountId: string; fileName: string; csv?: string; paypal?: string; paypalDateOrder?: PaypalDateOrder };
   type StatementMapping = { date: number; amount: number; description?: number | null; reference?: number | null };
   const statementText = { type: "string", minLength: 1, maxLength: 2_000_000 } as const;
-  function statementUpload(body: NativeStatementUpload & { csv?: string }) {
-    const formats = (["csv", "mt940", "camt053"] as const).filter(format => body[format] !== undefined);
+  function statementUpload(body: NativeStatementUpload & { csv?: string; paypal?: string }) {
+    const formats = (["csv", "mt940", "camt053", "paypal"] as const).filter(format => body[format] !== undefined);
     if (formats.length !== 1) return null;
     const format = formats[0]!;
     const content = body[format]!;
@@ -1361,9 +1362,37 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return pool!.query("SELECT id FROM finance_bank_statement_imports WHERE department_id=$1 AND account_id=$2 AND content_sha256=$3",
       [departmentId, accountId, contentHash]);
   }
+  async function readPaypalReport(body: StatementUpload, content: string, client: Pool | PoolClient, departmentId: string) {
+    const csv = parseCsvRows(content, 128);
+    if (typeof csv === "string") return csv;
+    const parsed = parsePaypalActivity(csv, body.paypalDateOrder, statementDate, cleanText);
+    if (typeof parsed === "string") return parsed;
+    if (parsed.currency !== await statementCurrency(departmentId, client)) return "The PayPal report currency does not match this ledger.";
+    return parsed;
+  }
+
+  async function reviewPaypalRows(client: Pool | PoolClient, departmentId: string, accountId: string, entries: PaypalEntry[], currency: string) {
+    const existing = await client.query<{ fingerprint: string; account_id: string; booking_date: string; amount_cents: string; gross_cents: string; fee_cents: string; currency_code: string }>(
+      `SELECT key.fingerprint, import.account_id, row.booking_date::text, row.amount_cents, key.gross_cents, key.fee_cents, key.currency_code
+         FROM finance_paypal_statement_keys key
+         JOIN finance_bank_statement_rows row ON row.department_id=key.department_id AND row.id=key.row_id
+         JOIN finance_bank_statement_imports import ON import.department_id=row.department_id AND import.id=row.import_id
+        WHERE key.department_id=$1 AND key.fingerprint=ANY($2::text[])`, [departmentId, entries.map(row => row.fingerprint)]);
+    const previous = new Map(existing.rows.map(row => [row.fingerprint, row]));
+    if (existing.rows.some(row => row.account_id !== accountId)) return "Part of this PayPal report is already linked to a different ledger account.";
+    for (const entry of entries) {
+      const old = previous.get(entry.fingerprint);
+      if (old && (old.currency_code !== currency || old.booking_date !== entry.date || Number(old.amount_cents) !== entry.amount ||
+          Number(old.gross_cents) !== entry.gross || Number(old.fee_cents) !== entry.fee)) {
+        return "A previously imported PayPal transaction has different booking data. Review the report before reimporting.";
+      }
+    }
+    return entries.filter(row => !previous.has(row.fingerprint));
+  }
+
   const statementUploadSchema = {
     type: "object", additionalProperties: false, required: ["accountId", "fileName"],
-    properties: { accountId: uuid, fileName: { type: "string", minLength: 1, maxLength: 180 }, csv: statementText, mt940: statementText, camt053: statementText },
+    properties: { accountId: uuid, fileName: { type: "string", minLength: 1, maxLength: 180 }, csv: statementText, mt940: statementText, camt053: statementText, paypal: statementText, paypalDateOrder: { type: "string", enum: ["day-first", "month-first"] } },
   } as const;
   async function validateStatementAccount(departmentId: string, accountId: string, db: Pool | PoolClient = pool!, lock = false) {
     const result = await db.query<{ id: string; account_type: string; active: boolean }>(`SELECT id,account_type,active FROM finance_accounts WHERE department_id=$1 AND id=$2 ${lock ? "FOR SHARE" : ""}`, [departmentId, accountId]);
@@ -1376,7 +1405,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const upload = statementUpload(request.body);
-    if (!upload || upload.format === "csv") return reply.code(400).send({ error: "Choose one MT940 or CAMT.053 statement." });
+    if (!upload || upload.format === "csv" || upload.format === "paypal") return reply.code(400).send({ error: "Choose one MT940 or CAMT.053 statement." });
     const parsed = await readNativeStatement(departmentId, upload.format, upload.content);
     if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
     if (parsed.currency !== await statementCurrency(departmentId)) {
@@ -1460,11 +1489,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }, async (request, reply) => {
     const upload = statementUpload(request.body);
     const departmentId = await department(request, reply, upload !== null && upload.format !== "csv"); if (!departmentId) return reply;
-    if (!upload) return reply.code(400).send({ error: "Choose one CSV, MT940, or CAMT.053 statement." });
+    if (!upload) return reply.code(400).send({ error: "Choose one CSV, MT940, CAMT.053, or PayPal Activity Report." });
     const account = await validateStatementAccount(departmentId, request.body.accountId);
     if (!account) return reply.code(400).send({ error: "Choose an active asset account for this statement." });
     const contentHash = createHash("sha256").update(upload.content, "utf8").digest("hex");
     const duplicate = Boolean((await findStatementImport(departmentId, request.body.accountId, contentHash)).rowCount);
+    if (upload.format === "paypal") {
+      const report = await readPaypalReport(request.body, upload.content, pool!, departmentId);
+      if (typeof report === "string") return reply.code(400).send({ error: report });
+      const rows = await reviewPaypalRows(pool!, departmentId, request.body.accountId, report.entries, report.currency);
+      if (typeof rows === "string") return reply.code(409).send({ error: rows });
+      return reply.header("Cache-Control", "private, no-store").send({
+        format: "paypal", currency: report.currency, duplicate, rowCount: rows.length, ignoredCount: report.ignoredCount,
+        overlapCount: report.duplicateCount + report.entries.length - rows.length,
+        headers: ["Booking date", "Gross", "Fee", "Net", "Description"],
+        sample: rows.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.gross), statementPreviewAmount(row.fee), statementPreviewAmount(row.amount), row.description]),
+      });
+    }
     if (upload.format !== "csv") {
       const parsed = await readNativeStatement(departmentId, upload.format, upload.content);
       if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
@@ -1481,6 +1522,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const parsed = parseCsvRows(upload.content);
     if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+    if (isPaypalActivityHeader(parsed[0]!)) return reply.code(400).send({ error: "Import this file as a PayPal Activity Report." });
     const headers = parsed[0]!.map((value, index) => (index === 0 ? value.replace(/^\uFEFF/, "") : value).trim().slice(0, 120));
     return { headers, rowCount: parsed.length - 1, duplicate, sample: parsed.slice(1, 6).map((row) => row.map((value) => value.slice(0, 200))) };
   });
@@ -1503,16 +1545,26 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!validateMutation(request, reply)) return reply;
     if (!await validateStatementAccount(departmentId, request.body.accountId)) return reply.code(400).send({ error: "Choose an active asset account for this statement." });
     const upload = statementUpload(request.body);
-    if (!upload) return reply.code(400).send({ error: "Choose one CSV, MT940, or CAMT.053 statement." });
+    if (!upload) return reply.code(400).send({ error: "Choose one CSV, MT940, CAMT.053, or PayPal Activity Report." });
     let nativeStatementCurrency: string | undefined;
     let nativeSourceDigest: string | undefined;
     let nativeSourceScope: string | undefined;
     const rememberSource = request.body.rememberSource;
-    if (rememberSource && upload.format === "csv") {
+    if (rememberSource && (upload.format === "csv" || upload.format === "paypal")) {
       return reply.code(400).send({ error: "Only MT940 and CAMT.053 source accounts can be remembered." });
     }
     let rows: ImportedBankStatementEntry[];
-    if (upload.format !== "csv") {
+    let paypalReport: Exclude<Awaited<ReturnType<typeof readPaypalReport>>, string> | undefined;
+    if (upload.format === "paypal") {
+      if (request.body.confirmSourceAccount !== true) {
+        return reply.code(400).send({ error: "Confirm the selected ledger account belongs to this PayPal report." });
+      }
+      const parsed = await readPaypalReport(request.body, upload.content, pool!, departmentId);
+      if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+      paypalReport = parsed;
+      nativeStatementCurrency = parsed.currency;
+      rows = parsed.entries;
+    } else if (upload.format !== "csv") {
       if (request.body.confirmSourceAccount !== true) {
         return reply.code(400).send({ error: "Confirm the source account matches the chosen ledger account." });
       }
@@ -1528,6 +1580,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } else {
       const parsed = parseCsvRows(upload.content);
       if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+      if (isPaypalActivityHeader(parsed[0]!)) return reply.code(400).send({ error: "Import this file as a PayPal Activity Report." });
       const width = parsed[0]!.length;
       if (!request.body.mapping) return reply.code(400).send({ error: "Map the statement CSV columns before importing." });
       const { date: dateColumn, amount: amountColumn, description: descriptionColumn, reference: referenceColumn } = request.body.mapping;
@@ -1554,7 +1607,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const fileName = cleanText(request.body.fileName).replace(/[\\/]/g, "_").slice(0, 180) || `statement.${upload.format}`;
     const duplicate = await findStatementImport(departmentId, request.body.accountId, contentHash);
     if (duplicate.rowCount) return reply.code(409).send({ error: "This exact statement file has already been imported for the selected account." });
-    const { suggestions: suggested, ruleCount, ruleAppliedRows } = await bankStatementSuggestions(pool!, departmentId, request.body.accountId, rows);
     const batchId = randomUUID(); const client = await pool!.connect();
     try {
       await client.query("BEGIN");
@@ -1569,6 +1621,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(409).send({ error: "The ledger account or currency has changed. Review this statement again." });
         }
       }
+      let overlapCount = 0;
+      let paypalByLine = new Map<number, PaypalEntry>();
+      if (paypalReport) {
+        const selected = await reviewPaypalRows(client, departmentId, request.body.accountId, paypalReport.entries, paypalReport.currency);
+        if (typeof selected === "string" || !selected.length) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: typeof selected === "string" ? selected : "All of these PayPal transactions are already imported." });
+        }
+        rows = selected.sort((left, right) => left.fingerprint.localeCompare(right.fingerprint));
+        overlapCount = paypalReport.duplicateCount + paypalReport.entries.length - selected.length;
+        paypalByLine = new Map(selected.map(row => [row.line, row]));
+      }
+      const { suggestions: suggested, ruleCount, ruleAppliedRows } = await bankStatementSuggestions(client, departmentId, request.body.accountId, rows);
       if (rememberSource && nativeSourceDigest && nativeSourceScope) {
         await client.query(`INSERT INTO finance_settings(department_id,statement_mapping_scope)
           VALUES($1,$2) ON CONFLICT(department_id) DO UPDATE SET statement_mapping_scope=EXCLUDED.statement_mapping_scope
@@ -1592,15 +1657,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("INSERT INTO finance_bank_statement_imports(id,department_id,account_id,file_name,content_sha256,imported_by,row_count) VALUES($1,$2,$3,$4,$5,$6,$7)", [batchId, departmentId, request.body.accountId, fileName, contentHash, request.authenticatedUser?.id ?? null, rows.length]);
       for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index]!; const suggestedTransactionId = suggested[index];
-        await client.query("INSERT INTO finance_bank_statement_rows(id,department_id,import_id,line_number,booking_date,description,reference,amount_cents,status,suggested_transaction_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, batchId, row.line, row.date, row.description, row.reference, row.amount, suggestedTransactionId ? "suggested" : "unmatched", suggestedTransactionId]);
+        const rowId = randomUUID();
+        await client.query("INSERT INTO finance_bank_statement_rows(id,department_id,import_id,line_number,booking_date,description,reference,amount_cents,status,suggested_transaction_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [rowId, departmentId, batchId, row.line, row.date, row.description, row.reference, row.amount, suggestedTransactionId ? "suggested" : "unmatched", suggestedTransactionId]);
+        const paypal = paypalByLine.get(row.line);
+        if (paypal) await client.query(
+          "INSERT INTO finance_paypal_statement_keys(department_id,fingerprint,row_id,gross_cents,fee_cents,currency_code) VALUES($1,$2,$3,$4,$5,$6)",
+          [departmentId, paypal.fingerprint, rowId, paypal.gross, paypal.fee, nativeStatementCurrency],
+        );
       }
-      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: ruleCount, ruleAppliedRows, ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency, ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}) });
+      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: ruleCount, ruleAppliedRows, ...(paypalReport ? { overlapCount, ignoredCount: paypalReport.ignoredCount } : {}), ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency, ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}) });
       await client.query("COMMIT");
       publish(departmentId, "bank-statement-imported", batchId);
-      return reply.code(201).send({ id: batchId, rowCount: rows.length, suggestedCount: suggested.filter(Boolean).length });
+      return reply.code(201).send({ id: batchId, rowCount: rows.length, suggestedCount: suggested.filter(Boolean).length, ...(paypalReport ? { overlapCount, ignoredCount: paypalReport.ignoredCount } : {}) });
     } catch (error) {
       await client.query("ROLLBACK");
-      if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "This statement file has already been imported." });
+      if ((error as { code?: string }).code === "23505") return reply.code(409).send({
+        error: paypalReport ? "An overlapping PayPal report was just imported. Preview this file again." : "This statement file has already been imported.",
+      });
       throw error;
     } finally { client.release(); }
   });

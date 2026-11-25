@@ -92,7 +92,7 @@ type BankRow = { id: string; accountId: string; lineNumber: number; bookingDate:
 type StatementCounterLine = { key: string; accountId: string; costCenterId: string; amount: string };
 const newCounterLine = (): StatementCounterLine => ({ key: crypto.randomUUID(), accountId: "", costCenterId: "", amount: "" });
 type BankSuggestionRule = { id: string; accountId: string; accountCode: string; accountName: string; name: string; statementContains: string; transactionContains: string; priority: number; active: boolean };
-type BankPreview = { format?: "mt940" | "camt053"; accountEnding?: string; currency?: string; rememberedAccountId?: string | null; headers: string[]; rowCount: number; duplicate: boolean; sample: string[][] };
+type BankPreview = { format?: "mt940" | "camt053" | "paypal"; overlapCount?: number; ignoredCount?: number; accountEnding?: string; currency?: string; rememberedAccountId?: string | null; headers: string[]; rowCount: number; duplicate: boolean; sample: string[][] };
 
 const money = (cents: number | string, currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(cents || 0) / 100);
 const today = () => new Date().toISOString().slice(0, 10);
@@ -187,7 +187,8 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [bankRows, setBankRows] = useState<BankRow[]>([]);
   const [selectedBankImportId, setSelectedBankImportId] = useState("");
   const [bankText, setBankText] = useState("");
-  const [bankFormat, setBankFormat] = useState<"csv" | "mt940" | "camt053">("csv");
+  const [bankFormat, setBankFormat] = useState<"csv" | "mt940" | "camt053" | "paypal">("csv");
+  const [paypalDateOrder, setPaypalDateOrder] = useState("");
   const [bankSourceConfirmed, setBankSourceConfirmed] = useState(false);
   const [bankRememberSource, setBankRememberSource] = useState(false);
   const bankFileRead = useRef(0);
@@ -471,7 +472,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   async function readBankStatement(file: File | undefined) {
     const read = ++bankFileRead.current;
     const accountChange = bankAccountChange.current;
-    setBankText(""); setBankFileName(""); setBankPreview(null); setBankSourceConfirmed(false); setBankRememberSource(false); setError("");
+    setBankText(""); setBankFileName(""); setBankPreview(null); setBankSourceConfirmed(false); setBankRememberSource(false); setPaypalDateOrder(""); setError("");
     if (!file) return;
     if (file.size > 2_000_000) { setError("Statement files must be 2 MB or smaller."); return; }
     try {
@@ -494,8 +495,11 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         catch { content = new TextDecoder("windows-1252").decode(bytes); }
       }
       if (read !== bankFileRead.current || bankDepartment.current !== departmentId) return;
-      const format = isCamt ? "camt053" : isMt940 ? "mt940" : "csv";
-      if (format !== "csv") {
+      const header = content.split(/\r?\n/, 1)[0]?.toLowerCase() ?? "";
+      const isPaypal = /(transaction id|transaktionscode|transaktions-id)/.test(header)
+        && /(balance impact|auswirkung auf (das )?guthaben)/.test(header);
+      const format = isCamt ? "camt053" : isMt940 ? "mt940" : isPaypal ? "paypal" : "csv";
+      if (format === "camt053" || format === "mt940") {
         // A suggestion must not override an account chosen while this file was being read.
         const recognized = await send<{ accountId: string | null }>("/api/modules/finance/bank-statements/recognize", "POST",
           { [format]: content });
@@ -514,7 +518,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     if (!bankText || !bankAccountId) return;
     setSaving(true); setError(""); setFeedback("");
     try {
-      const preview = await send<BankPreview>("/api/modules/finance/bank-statements/preview", "POST", { accountId: bankAccountId, fileName: bankFileName, [bankFormat]: bankText });
+      const preview = await send<BankPreview>("/api/modules/finance/bank-statements/preview", "POST", { accountId: bankAccountId, fileName: bankFileName, [bankFormat]: bankText, ...(bankFormat === "paypal" && paypalDateOrder ? { paypalDateOrder } : {}) });
       if (bankDepartment.current !== departmentId) return; setBankPreview(preview); setBankSourceConfirmed(false); setBankRememberSource(false);
       const findColumn = (pattern: RegExp) => { const index = preview.headers.findIndex((header) => pattern.test(header)); return index < 0 ? "" : String(index); };
       setBankMapping({ date: findColumn(/date|datum/i), amount: findColumn(/amount|betrag|value|summe/i), description: findColumn(/description|text|booking|buchung|details/i), reference: findColumn(/reference|referenz|id|number|nummer/i) });
@@ -523,19 +527,22 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   }
 
   async function importBankStatement() {
-    if (!bankPreview || bankPreview.duplicate ||
+    if (!bankPreview || bankPreview.duplicate || (bankPreview.format === "paypal" && !bankPreview.rowCount) ||
       (bankPreview.format ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)) return;
     setSaving(true); setError(""); setFeedback("");
     try {
-      const result = await send<{ id: string; rowCount: number; suggestedCount: number }>("/api/modules/finance/bank-statements/import", "POST", { accountId: bankAccountId, fileName: bankFileName, [bankFormat]: bankText, ...(bankFormat !== "csv"
+      const result = await send<{ id: string; rowCount: number; suggestedCount: number; overlapCount?: number; ignoredCount?: number }>("/api/modules/finance/bank-statements/import", "POST", { accountId: bankAccountId, fileName: bankFileName, [bankFormat]: bankText, ...(bankFormat === "paypal" && paypalDateOrder ? { paypalDateOrder } : {}), ...(bankFormat !== "csv"
           ? { confirmSourceAccount: bankSourceConfirmed, ...(bankRememberSource ? { rememberSource: { expectedAccountId: bankPreview.rememberedAccountId ?? null } } : {}) }
           : { mapping: { date: Number(bankMapping.date), amount: Number(bankMapping.amount),
             description: bankMapping.description === "" ? null : Number(bankMapping.description),
             reference: bankMapping.reference === "" ? null : Number(bankMapping.reference) } }) });
-      setFeedback(`Imported ${result.rowCount} statement rows. ${result.suggestedCount} possible ledger matches need review.`);
       setBankText(""); setBankFileName(""); setBankPreview(null); setBankSourceConfirmed(false); setBankRememberSource(false);
       await openBankStatements();
       await openBankImport(result.id);
+      if (bankDepartment.current === departmentId) {
+        setFeedback(`Imported ${result.rowCount} statement rows. ${result.suggestedCount} possible ledger matches need review.`
+          + (result.overlapCount ? ` Duplicate PayPal transactions skipped (${result.overlapCount}).` : ""));
+      }
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import this statement."); }
     finally { setSaving(false); }
   }
@@ -843,20 +850,23 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
           void action(() => send(`/api/modules/finance/accounting-years/${item.accountingYear}/journal-numbering`,"PUT",{enabled}),"Receipt numbering updated.");
         }} /> Automatic receipt numbers</label><button className="finance-text-button" type="button" disabled={saving} onClick={() => item.status === "open" ? void openAccountingYearSummary(item.accountingYear) : void setAccountingYearStatus(item, "open")}>{item.status === "open" ? "Close and carry forward" : "Reopen"}</button></div></td></tr>; })}</tbody></table></div> : <p className="finance-empty">No accounting years configured.</p>}
     </section>}
-    {tab === "bank-statements" && <section className="finance-section"><div className="finance-section-heading"><div><h2>Bank statements</h2><p>Import a CSV, MT940, or CAMT.053 statement, review matching suggestions, and link statement rows to existing ledger entries. Imports never create postings.</p></div><button className="button button-secondary" type="button" onClick={() => void openBankStatements()}><RefreshCw size={15} />Refresh</button></div>{canManage && <div className="finance-bank-import"><h3>Import a bank statement</h3><div className="finance-form-grid"><label>Bank asset account<select value={bankAccountId} disabled={saving} onChange={(event) => { bankAccountChange.current++; setBankAccountId(event.target.value); setBankPreview(null); setBankSourceConfirmed(false); setBankRememberSource(false); }}><option value="">Choose an account</option>{bootstrap.accounts.filter((account) => account.active && account.accountType === "asset").map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select></label><label>CSV, MT940, or CAMT.053 file
+    {tab === "bank-statements" && <section className="finance-section"><div className="finance-section-heading"><div><h2>Bank statements</h2><p>Import a CSV, MT940, CAMT.053, or PayPal Activity Report, review matching suggestions, and link statement rows to existing ledger entries. Imports never create postings.</p></div><button className="button button-secondary" type="button" onClick={() => void openBankStatements()}><RefreshCw size={15} />Refresh</button></div>{canManage && <div className="finance-bank-import"><h3>Import a bank statement</h3><div className="finance-form-grid"><label>Bank asset account<select value={bankAccountId} disabled={saving} onChange={(event) => { bankAccountChange.current++; setBankAccountId(event.target.value); setBankPreview(null); setBankSourceConfirmed(false); setBankRememberSource(false); }}><option value="">Choose an account</option>{bootstrap.accounts.filter((account) => account.active && account.accountType === "asset").map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select></label><label>Statement or PayPal Activity Report file
       <input type="file" accept=".csv,.mt940,.sta,.swi,.txt,.xml,.camt,.053,text/csv,text/plain,application/xml,text/xml" disabled={saving}
         onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void readBankStatement(file); }} />
-    </label></div>{bankText && <div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => void previewBankStatement()} disabled={saving || !bankAccountId}>Preview file</button><span>{bankFileName}</span></div>}{bankPreview && <><p>{bankPreview.rowCount} statement rows found.{bankPreview.duplicate ? " This exact file was already imported for this account." : ""}</p>{bankPreview.format && <p>{bankPreview.format === "mt940" ? "MT940" : "CAMT.053"} source account ending in {bankPreview.accountEnding} · {bankPreview.currency}</p>}
+    </label>{bankText && bankFormat === "paypal" && <label>PayPal dates with slashes
+      <select value={paypalDateOrder} disabled={saving} onChange={event => { setPaypalDateOrder(event.target.value); setBankPreview(null); setBankSourceConfirmed(false); }}>
+        <option value="">Report dates have no slashes</option><option value="day-first">Day / month / year</option><option value="month-first">Month / day / year</option>
+      </select></label>}</div>{bankText && <div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => void previewBankStatement()} disabled={saving || !bankAccountId}>Preview file</button><span>{bankFileName}</span></div>}{bankPreview && <><p>{bankPreview.rowCount} statement rows found.{bankPreview.duplicate ? " This exact file was already imported for this account." : ""}</p>{bankPreview.format === "paypal" && <p>PayPal Activity Report · {bankPreview.currency}. Skip duplicates ({bankPreview.overlapCount ?? 0}) and entries with no balance impact ({bankPreview.ignoredCount ?? 0}).</p>}{bankPreview.format && bankPreview.format !== "paypal" && <p>{bankPreview.format === "mt940" ? "MT940" : "CAMT.053"} source account ending in {bankPreview.accountEnding} · {bankPreview.currency}</p>}
     {!bankPreview.format && bankPreview.headers.length > 0 && <div className="finance-form-grid"><label>Date column<select value={bankMapping.date} onChange={(event) => setBankMapping({ ...bankMapping, date: event.target.value })}><option value="">Choose date column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label><label>Amount column<select value={bankMapping.amount} onChange={(event) => setBankMapping({ ...bankMapping, amount: event.target.value })}><option value="">Choose amount column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label>{(["description", "reference"] as const).map((key) => <label key={key}>{key === "description" ? "Description" : "Reference"} column<select value={bankMapping[key]} onChange={(event) => setBankMapping({ ...bankMapping, [key]: event.target.value })}><option value="">No column</option>{bankPreview.headers.map((header, index) => <option key={index} value={index}>{index + 1}. {header}</option>)}</select></label>)}</div>}{bankPreview.sample.length > 0 && <div className="finance-table-wrap"><table className="finance-table">
       {bankPreview.format && <thead><tr>{bankPreview.headers.map(heading => <th key={heading} scope="col">{heading}</th>)}</tr></thead>}
       <tbody>{bankPreview.sample.map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{value}</td>)}</tr>)}</tbody></table></div>}{bankPreview.format && <label>
       <input type="checkbox" checked={bankSourceConfirmed} onChange={event => setBankSourceConfirmed(event.target.checked)} />
       I confirm the statement belongs to the selected ledger account.
-    </label>}{bankPreview.format && bankPreview.rememberedAccountId !== bankAccountId && <label>
+    </label>}{bankPreview.format && bankPreview.format !== "paypal" && bankPreview.rememberedAccountId !== bankAccountId && <label>
       <input type="checkbox" checked={bankRememberSource} disabled={!bankSourceConfirmed || bankPreview.duplicate}
         onChange={event => setBankRememberSource(event.target.checked)} />
       {bankPreview.rememberedAccountId ? "Replace the remembered ledger account for this source after import" : "Remember this source account for future statements"}
-    </label>}<div className="finance-action-row"><button className="button button-primary" type="button" onClick={() => void importBankStatement()} disabled={saving || bankPreview.duplicate || (bankPreview.format ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)}>Import and suggest matches</button></div></>}</div>}
+    </label>}<div className="finance-action-row"><button className="button button-primary" type="button" onClick={() => void importBankStatement()} disabled={saving || bankPreview.duplicate || (bankPreview.format === "paypal" && !bankPreview.rowCount) || (bankPreview.format ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)}>Import and suggest matches</button></div></>}</div>}
       <h3>Imported statements</h3>{bankImports.length ? <div className="finance-bank-import-list">{bankImports.map((item) => <button type="button" key={item.id} className={selectedBankImportId === item.id ? "is-selected" : ""} disabled={saving} onClick={() => void openBankImport(item.id)}><strong>{item.fileName}</strong><small>{item.accountCode} · {item.accountName} · {new Date(item.importedAt).toLocaleString()}</small><small>{item.rowCount} rows · {item.matched} matched · {item.suggested} suggested · {item.unmatched} unmatched · {item.ignored} ignored</small></button>)}</div> : <p className="finance-empty">No statement imports yet.</p>}
       {selectedBankImportId && <><div className="finance-section-heading"><h3>Statement rows</h3>
         {canManage && <button type="button" className="button button-secondary" disabled={saving}
