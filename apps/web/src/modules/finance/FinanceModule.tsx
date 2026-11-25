@@ -74,7 +74,7 @@ const transitTranslations: Record<string, Partial<Record<string, string>>> = {
   "Debits the destination and credits clearing. Use the same clearing account and amount as the outgoing leg.": { de: "Bucht das Zielkonto im Soll und das Geldtransitkonto im Haben. Verwende dasselbe Geldtransitkonto und denselben Betrag wie bei der Abbuchung.", fr: "Débite le compte destinataire et crédite le compte de transit. Utilisez le même compte de transit et le même montant que pour l'envoi.", it: "Addebita il conto di destinazione e accredita il conto di transito. Usa lo stesso conto di transito e lo stesso importo dell'uscita." },
 };
 
-function transitAmountCents(amount: string): number {
+function postingAmountCents(amount: string): number {
   const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(amount);
   if (!parts) return 0;
   const cents = Number(parts[1]) * 100 + Number((parts[2] ?? "").padEnd(2, "0"));
@@ -88,6 +88,8 @@ type ReceiptPreview = { donorId: string; donorName: string; donorEmail: string; 
 type IssuedReceipt = { id: string; batchId: string; receiptNumber: string; donorName: string; amountCents: number; currency: string; periodStart: string; periodEnd: string; printUrl: string; batchPrintUrl: string; createdAt?: string };
 type BankImport = { id: string; fileName: string; importedAt: string; rowCount: number; accountCode: string; accountName: string; matched: number; suggested: number; unmatched: number; ignored: number };
 type BankRow = { id: string; accountId: string; lineNumber: number; bookingDate: string; description: string; reference: string; amountCents: number; status: "unmatched" | "suggested" | "matched" | "ignored"; suggestedTransactionId: string | null; matchedTransactionId: string | null; transactionReceipt: string | null; transactionText: string | null };
+type StatementCounterLine = { key: string; accountId: string; costCenterId: string; amount: string };
+const newCounterLine = (): StatementCounterLine => ({ key: crypto.randomUUID(), accountId: "", costCenterId: "", amount: "" });
 type BankSuggestionRule = { id: string; accountId: string; accountCode: string; accountName: string; name: string; statementContains: string; transactionContains: string; priority: number; active: boolean };
 type BankPreview = { headers: string[]; rowCount: number; duplicate: boolean; sample: string[][] };
 
@@ -146,7 +148,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showPosting, setShowPosting] = useState(false);
-  const [bankPosting, setBankPosting] = useState<{ row: BankRow; counterAccount: string } | null>(null);
+  const [bankPosting, setBankPosting] = useState<{ row: BankRow; lines: StatementCounterLine[] } | null>(null);
   const [transitDraft, setTransitDraft] = useState<TransitDraft | null>(null);
   const [manualReceipt,setManualReceipt] = useState(false);
   const journalSubmissionId=useRef<string|null>(null);
@@ -291,7 +293,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   }
 
   const transitAccounts = bootstrap.accounts.filter(account => account.active && account.accountType === "asset");
-  const transitCents = transitAmountCents(transitDraft?.amount ?? "");
+  const transitCents = postingAmountCents(transitDraft?.amount ?? "");
   const transitValid = Boolean(transitDraft && transitCents > 0
     && transitDraft.bankAccount !== transitDraft.clearingAccount
     && transitAccounts.some(account => account.id === transitDraft.bankAccount)
@@ -302,9 +304,19 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const automaticReceipt = dateUsesNumbering && !manualReceipt;
 
   const bankAsset = bankPosting && transitAccounts.find(account => account.id === bankPosting.row.accountId);
-  const bankPostingValid = Boolean(bankPosting && bankAsset
-    && Number.isSafeInteger(bankPosting.row.amountCents) && bankPosting.row.amountCents !== 0
-    && bootstrap.accounts.some(account => account.active && account.id === bankPosting.counterAccount && account.id !== bankAsset.id));
+  const bankAmount = Math.abs(bankPosting?.row.amountCents ?? 0);
+  const isBankSplit = (bankPosting?.lines.length ?? 0) > 1;
+  const counterAmounts = bankPosting?.lines.map(line => isBankSplit ? postingAmountCents(line.amount) : bankAmount) ?? [];
+  const splitTotal = counterAmounts.reduce((sum, amount) => sum + amount, 0);
+  const bankPostingValid = Boolean(bankPosting && bankAsset && Number.isSafeInteger(bankAmount) && bankAmount > 0
+    && splitTotal === bankAmount && bankPosting.lines.every((line, index) => counterAmounts[index] > 0
+      && bootstrap.accounts.some(account => account.active && account.id === line.accountId && account.id !== bankAsset.id)
+      && (!line.costCenterId || bootstrap.costCenters.some(center => center.active && center.id === line.costCenterId))));
+
+  function updateBankCounterLine(key: string, changes: Partial<Omit<StatementCounterLine, "key">>) {
+    setBankPosting(current => current && { ...current, lines: current.lines.map(line =>
+      line.key === key ? { ...line, ...changes } : line) });
+  }
 
   function openBankPosting(row: BankRow) {
     journalSubmissionId.current = null;
@@ -313,7 +325,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     setBookingDate(row.bookingDate.slice(0, 10));
     setBookingText((row.description || row.reference || "Bank statement posting").slice(0, 500));
     setTransitDraft(null);
-    setBankPosting({ row, counterAccount: "" });
+    setBankPosting({ row, lines: [newCounterLine()] });
     setShowPosting(true);
   }
 
@@ -326,7 +338,9 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     const bankCredit = Math.max(0, -(bankPosting?.row.amountCents ?? 0));
     const payload = bankPosting ? [
       { accountId: bankPosting.row.accountId, debitCents: bankDebit, creditCents: bankCredit },
-      { accountId: bankPosting.counterAccount, debitCents: bankCredit, creditCents: bankDebit },
+      ...bankPosting.lines.map((line, index) => ({ accountId: line.accountId, costCenterId: line.costCenterId || null,
+        debitCents: bankCredit > 0 ? counterAmounts[index] : 0,
+        creditCents: bankDebit > 0 ? counterAmounts[index] : 0 })),
     ] : transitDebit && transitCredit ? [
       { accountId: transitDebit, debitCents: transitCents, creditCents: 0 },
       { accountId: transitCredit, debitCents: 0, creditCents: transitCents },
@@ -843,12 +857,40 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         <legend>Statement details</legend>
         <p className="finance-form-wide">{bankAsset?.code} · {bankAsset?.name} · {money(bankPosting.row.amountCents, bootstrap.currency)}
           {bankPosting.row.reference && <> · {bankPosting.row.reference}</>}</p>
-        <label>Counteraccount<select required value={bankPosting.counterAccount}
-          onChange={event => setBankPosting({ ...bankPosting, counterAccount: event.target.value })}>
-          <option value="">Choose an account</option>
-          {bootstrap.accounts.filter(account => account.active && account.id !== bankPosting.row.accountId).map(account =>
-            <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}
-        </select></label>
+        {bankPosting.lines.map((line, index) => <div className="finance-form-grid finance-form-wide" key={line.key}>
+          <label>{isBankSplit ? `Counteraccount ${index + 1}` : "Counteraccount"}
+            <select required value={line.accountId} onChange={event => updateBankCounterLine(line.key, { accountId: event.target.value })}>
+              <option value="">Choose an account</option>
+              {bootstrap.accounts.filter(account => account.active && account.id !== bankPosting.row.accountId).map(account =>
+                <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}
+            </select>
+          </label>
+          <label>{isBankSplit ? `Cost center ${index + 1}` : t("Cost center")}
+            <select value={line.costCenterId} onChange={event => updateBankCounterLine(line.key, { costCenterId: event.target.value })}>
+              <option value="">{t("Choose cost center")}</option>
+              {bootstrap.costCenters.filter(center => center.active).map(center =>
+                <option key={center.id} value={center.id}>{center.code} · {center.name}</option>)}
+            </select>
+          </label>
+          {isBankSplit && <>
+            <label>{`Amount ${index + 1}`}
+              <input type="number" inputMode="decimal" min="0.01" step="0.01" required value={line.amount}
+                onChange={event => updateBankCounterLine(line.key, { amount: event.target.value })} />
+            </label>
+            <div className="finance-form-actions">
+              <button type="button" className="finance-text-button" aria-label={`Remove split line ${index + 1}`}
+                onClick={() => setBankPosting({ ...bankPosting, lines: bankPosting.lines.filter(item => item.key !== line.key) })}>{t("Remove")}</button>
+            </div>
+          </>}
+        </div>)}
+        <div className="finance-form-wide finance-action-row">
+          <button type="button" className="finance-text-button" disabled={bankPosting.lines.length >= 99}
+            onClick={() => setBankPosting({ ...bankPosting, lines: [...bankPosting.lines, newCounterLine()] })}>Add split line</button>
+          {isBankSplit && <span aria-live="polite">{Number.isSafeInteger(splitTotal)
+            ? splitTotal > bankAmount ? `Over by ${money(splitTotal - bankAmount, bootstrap.currency)}`
+              : `Remaining ${money(bankAmount - splitTotal, bootstrap.currency)}`
+            : "Enter smaller split amounts."}</span>}
+        </div>
       </fieldset> : transitDraft ? <fieldset className="finance-form-grid" disabled={saving}>
         <legend>{t("Transfer leg")}</legend>
         <label>{t("Direction")}<select value={transitDraft.leg} onChange={event => {
