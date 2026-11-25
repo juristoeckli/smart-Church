@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { postalAddressFields, type PostalAddress } from "./postal-address";
 
-export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select" | "number" | "multiline"; required: boolean; options: string[]; textMaxLength?: number | null };
+export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select" | "number" | "multiline" | "datetime"; required: boolean; options: string[]; textMaxLength?: number | null };
 export type CreatePersonInput = {
   firstName: string; lastName: string; email?: string; phone?: string; status: "member" | "visitor";
   postalAddress: PostalAddress; fields: Record<string, string | boolean | number>;
 };
 
-export function PeopleCreateForm({ fields, onCreate, onClose }: {
+export function PeopleCreateForm({ fields, timeZone, onCreate, onClose }: {
   fields: CreationField[];
+  timeZone: string;
   onCreate: (person: CreatePersonInput, signal: AbortSignal) => Promise<void>;
   onClose: () => void;
 }) {
@@ -69,7 +70,7 @@ export function PeopleCreateForm({ fields, onCreate, onClose }: {
       </fieldset>
       {fields.length > 0 && <fieldset disabled={saving}>
         <legend>Custom fields</legend>
-        {fields.map((field) => <label key={field.id}>{field.label}
+        {fields.map((field) => <label key={field.id}>{field.label}{field.type === "datetime" && ` (${timeZone})`}
           {field.type === "select" || field.type === "boolean" ?
             <select name={"field:" + field.id} required={field.required}>
               <option value="">Choose a value</option>
@@ -77,7 +78,7 @@ export function PeopleCreateForm({ fields, onCreate, onClose }: {
                 field.options.map((option, index) => <option key={index} value={option}>{option}</option>)}
             </select> : field.type === "multiline" ?
             <textarea name={"field:" + field.id} required={field.required} maxLength={field.textMaxLength ?? 2000} rows={4} /> :
-            <input name={"field:" + field.id} type={field.type} step={field.type === "number" ? "any" : undefined} required={field.required}
+            <input name={"field:" + field.id} type={field.type === "datetime" ? "datetime-local" : field.type} step={field.type === "datetime" ? 1 : field.type === "number" ? "any" : undefined} required={field.required}
               maxLength={field.type === "text" ? field.textMaxLength ?? 2000 : undefined} />}
         </label>)}
       </fieldset>}

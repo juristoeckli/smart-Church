@@ -6,7 +6,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import { canManagePeopleFields } from "../people-records/field-privacy.js";
 
-type FieldType = "text" | "number" | "date";
+import { normalizePeopleLocalDateTime } from "../people-records/local-datetime.js";
+
+type FieldType = "text" | "number" | "date" | "datetime";
 type DatasetKey = "people" | "groups" | "memberships" | "events" | "finance" | "resourceBookings";
 type Field = { key: string; label: string; type: FieldType };
 type Filter = { field: string; operator: "equals" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string | number };
@@ -107,7 +109,11 @@ function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
     } else {
       if (typeof f.value !== "string" || f.value.length > 200 || !f.value.trim()) return "Enter a filter value.";
       if (field.type === "date" && (!/^\d{4}-\d{2}-\d{2}$/.test(f.value) || !Number.isFinite(Date.parse(f.value + "T00:00:00Z")) || new Date(f.value + "T00:00:00Z").toISOString().slice(0, 10) !== f.value)) return "Enter a valid date filter value.";
-      filterValue = f.value.trim();
+      if (field.type === "datetime") {
+        const normalized = normalizePeopleLocalDateTime(f.value.trim());
+        if (normalized === null) return "Enter a valid local date and time.";
+        filterValue = normalized;
+      } else filterValue = f.value.trim();
     }
     filters.push({ field: field.key, operator: operator as Filter["operator"], value: filterValue });
   }
@@ -225,7 +231,7 @@ function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: 
   const filtered = inputRows.filter((row) => definition.filters.every((filter) => {
     const field = byKey.get(filter.field)!;
     const raw = row[field.key];
-    if (field.type === "number" && field.key.startsWith("custom_") && raw == null) return false;
+    if ((field.type === "datetime" || (field.type === "number" && field.key.startsWith("custom_"))) && raw == null) return false;
     if (filter.operator === "equals") return field.type === "text" ? String(raw ?? "").toLocaleLowerCase() === String(filter.value).toLocaleLowerCase() : compare(raw, filter.value, field.type) === 0;
     if (filter.operator === "contains") return String(raw ?? "").toLocaleLowerCase().includes(String(filter.value).toLocaleLowerCase());
     const order = compare(raw, filter.value, field.type);
@@ -288,7 +294,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       }
       if (item.key !== "people" || !customFields.rows.length) return item;
       const fields = customFields.rows.filter((field) => /^[0-9a-f-]{36}$/i.test(field.id));
-      const additions = fields.map((field) => ({ key: `custom_${field.id.replace(/-/g, "")}`, label: `Custom: ${field.label}`, type: field.field_type === "date" ? "date" as const : field.field_type === "number" ? "number" as const : "text" as const }));
+      const additions = fields.map((field) => ({ key: `custom_${field.id.replace(/-/g, "")}`, label: `Custom: ${field.label}`, type: field.field_type === "date" ? "date" as const : field.field_type === "number" ? "number" as const : field.field_type === "datetime" ? "datetime" as const : "text" as const }));
       if (!additions.length) return item;
       const fieldVisibility = canManageFields ? "TRUE" : "COALESCE(to_jsonb(field)->>'visibility','private_people')='private_people'";
       const expressions = fields.map((field) => `(SELECT ${field.field_type === "number" ? "(record.value #>> '{}')::double precision" : "record.value #>> '{}'"} FROM people_record_values record

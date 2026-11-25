@@ -7,6 +7,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { withChoiceDefinitionWrite } from "./choice-rename.js";
 import { normalizePostalAddress, postalAddressSchema, type PostalAddress } from "./postal-address.js";
 
+import { normalizePeopleLocalDateTime } from "./local-datetime.js";
 import { normalizeMultilineField } from "./multiline-field.js";
 import { validPeopleNumber } from "./number-field.js";
 
@@ -24,6 +25,7 @@ function validValue(field: CreationField, value: unknown): value is FieldValue {
   if (typeof value !== "string" || !value.trim()) return false;
   if (field.field_type === "text" || field.field_type === "multiline") return value.length <= (field.text_max_length ?? 2000);
   if (field.field_type === "select") return Array.isArray(field.options) && field.options.includes(value);
+  if (field.field_type === "datetime") return normalizePeopleLocalDateTime(value) !== null;
   if (field.field_type !== "date" || !/^(?!0000-)\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const parsed = new Date(value + "T00:00:00Z");
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
@@ -69,7 +71,7 @@ export function registerPersonCreation(routes: FastifyInstance, context: ModuleS
           continue;
         }
         if (!validValue(field, value)) return { status: 400, error: "Choose a valid value for “" + field.label + "”." } as const;
-        values.push({ field, value });
+        values.push({ field, value: field.field_type === "datetime" ? normalizePeopleLocalDateTime(value)! : value });
       }
       const id = randomUUID();
       await client.query(

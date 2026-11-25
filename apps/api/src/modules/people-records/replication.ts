@@ -154,7 +154,7 @@ function canonical(value: unknown): unknown {
 export function registerPeopleRecordsReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "7",
+    schemaVersion: "8",
     async requiresSnapshot(departmentId) {
       if (!pool || !isDatabaseReady()) return false;
       return Boolean((await readiness(pool, departmentId)).recordCount);
