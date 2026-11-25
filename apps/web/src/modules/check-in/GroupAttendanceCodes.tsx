@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { attendanceCameraMessage, isAttendanceCameraCode } from "./attendance-camera-message";
 
 type Policy = { enabled: boolean; roles: string[] };
 type Settings = Policy & {
@@ -28,6 +29,32 @@ export function GroupAttendanceCodes({ departmentId, groupId, meetingId, csrfTok
   const controller = useRef<AbortController | null>(null);
   const scanner = useRef<HTMLInputElement>(null);
   const refocusScanner = useRef(false);
+  const camera = useRef<Window | null>(null);
+  const receiveCameraCode = useRef<(code: string) => void>(() => {});
+  const cameraAllowed = Boolean(settings?.enabled && meetingId && !completed);
+
+  useEffect(() => {
+    const receive = (event: MessageEvent) => {
+      if (!camera.current || event.source !== camera.current || event.origin !== window.location.origin) return;
+      const data = event.data;
+      if (data?.type !== attendanceCameraMessage || !isAttendanceCameraCode(data.code)) return;
+      camera.current.close();
+      camera.current = null;
+      receiveCameraCode.current(data.code);
+    };
+    window.addEventListener("message", receive);
+    return () => {
+      window.removeEventListener("message", receive);
+      camera.current?.close();
+      camera.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (cameraAllowed) return;
+    camera.current?.close();
+    camera.current = null;
+  }, [cameraAllowed]);
 
   useEffect(() => {
     if (disabled || pending || !refocusScanner.current) return;
@@ -122,17 +149,34 @@ export function GroupAttendanceCodes({ departmentId, groupId, meetingId, csrfTok
     });
   }
 
-  function redeem(event: FormEvent) {
-    event.preventDefault();
-    if (!meetingId || completed || !enteredCode.trim()) return;
+  function redeemCode(code: string) {
+    if (!meetingId || !cameraAllowed || !code.trim()) return;
+    const previous = enteredCode;
     refocusScanner.current = true;
     void run(async (signal) => {
-      const result = await request<{ alreadyPresent: boolean }>("/meetings/" + meetingId + "/redeem", signal, "POST", { code: enteredCode });
+      const result = await request<{ alreadyPresent: boolean }>("/meetings/" + meetingId + "/redeem", signal, "POST", { code });
       if (signal.aborted) return;
-      setEnteredCode("");
+      setEnteredCode(current => current === previous ? "" : current);
       setNotice(result.alreadyPresent ? "This attendee is already marked present." : "Attendance recorded.");
       onRedeemed();
     });
+  }
+
+  receiveCameraCode.current = (code) => {
+    if (!cameraAllowed) return;
+    if (controller.current || disabled) setEnteredCode(code);
+    else redeemCode(code);
+  };
+
+  function openCamera() {
+    if (!cameraAllowed || controlsDisabled) return;
+    if (camera.current && !camera.current.closed) {
+      camera.current.focus();
+      return;
+    }
+    setError("");
+    camera.current = window.open("/check-in-camera.html", "_blank", "popup,width=640,height=680");
+    if (!camera.current) setError("The scanner window was blocked. Allow pop-ups for Check-in or enter the code below.");
   }
 
   return <section className="checkin-toolbar" aria-label="Group attendance codes">
@@ -178,7 +222,8 @@ export function GroupAttendanceCodes({ departmentId, groupId, meetingId, csrfTok
         </>}
       </> : !error && <p role="status">Loading attendance code settings…</p>}
     </details>
-    {settings?.enabled && meetingId && !completed && <form className="checkin-toolbar" onSubmit={redeem}>
+    {cameraAllowed && <form className="checkin-toolbar" onSubmit={(event: FormEvent) => { event.preventDefault(); redeemCode(enteredCode); }}>
+      <button className="checkin-print" type="button" disabled={controlsDisabled} onClick={openCamera}>Scan with camera</button>
       <p>Use a keyboard-mode QR scanner or enter the printed code.</p>
       <label>Scan or enter an attendance code<input ref={scanner} value={enteredCode} onChange={(event) => setEnteredCode(event.target.value)}
         autoComplete="off" spellCheck={false} maxLength={100} disabled={controlsDisabled} required /></label>

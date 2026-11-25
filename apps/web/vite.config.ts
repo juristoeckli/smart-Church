@@ -66,7 +66,10 @@ export default defineConfig(({ command }) => {
         output: { entryFileNames: "[name].js", chunkFileNames: "assets/[name]-[hash].js" },
       },
     } : {
-      rollupOptions: { external: ["react", "react/jsx-runtime", "react-dom", "react-dom/client"] },
+      rollupOptions: {
+        input: [resolve(appRoot, "index.html"), resolve(appRoot, "check-in-camera.html")],
+        external: ["react", "react/jsx-runtime", "react-dom", "react-dom/client"],
+      },
     },
     server: {
       proxy: {

@@ -65,7 +65,10 @@ const server = createServer(async (request, response) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
   response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  const attendanceScanner = pathname === "/check-in-camera.html" && target === resolve(root, "check-in-camera.html");
+  response.setHeader("Permissions-Policy", attendanceScanner
+    ? "camera=(self), microphone=(), geolocation=()"
+    : "camera=(), microphone=(), geolocation=()");
   response.setHeader("Content-Type", contentTypes.get(extname(target).toLowerCase()) ?? "application/octet-stream");
   if (target.includes(`${sep}assets${sep}`)) response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
   else response.setHeader("Cache-Control", "no-cache");
