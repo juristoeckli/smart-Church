@@ -10,6 +10,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ServicePlanTemplate } from "@smart-church/contracts";
+import { registerCalendarReplication } from "./replication.js";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import { calendarReminderOccurrence, calendarReminderWindow, type CalendarReminderSchedule } from "../../calendar-reminders.js";
 import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "../../calendar-time.js";
@@ -198,6 +199,7 @@ async function moveCalendarOccurrenceLinks(db: PoolClient, oldId: string, newId:
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  registerCalendarReplication(context);
   registerAppointmentTemplates(app, context, canManageCalendar);
   registerCalendarTagDefinitions(app, context, (request) => canManageCalendar(request, "community", null));
   registerCalendarMeetingRequests(app, context, canManageCalendar);
