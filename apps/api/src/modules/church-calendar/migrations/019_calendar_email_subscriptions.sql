@@ -31,7 +31,7 @@ RETURNS BOOLEAN LANGUAGE sql STABLE AS $function$
        AND (calendar.scope='community' OR (calendar.scope='personal' AND calendar.owner_user_id=recipient)
             OR (calendar.scope='group' AND EXISTS (
         SELECT 1 FROM church_groups church_group
-         WHERE church_group.id=calendar.group_id AND church_group.department_id=site_id AND church_group.status='active'
+         WHERE church_group.id=calendar.group_id AND church_group.department_id=site_id AND COALESCE(to_jsonb(church_group)->>'status','active')='active'
            AND (membership.role='site_admin' OR membership.permissions && ARRAY['events_manage','groups_manage']
                OR COALESCE(membership.module_permissions->'church-calendar','[]'::jsonb) @> '["manage"]'::jsonb
                OR EXISTS (
