@@ -379,7 +379,8 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
     && choices.servicePlanTemplates.length > 0;
 
   const canCreateSignupGroup = !editing && canManageGroups && department.enabledModules?.includes("community")
-    && draftCalendar?.scope === "community" && draftCalendar.canManage && !draft.internalOnly && !draft.signupGroupId;
+    && draftCalendar && draftCalendar.scope !== "personal" && draftCalendar.canManage && !draft.internalOnly && !draft.signupGroupId;
+  const canScheduleNewSignupGroup = draftCalendar?.scope === "community";
 
   function openNew(date?: Date) {
     if (!writableCalendars.length) {
@@ -1003,13 +1004,13 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
         <label className="church-calendar-check"><input type="checkbox" checked={!!newSignupGroup}
           onChange={(event) => setNewSignupGroup(event.target.checked ? { templateGroupId: "", throughDate: draft.endsOn, scheduled: false, leadDays: "14", autoPublish: false, deactivateAfterDays: "" } : undefined)} /> {draft.repeat ? "Create registration groups for this series" : "Create a registration group"}</label>
         {newSignupGroup && <>
-          <label>When to create registration drafts
+          {canScheduleNewSignupGroup && <label>When to create registration drafts
             <select value={newSignupGroup.scheduled ? "scheduled" : "now"}
               onChange={(event) => setNewSignupGroup({ ...newSignupGroup, scheduled: event.target.value === "scheduled" })}>
               <option value="now">On appointment save</option>
               <option value="scheduled">A set number of days before each appointment</option>
             </select>
-          </label>
+          </label>}
           {newSignupGroup.scheduled && <label>Draft creation lead days
             <input type="number" min={0} max={365} required value={newSignupGroup.leadDays}
               onChange={(event) => setNewSignupGroup({ ...newSignupGroup, leadDays: event.target.value })} />

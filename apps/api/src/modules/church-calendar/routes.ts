@@ -1593,8 +1593,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (isContributor || !(request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage"))) {
         return responseError(reply, 403, "Calendar and group management access is required to create a registration group.");
       }
-      if (calendar.scope !== "community" || normalized.internalOnly || normalized.signupGroupId) {
-        return responseError(reply, 400, "Create registration groups from a community appointment without an existing signup link or internal visibility.");
+      if (calendar.scope === "personal" || normalized.internalOnly || normalized.signupGroupId) {
+        return responseError(reply, 400, "Create registration groups from a community or group calendar appointment without an existing signup link or internal visibility.");
+      }
+      if (calendar.scope === "group" && newSignupGroup.leadDays !== undefined) {
+        return responseError(reply, 400, "Group calendar registration drafts are created on save.");
       }
       const throughDate = newSignupGroup.throughDate;
       if (newSignupGroup.deactivateAfterDays !== undefined && !newSignupGroup.autoPublish) {
@@ -1686,12 +1689,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (newSignupGroup) {
         const target = await client.query(
           `SELECT 1 FROM church_calendar_calendars calendar JOIN departments site ON site.id=calendar.department_id
-            WHERE calendar.id=$1 AND calendar.department_id=$2 AND calendar.scope='community' AND calendar.archived_at IS NULL
-              AND 'community'=ANY(site.enabled_modules) FOR SHARE OF calendar`, [normalized.calendarId, departmentId],
+            WHERE calendar.id=$1 AND calendar.department_id=$2 AND calendar.archived_at IS NULL
+              AND 'community'=ANY(site.enabled_modules)
+              AND (calendar.scope='community' OR (calendar.scope='group' AND $3 AND EXISTS (
+                SELECT 1 FROM church_groups owning_group WHERE owning_group.id=calendar.group_id
+                  AND owning_group.department_id=calendar.department_id AND owning_group.status='active' FOR SHARE
+              ))) FOR SHARE OF calendar`, [normalized.calendarId, departmentId, newSignupGroup.leadDays === undefined],
         );
         if (!target.rowCount || !isServerModuleEnabled("community")) {
           await client.query("ROLLBACK");
-          return responseError(reply, 409, "An active community calendar and Groups are required at this location.");
+          return responseError(reply, 409, "An active community or group calendar and Groups are required at this location.");
         }
         const templateGroupId = newSignupGroup.templateGroupId;
         if (templateGroupId) {
