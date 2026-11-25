@@ -196,6 +196,18 @@ const dependentModuleRecords = [
     ],
     message: "This location has People Records data. A matching People Records snapshot is required to preserve it.",
   },
+  {
+    moduleId: "finance",
+    tables: [
+      "finance_settings", "finance_accounts", "finance_cost_centers", "finance_donors",
+      "finance_transactions", "finance_transaction_lines", "finance_budgets", "finance_audit",
+      "finance_receipt_settings", "finance_receipt_batches", "finance_donation_receipts",
+      "finance_bank_statement_imports", "finance_bank_statement_rows", "finance_bank_suggestion_rules",
+      "finance_accounting_years", "finance_year_end_transfers", "finance_tax_types",
+      "finance_transaction_evidence", "finance_journal_numbering", "finance_bank_statement_account_mappings",
+    ],
+    message: "This location has Finance & Giving data. A matching Finance snapshot is required to transfer it.",
+  },
 ] as const;
 
 async function dependentSnapshotBlockers(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
