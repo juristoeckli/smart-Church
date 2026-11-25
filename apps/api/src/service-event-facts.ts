@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { csvDocument } from "./csv-export.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
 import type { ServiceEventFactDefinition, ServiceEventFacts, ServiceEventFactsPeriod } from "@smart-church/contracts";
@@ -162,6 +163,54 @@ export function registerServiceEventFactsRoutes(app: FastifyInstance, { pool, av
       await client.query("ROLLBACK");
       throw error;
     } finally { client.release(); }
+  });
+
+  app.get<{ Querystring: { from: string; to: string; calendarId?: string } }>("/api/events/recorded-facts-export", {
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["from", "to"], properties: {
+      from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, calendarId: { type: "string", format: "uuid" },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await scope(request, reply);
+    if (!departmentId) return reply;
+    const { from, to, calendarId } = request.query;
+    if (from > to) return reply.code(400).send({ error: "The end date must be on or after the start date." });
+    let calendarFilter = "";
+    const values: (string | null)[] = [departmentId, from, to];
+    if (calendarId) {
+      const { rows: [schema] } = await pool!.query<{ ready: boolean }>(
+        "SELECT to_regclass('church_calendar_event_generations') IS NOT NULL AND to_regclass('church_calendar_appointments') IS NOT NULL AND to_regclass('church_calendar_calendars') IS NOT NULL AS ready",
+      );
+      if (!schema.ready) return reply.code(404).send({ error: "Calendar filtering is unavailable." });
+      values.push(calendarId, request.authenticatedUser?.id ?? null);
+      calendarFilter = `AND EXISTS (
+        SELECT 1 FROM church_calendar_event_generations generation
+        JOIN church_calendar_appointments appointment ON appointment.id=generation.appointment_id AND appointment.department_id=generation.department_id
+        JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+        WHERE generation.department_id=event.department_id AND generation.service_event_id=event.id AND calendar.id=$4
+          AND calendar.archived_at IS NULL AND (calendar.scope<>'personal' OR calendar.owner_user_id=$5)
+      )`;
+    }
+    const [events, definitions] = await Promise.all([
+      pool!.query<{ id: string; date: string; title: string; facts: ServiceEventFacts }>(
+        `SELECT id,event_date::text AS date,title,recorded_facts AS facts FROM service_events event
+          WHERE department_id=$1 AND cancelled_at IS NULL AND event_date BETWEEN $2::date AND $3::date
+            AND recorded_facts IS NOT NULL AND recorded_facts<>'{}'::jsonb ${calendarFilter}
+          ORDER BY event_date,id LIMIT 10001`, values),
+      pool!.query<ServiceEventFactDefinition>(
+        "SELECT " + definitionFields + " FROM service_event_fact_definitions WHERE department_id=$1 ORDER BY lower(label),id", [departmentId]),
+    ]);
+    if (events.rows.length > 10000) return reply.code(422).send({ error: "Choose a shorter date range to export up to 10,000 events." });
+    return reply.type("text/csv; charset=utf-8")
+      .header("Content-Disposition", `attachment; filename="event-facts-${from}-to-${to}.csv"`)
+      .send(csvDocument(
+        ["Event ID", "Date", "Event", "Visitors", "First-time visitors", "Collection", "Currency",
+          ...definitions.rows.map(field => field.unit ? field.label + " (" + field.unit + ")" : field.label)],
+        events.rows.map(({ id, date, title, facts }) => [id, date, title, facts.visitors, facts.firstTimeVisitors,
+          facts.collection?.amount, facts.collection?.currency, ...definitions.rows.map(field => {
+            const value = facts.custom?.[field.id];
+            return field.kind === "number" && value && numericValue.test(value) ? Number(value) : value;
+          })]),
+      ));
   });
 
   app.get<{ Querystring: { period: string } }>("/api/events/recorded-facts-summary", { schema: {

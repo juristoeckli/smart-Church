@@ -68,6 +68,57 @@ function ManageFactDefinitions({ departmentId, csrfToken, definitions, onChanged
   </details>;
 }
 
+function ExportEventFacts({ departmentId, eventDate }: { departmentId: string; eventDate: string }) {
+  const [from, setFrom] = useState(eventDate.slice(0, 7) + "-01");
+  const [to, setTo] = useState(eventDate.slice(0, 10));
+  const [calendarId, setCalendarId] = useState("");
+  const [calendars, setCalendars] = useState<{ id: string; name: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/api/modules/church-calendar/calendars", { headers: { "x-department-id": departmentId }, signal: controller.signal })
+      .then(response => response.ok ? response.json() as Promise<{ id: string; name: string }[]> : [])
+      .then(rows => { if (!controller.signal.aborted && Array.isArray(rows)) setCalendars(rows); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [departmentId]);
+
+  async function download(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      const parameters = new URLSearchParams({ from, to, ...(calendarId ? { calendarId } : {}) });
+      const response = await fetch("/api/events/recorded-facts-export?" + parameters, { headers: { "x-department-id": departmentId } });
+      if (!response.ok) await readJson(response);
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `event-facts-${from}-to-${to}.csv`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Could not export event facts.");
+    } finally { setBusy(false); }
+  }
+
+  return <form className="event-details-section" onSubmit={download} aria-label="Export event facts">
+    <h3>Export event facts</h3>
+    <div className="form-row">
+      <label>From<input type="date" required value={from} max={to || undefined} onChange={event => setFrom(event.target.value)} /></label>
+      <label>To<input type="date" required value={to} min={from || undefined} onChange={event => setTo(event.target.value)} /></label>
+    </div>
+    {calendars.length > 0 && <label>Calendar<select value={calendarId} onChange={event => setCalendarId(event.target.value)}>
+      <option value="">All events</option>
+      {calendars.map(calendar => <option key={calendar.id} value={calendar.id}>{calendar.name}</option>)}
+    </select></label>}
+    <button className="button button-secondary" type="submit" disabled={busy || !from || !to || from > to}>
+      {busy ? "Exporting…" : "Download CSV"}
+    </button>
+    {error && <p role="alert">{error}</p>}
+  </form>;
+}
 export function ServiceEventFactsPanel({ departmentId, csrfToken, eventId, eventDate }: {
   departmentId: string; csrfToken: string; eventId: string; eventDate: string;
 }) {
@@ -196,5 +247,6 @@ export function ServiceEventFactsPanel({ departmentId, csrfToken, eventId, event
         </tr>)}</tbody>
       </table>}
     </>}
+    {open && <ExportEventFacts departmentId={departmentId} eventDate={eventDate} />}
   </details>;
 }
