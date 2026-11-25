@@ -616,26 +616,72 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { left: await safeRevision(leftVersionId), right: await safeRevision(rightVersionId) };
   });
 
-  app.post<{ Params: { id: string; versionId: string } }>("/api/modules/wiki/pages/:id/versions/:versionId/restore", async (request, reply) => {
-    if (!validateMutation(request, reply)) return reply;
-    const departmentId = await site(request, reply, true);
-    if (!departmentId) return reply;
-    const version = await pool!.query<{ title: string; content_html: string }>("SELECT title,content_html FROM wiki_page_versions WHERE id=$1 AND page_id=$2 AND department_id=$3", [request.params.versionId, request.params.id, departmentId]);
-    if (!version.rowCount) return reply.code(404).send({ error: "Wiki page version not found." });
-    const current = await pool!.query<WikiPageRow>("SELECT id,category_id,title,content_html,status,redirect_page_id,is_homepage,created_at,updated_at,updated_by FROM wiki_pages WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
-    if (!current.rowCount) return reply.code(404).send({ error: "Wiki page not found." });
-    const client = await pool!.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, request.params.id, current.rows[0].title, current.rows[0].content_html, request.authenticatedUser!.id]);
-      const result = await client.query<WikiPageRow>("UPDATE wiki_pages SET title=$3,content_html=$4,updated_by=$5,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,category_id,title,content_html,status,redirect_page_id,is_homepage,created_at,updated_at,updated_by", [request.params.id, departmentId, version.rows[0].title, version.rows[0].content_html, request.authenticatedUser!.id]);
-      await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, request.params.id, version.rows[0].title, version.rows[0].content_html, request.authenticatedUser!.id]);
-      await client.query("COMMIT");
-      changed(departmentId, { action: "page-restored", pageId: request.params.id });
-      return pageDto(result.rows[0]);
-    } catch (error) { await client.query("ROLLBACK"); throw error; }
-    finally { client.release(); }
-  });
+  app.post<{ Params: { id: string; versionId: string }; Body?: { expectedRevision?: string } }>(
+    "/api/modules/wiki/pages/:id/versions/:versionId/restore", async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await site(request, reply, true);
+      if (!departmentId) return reply;
+      const { id: pageId, versionId } = request.params;
+      const expectedRevision = request.body?.expectedRevision;
+      if (expectedRevision !== undefined && (typeof expectedRevision !== "string" || !/^\d{1,10}$/.test(expectedRevision))) {
+        return reply.code(400).send({ error: "The Wiki revision identifier is invalid." });
+      }
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const { rows: [current] } = await client.query<WikiPageRow>(
+          `SELECT id,category_id,title,content_html,status,redirect_page_id,is_homepage,audience,audience_group_id,
+                  created_at,updated_at,updated_by,xmin::text AS edit_revision
+             FROM wiki_pages WHERE id=$1 AND department_id=$2 FOR UPDATE`, [pageId, departmentId],
+        );
+        if (!current) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Wiki page not found." });
+        }
+        if (expectedRevision !== undefined && current.edit_revision !== expectedRevision) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This Wiki page changed. Reopen the page before restoring a revision." });
+        }
+        const { rows: [version] } = await client.query<{ title: string; content_html: string }>(
+          "SELECT title,content_html FROM wiki_page_versions WHERE id=$1 AND page_id=$2 AND department_id=$3",
+          [versionId, pageId, departmentId],
+        );
+        if (!version) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Wiki page version not found." });
+        }
+        if (current.title === version.title && current.content_html === version.content_html) {
+          await client.query("COMMIT");
+          return { ...pageDto(current), editRevision: current.edit_revision };
+        }
+
+        const editorId = request.authenticatedUser!.id;
+        await client.query(
+          "INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)",
+          [randomUUID(), departmentId, pageId, current.title, current.content_html, editorId],
+        );
+        const { rows: [restored] } = await client.query<WikiPageRow>(
+          `UPDATE wiki_pages SET title=$3,content_html=$4,updated_by=$5,updated_at=now()
+             WHERE id=$1 AND department_id=$2
+         RETURNING id,category_id,title,content_html,status,redirect_page_id,is_homepage,audience,audience_group_id,
+                   created_at,updated_at,updated_by,xmin::text AS edit_revision`,
+          [pageId, departmentId, version.title, version.content_html, editorId],
+        );
+        await client.query(
+          "INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)",
+          [randomUUID(), departmentId, pageId, restored.title, restored.content_html, editorId],
+        );
+        await client.query("COMMIT");
+        changed(departmentId, { action: "page-restored", pageId });
+        return { ...pageDto(restored), editRevision: restored.edit_revision };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    },
+  );
 
   app.post<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/archive", async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;

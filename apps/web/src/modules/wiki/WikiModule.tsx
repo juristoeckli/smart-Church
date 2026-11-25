@@ -92,6 +92,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const historyBase = useRef<{ pageId: string; revision?: string } | undefined>(undefined);
   const [showAttachments, setShowAttachments] = useState(false);
   const [attachManagersOnly, setAttachManagersOnly] = useState(false);
   const [showInlineImages, setShowInlineImages] = useState(false);
@@ -835,6 +836,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     if (!selectedPage) return;
     await run(async () => {
       const nextVersions = await api<PageVersion[]>(`/api/modules/wiki/pages/${selectedPage.id}/versions`);
+      historyBase.current = { pageId: selectedPage.id, revision: selectedPage.editRevision };
       setVersions(nextVersions); setCompareRightId(nextVersions[0]?.id ?? ""); setCompareLeftId(nextVersions[1]?.id ?? nextVersions[0]?.id ?? ""); setComparison(null); setShowHistory(true);
     }, "");
   }
@@ -846,8 +848,9 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     }, "");
   }
   async function restoreVersion(version: PageVersion) {
-    if (!selectedPage || !window.confirm(`Restore version “${version.title}” from ${humanDate(version.createdAt)}? This restores the title and content under the current page audience. Category and redirect stay as currently configured. The current content will be saved in history.`)) return;
-    await run(async () => { await api(`/api/modules/wiki/pages/${selectedPage.id}/versions/${version.id}/restore`, "POST", {}); setShowHistory(false); await refresh(selectedPage.id); }, "Version restored.");
+    const baseline = historyBase.current;
+    if (!selectedPage || baseline?.pageId !== selectedPage.id || !window.confirm(`Restore version “${version.title}” from ${humanDate(version.createdAt)}? This restores the title and content under the current page audience. Category and redirect stay as currently configured. The current content will be saved in history.`)) return;
+    await run(async () => { await api(`/api/modules/wiki/pages/${selectedPage.id}/versions/${version.id}/restore`, "POST", { expectedRevision: baseline.revision }); setShowHistory(false); await refresh(selectedPage.id); }, "Version restored.");
   }
 
   function resetLinkForm() {
