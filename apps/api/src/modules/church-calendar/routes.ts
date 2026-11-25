@@ -76,6 +76,72 @@ function validAppointmentTimes(input: Pick<AppointmentInput, "startsAt" | "endsA
   return !timeZone || input.allDay || appointmentInstants(input.startsAt, input.endsAt, timeZone)?.shifted === false;
 }
 
+async function loadCalendarEventTemplate(client: PoolClient, departmentId: string, templateId: string) {
+  const templateResult = await client.query<{ positions: unknown; items: unknown }>("SELECT positions,items FROM service_plan_templates WHERE id=$1 AND department_id=$2 AND active=true FOR SHARE", [templateId, departmentId]);
+  const template = templateResult.rows[0];
+  if (!template) { return { status: 404, error: "Active service-plan template not found in this location." } as const; }
+  const validPosition = (item: unknown): item is ServicePlanTemplate["positions"][number] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const position = item as Record<string, unknown>;
+    return typeof position.name === "string" && Boolean(position.name.trim()) && position.name.length <= 80
+      && (position.category === undefined || (typeof position.category === "string" && position.category.length <= 80))
+      && (position.swapAllowed === undefined || typeof position.swapAllowed === "boolean")
+      && (position.qualificationIds === undefined || (Array.isArray(position.qualificationIds) && position.qualificationIds.length <= 20
+        && position.qualificationIds.every((value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))));
+  };
+  const validItem = (item: unknown): item is Record<string, unknown> => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const value = item as Record<string, unknown>;
+    const allowed = new Set(["title", "startTime", "durationMinutes", "notes", "songId", "arrangementId", "position", "section"]);
+    if (Object.keys(value).some((key) => !allowed.has(key))) return false;
+    return typeof value.title === "string" && value.title.trim().length > 0 && value.title.length <= 160
+      && (value.startTime === undefined || (typeof value.startTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.startTime)))
+      && (value.durationMinutes === undefined || (Number.isInteger(value.durationMinutes) && Number(value.durationMinutes) >= 1 && Number(value.durationMinutes) <= 1440))
+      && (value.notes === undefined || (typeof value.notes === "string" && value.notes.length <= 500))
+      && (value.songId === undefined || (typeof value.songId === "string" && /^[0-9a-f-]{36}$/i.test(value.songId)))
+      && (value.section === undefined || (typeof value.section === "string" && value.section.length <= 80))
+      && (value.arrangementId === undefined || (typeof value.arrangementId === "string" && /^[0-9a-f-]{36}$/i.test(value.arrangementId)))
+      && (value.position === undefined || (typeof value.position === "string" && value.position.length <= 80));
+  };
+  if (!Array.isArray(template.positions) || template.positions.length > 40 || !template.positions.every(validPosition)
+    || !Array.isArray(template.items) || template.items.length > 100 || !template.items.every(validItem)) {
+    return { status: 409, error: "The selected service-plan template has invalid or unsupported content. Review and save the template before generating events." } as const;
+  }
+  const positions = template.positions.map((item) => ({
+    name: item.name.trim(),
+    ...(item.category?.trim() ? { category: item.category.trim() } : {}),
+    ...(item.swapAllowed === false ? { swapAllowed: false } : {}),
+    ...(item.qualificationIds?.length ? { qualificationIds: [...new Set(item.qualificationIds.map((id) => id.toLowerCase()))] } : {}),
+  }));
+  const qualificationIds = [...new Set(positions.flatMap((position) => position.qualificationIds ?? []))];
+  if (qualificationIds.length) {
+    const available = await client.query(
+      "SELECT id FROM service_volunteer_qualifications WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[]) FOR SHARE",
+      [departmentId, qualificationIds],
+    );
+    if (available.rowCount !== qualificationIds.length) {
+      return { status: 409, error: "The template requires a volunteer qualification that is no longer active at this location. Update the template before generating events." } as const;
+    }
+  }
+  const items = template.items;
+  const positionNames = new Set(positions.map((position) => position.name.trim().toLocaleLowerCase()));
+  if (items.some((item) => typeof item.position === "string" && item.position.trim() && !positionNames.has(item.position.trim().toLocaleLowerCase()))) { return { status: 409, error: "The selected template has plan items assigned to a role that is not present in the template." } as const; }
+  const songIds = [...new Set(items.flatMap((item) => typeof item.songId === "string" && /^[0-9a-f-]{36}$/i.test(item.songId) ? [item.songId] : []))];
+  const arrangementRows = items.flatMap((item) => typeof item.songId === "string" && typeof item.arrangementId === "string" ? [{ songId: item.songId, arrangementId: item.arrangementId }] : []);
+  if (items.some((item) => item.arrangementId && !item.songId)) { return { status: 409, error: "The selected template has an arrangement without a song." } as const; }
+  if (songIds.length) {
+    const songs = await client.query("SELECT id FROM worship_songs WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, songIds]);
+    if (songs.rowCount !== songIds.length) { return { status: 409, error: "The selected template contains a song outside this location." } as const; }
+  }
+  if (arrangementRows.length) {
+    const arrangements = await client.query(`SELECT selected."arrangementId" FROM jsonb_to_recordset($2::jsonb) AS selected("songId" uuid,"arrangementId" uuid)
+      JOIN worship_songs song ON song.id=selected."songId" AND song.department_id=$1
+      JOIN worship_song_arrangements arrangement ON arrangement.id=selected."arrangementId" AND arrangement.song_id=song.id`, [departmentId, JSON.stringify(arrangementRows)]);
+    if (arrangements.rowCount !== arrangementRows.length) { return { status: 409, error: "The selected template contains an arrangement that does not belong to its song." } as const; }
+  }
+  return { positions, items, qualificationIds };
+}
+
 const invalidAppointmentTime = "A start or end time does not exist in the selected time zone. Choose another clock time.";
 
 function canManageCalendar(request: FastifyRequest, scope: CalendarScope, ownerId: string | null) {
@@ -1223,54 +1289,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const throughDate = request.body.throughDate;
       const maximum = new Date(`${startDate}T00:00:00Z`); maximum.setUTCFullYear(maximum.getUTCFullYear() + 5);
       if (throughDate < startDate || throughDate > maximum.toISOString().slice(0, 10)) { await client.query("ROLLBACK"); return responseError(reply, 400, "Choose an end date from the series start through five years ahead."); }
-      const templateResult = await client.query<{ positions: unknown; items: unknown }>("SELECT positions,items FROM service_plan_templates WHERE id=$1 AND department_id=$2 AND active=true FOR SHARE", [request.body.templateId, departmentId]);
-      const template = templateResult.rows[0];
-      if (!template) { await client.query("ROLLBACK"); return responseError(reply, 404, "Active service-plan template not found in this location."); }
-      const validPosition = (item: unknown): item is ServicePlanTemplate["positions"][number] => {
-        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-        const position = item as Record<string, unknown>;
-        return typeof position.name === "string" && Boolean(position.name.trim()) && position.name.length <= 80
-          && (position.category === undefined || (typeof position.category === "string" && position.category.length <= 80))
-          && (position.swapAllowed === undefined || typeof position.swapAllowed === "boolean")
-          && (position.qualificationIds === undefined || (Array.isArray(position.qualificationIds) && position.qualificationIds.length <= 20
-            && position.qualificationIds.every((value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))));
-      };
-      const validItem = (item: unknown): item is Record<string, unknown> => {
-        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-        const value = item as Record<string, unknown>;
-        const allowed = new Set(["title", "startTime", "durationMinutes", "notes", "songId", "arrangementId", "position", "section"]);
-        if (Object.keys(value).some((key) => !allowed.has(key))) return false;
-        return typeof value.title === "string" && value.title.trim().length > 0 && value.title.length <= 160
-          && (value.startTime === undefined || (typeof value.startTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.startTime)))
-          && (value.durationMinutes === undefined || (Number.isInteger(value.durationMinutes) && Number(value.durationMinutes) >= 1 && Number(value.durationMinutes) <= 1440))
-          && (value.notes === undefined || (typeof value.notes === "string" && value.notes.length <= 500))
-          && (value.songId === undefined || (typeof value.songId === "string" && /^[0-9a-f-]{36}$/i.test(value.songId)))
-          && (value.section === undefined || (typeof value.section === "string" && value.section.length <= 80))
-          && (value.arrangementId === undefined || (typeof value.arrangementId === "string" && /^[0-9a-f-]{36}$/i.test(value.arrangementId)))
-          && (value.position === undefined || (typeof value.position === "string" && value.position.length <= 80));
-      };
-      if (!Array.isArray(template.positions) || template.positions.length > 40 || !template.positions.every(validPosition)
-        || !Array.isArray(template.items) || template.items.length > 100 || !template.items.every(validItem)) {
-        await client.query("ROLLBACK"); return responseError(reply, 409, "The selected service-plan template has invalid or unsupported content. Review and save the template before generating events.");
-      }
-      const positions = template.positions.map((item) => ({
-        name: item.name.trim(),
-        ...(item.category?.trim() ? { category: item.category.trim() } : {}),
-        ...(item.swapAllowed === false ? { swapAllowed: false } : {}),
-        ...(item.qualificationIds?.length ? { qualificationIds: [...new Set(item.qualificationIds.map((id) => id.toLowerCase()))] } : {}),
-      }));
-      const qualificationIds = [...new Set(positions.flatMap((position) => position.qualificationIds ?? []))];
-      if (qualificationIds.length) {
-        const available = await client.query(
-          "SELECT id FROM service_volunteer_qualifications WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[]) FOR SHARE",
-          [departmentId, qualificationIds],
-        );
-        if (available.rowCount !== qualificationIds.length) {
-          await client.query("ROLLBACK"); return responseError(reply, 409, "The template requires a volunteer qualification that is no longer active at this location. Update the template before generating events.");
-        }
-      }
-      const items = template.items;
-      const positionNames = new Set(positions.map((position) => position.name.trim().toLocaleLowerCase()));
+      const template = await loadCalendarEventTemplate(client, departmentId, request.body.templateId);
+      if (template.error !== undefined) { await client.query("ROLLBACK"); return responseError(reply, template.status, template.error); }
+      const { positions, items, qualificationIds } = template;
       const requestedAssignments = request.body.staffAssignments ?? [];
       if (requestedAssignments.length && !canSeePrivatePeople(request)) { await client.query("ROLLBACK"); return responseError(reply, 403, "Private People access is required to assign volunteers during generation."); }
       const assignmentsByIndex = new Map<number, string>();
@@ -1310,20 +1331,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const contactId = assignmentsByIndex.get(index);
         return contactId ? { ...position, contactId } : position;
       });
-      if (items.some((item) => typeof item.position === "string" && item.position.trim() && !positionNames.has(item.position.trim().toLocaleLowerCase()))) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template has plan items assigned to a role that is not present in the template."); }
-      const songIds = [...new Set(items.flatMap((item) => typeof item.songId === "string" && /^[0-9a-f-]{36}$/i.test(item.songId) ? [item.songId] : []))];
-      const arrangementRows = items.flatMap((item) => typeof item.songId === "string" && typeof item.arrangementId === "string" ? [{ songId: item.songId, arrangementId: item.arrangementId }] : []);
-      if (items.some((item) => item.arrangementId && !item.songId)) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template has an arrangement without a song."); }
-      if (songIds.length) {
-        const songs = await client.query("SELECT id FROM worship_songs WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, songIds]);
-        if (songs.rowCount !== songIds.length) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template contains a song outside this location."); }
-      }
-      if (arrangementRows.length) {
-        const arrangements = await client.query(`SELECT selected."arrangementId" FROM jsonb_to_recordset($2::jsonb) AS selected("songId" uuid,"arrangementId" uuid)
-          JOIN worship_songs song ON song.id=selected."songId" AND song.department_id=$1
-          JOIN worship_song_arrangements arrangement ON arrangement.id=selected."arrangementId" AND arrangement.song_id=song.id`, [departmentId, JSON.stringify(arrangementRows)]);
-        if (arrangements.rowCount !== arrangementRows.length) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template contains an arrangement that does not belong to its song."); }
-      }
       const recurrenceStarts = occurrenceStarts(row, `${startDate}T00:00`, `${throughDate}T23:59`, 501).map(localDateTime);
       const extraDates = await client.query<{ starts_at: string; ends_at: string }>(
         `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
@@ -1487,9 +1494,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").send(file.content);
   });
 
-  app.post<{ Body: AppointmentInput }>("/api/modules/church-calendar/appointments", { schema: { body: {
+  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string } }>("/api/modules/church-calendar/appointments", { schema: { body: {
     type: "object", additionalProperties: false, required: ["calendarId", "title", "startsAt", "endsAt"],
-    properties: { calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
+    properties: { createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
   } } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -1513,6 +1520,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const calendar = calendarResult.rows[0];
     if (!calendar) return responseError(reply, 404, "The calendar was not found.");
     const isContributor = !canManageCalendar(request, calendar.scope, calendar.owner_user_id);
+    const createEventTemplateId = request.body.createEventTemplateId;
+    if (createEventTemplateId) {
+      if (isContributor || !canManageServiceEvents(request)) {
+        return responseError(reply, 403, "Calendar and event management access is required to create a linked event.");
+      }
+      if (calendar.scope !== "community" || normalized.internalOnly || normalized.recurrence || normalized.linkedEventId) {
+        return responseError(reply, 400, "Create a linked event from a one-time community appointment without an existing event link or internal visibility.");
+      }
+    }
     if (isContributor) {
       const contribution = await context.pool.query(`SELECT 1 ${calendarGroupContributors} LIMIT 1`, [normalized.calendarId, departmentId, userId(request)]);
       if (!contribution.rowCount) return responseError(reply, 403, "You do not have permission to add appointments to this calendar.");
@@ -1536,14 +1552,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (found.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
     }
     const id = randomUUID();
+    let linkedEventId = normalized.linkedEventId ?? null;
     const client = await context.pool.connect();
     try {
       await client.query("BEGIN");
+      if ((isContributor || createEventTemplateId) && !await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 409, "This location is read-only on this installation.");
+      }
       if (isContributor) {
-        if (!await context.lockDepartmentForWrite(client, departmentId)) {
-          await client.query("ROLLBACK");
-          return responseError(reply, 409, "This location is read-only on this installation.");
-        }
         const contribution = await client.query(
           `SELECT 1 ${calendarGroupContributors} FOR SHARE OF calendar,church_group,membership,member`,
           [normalized.calendarId, departmentId, userId(request)],
@@ -1553,17 +1570,64 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return responseError(reply, 403, "You no longer have permission to add appointments to this calendar.");
         }
       }
+      if (createEventTemplateId) {
+        const eligible = await client.query<{ name: string; time_zone: string; services_enabled: boolean }>(
+          `SELECT calendar.name, department.time_zone, 'community'=ANY(department.enabled_modules) AS services_enabled
+             FROM church_calendar_calendars calendar JOIN departments department ON department.id=calendar.department_id
+            WHERE calendar.id=$1 AND calendar.department_id=$2 AND calendar.scope='community' AND calendar.archived_at IS NULL
+             FOR SHARE OF calendar`, [normalized.calendarId, departmentId],
+        );
+        const target = eligible.rows[0];
+        if (!target?.services_enabled || !isServerModuleEnabled("community")) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "An active community calendar and Services & events are required at this location.");
+        }
+        const locationZone = canonicalTimeZone(target.time_zone) ?? "UTC";
+        const authoredZone = normalized.timeZone ?? locationZone;
+        const instants = normalized.allDay ? null : appointmentInstants(normalized.startsAt, normalized.endsAt, authoredZone);
+        const localStart = instants ? appointmentWallTime(Date.parse(instants.startsAtUtc), locationZone) : normalized.startsAt;
+        const localEnd = instants ? appointmentWallTime(Date.parse(instants.endsAtUtc), locationZone) : normalized.endsAt;
+        const eventDate = localStart.slice(0, 10);
+        const startTime = normalized.allDay ? "00:00" : localStart.slice(11, 16);
+        const endTime = normalized.allDay ? null : localEnd.slice(11, 16);
+        const allDayEndsOnNextMidnight = normalized.allDay
+          && localEnd === localDateTime(addDays(startOfDay(localStart), 1));
+        if ((!normalized.allDay && (!instants || instants.shifted || !endTime || endTime <= startTime))
+          || (localEnd.slice(0, 10) !== eventDate && !allDayEndsOnNextMidnight)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 400, "The appointment must fit on one location calendar day to create a linked event.");
+        }
+        const template = await loadCalendarEventTemplate(client, departmentId, createEventTemplateId);
+        if (template.error !== undefined) {
+          await client.query("ROLLBACK");
+          return responseError(reply, template.status, template.error);
+        }
+        linkedEventId = randomUUID();
+        await client.query(
+          `INSERT INTO service_events(id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,asset_ids,positions,time_plan)
+           VALUES($1,$2,$3,'service',$4::date,$5,$6::time,$7::time,$8,$9,'',ARRAY[]::uuid[],$10::jsonb,$11::jsonb)`,
+          [linkedEventId, departmentId, normalized.title, eventDate, normalized.allDay ?? false, startTime, endTime,
+            (normalized.place || target.name || "Church").slice(0, 160), normalized.description?.slice(0, 2000) || null,
+            JSON.stringify(template.positions), JSON.stringify(template.items)],
+        );
+      }
       await client.query(
         `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by,time_zone)
          VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
-        [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, normalized.linkedEventId ?? null, normalized.signupGroupId ?? null, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request), normalized.timeZone ?? null],
+        [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, linkedEventId, normalized.signupGroupId ?? null, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request), normalized.timeZone ?? null],
       );
+      if (createEventTemplateId && linkedEventId) {
+        await client.query(
+          "INSERT INTO church_calendar_event_generations(id,department_id,appointment_id,occurrence_start,service_event_id,template_id,actor_user_id) VALUES($1,$2,$3,$4,$5,$6,$7)",
+          [randomUUID(), departmentId, id, normalized.startsAt, linkedEventId, createEventTemplateId, userId(request)],
+        );
+      }
       for (const resourceId of resourceIds) await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3)", [id, resourceId, userId(request)]);
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-created", appointmentId: id });
-    return reply.code(201).send({ id });
+    return reply.code(201).send({ id, ...(createEventTemplateId ? { linkedEventId } : {}) });
   });
 
   app.get("/api/modules/church-calendar/archive", async (request, reply) => {
