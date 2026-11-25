@@ -5,17 +5,28 @@ export const calendarEmbedContentPolicy = "default-src 'none'; style-src 'unsafe
 type CalendarPeriod = "day" | "week" | "month";
 export type EmbedSettings = {
   days?: number; entries?: number; searchEntry?: string; title?: string; darkmode?: boolean;
-  viewname?: "eventView" | "calView"; period?: CalendarPeriod; date?: string;
+  viewname?: "eventView" | "calView"; period?: CalendarPeriod; date?: string; startdate?: string; enddate?: string;
   category_id?: string; category_select?: string;
 };
 const dayKey = (date: Date) => localDateTime(date).slice(0, 10);
 
+export function publicEmbedDateRange(today: string, settings: EmbedSettings) {
+  const { startdate, enddate, days = 60, viewname } = settings;
+  const from = startdate && startdate > today ? startdate : today;
+  const horizon = dayKey(addDays(wallDate(today + "T00:00:00"), 366));
+  if (from > horizon) return { from, to: horizon };
+  const limit = viewname === "calView" ? horizon : dayKey(addDays(wallDate(from + "T00:00:00"), (enddate ? 120 : days) - 1));
+  const to = [enddate ?? horizon, limit, horizon].sort()[0];
+  return { from, to };
+}
+
 export function publicEmbedCalendarWindow(today: string, settings?: EmbedSettings) {
   if (settings?.viewname !== "calView") return null;
   const { period = "month" } = settings;
-  const last = dayKey(addDays(wallDate(today + "T00:00:00"), 366));
-  const anchor = settings.date ?? today;
-  if (anchor < today || anchor > last) return null;
+  const { from: first, to: last } = publicEmbedDateRange(today, settings);
+  const expired = first > last;
+  if (settings.date && (settings.date < first || settings.date > last)) return null;
+  const anchor = settings.date ?? (expired ? today : first);
   const date = wallDate(anchor + "T00:00:00");
   let start = date;
   let end = date;
@@ -28,11 +39,12 @@ export function publicEmbedCalendarWindow(today: string, settings?: EmbedSetting
     nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
     end = addDays(nextMonth, -1);
   }
-  const bound = (value: string) => value < today ? today : value > last ? last : value;
+  const bound = (value: string) => value < first ? first : value > last ? last : value;
   const previous = dayKey(addDays(start, -1));
   const next = dayKey(addDays(end, 1));
-  return { period, anchor, today, start, end, from: bound(dayKey(start)), to: bound(dayKey(end)),
-    previous: previous >= today ? previous : null, next: next <= last ? next : null };
+  return { period, anchor, today, first: expired ? null : first, start, end,
+    from: expired ? first : bound(dayKey(start)), to: expired ? last : bound(dayKey(end)),
+    previous: !expired && previous >= first ? previous : null, next: !expired && next <= last ? next : null };
 }
 export type EmbedAppointment = {
   id: string; originalStart: string; startsAt: string; endsAt: string; allDay: boolean; title: string; subtitle: string; place: string;
@@ -53,7 +65,7 @@ export function publicEmbedCalendarSelection(calendars: CalendarChoice[], { cate
 }
 
 function embedNavigation(settings: EmbedSettings) {
-  const keys = ["viewname", "period", "date", "title", "searchEntry", "entries", "days", "darkmode", "category_id", "category_select"] as const;
+  const keys = ["viewname", "period", "date", "title", "searchEntry", "entries", "days", "darkmode", "startdate", "enddate", "category_id", "category_select"] as const;
   const query = new URLSearchParams();
   for (const key of keys) {
     const value = settings[key];
@@ -92,11 +104,11 @@ function renderCalendarGrid(window: NonNullable<ReturnType<typeof publicEmbedCal
       ${items.length ? `<ul>${items.map((item) => `<li>${item.allDay ? "All day" : escapeHtml(timeLabel.format(new Date(item.startsAt + "Z")))} <strong>${escapeHtml(item.title)}</strong>
         ${item.calendarName ? `<small>${escapeHtml(item.calendarName)}</small>` : ""}${item.subtitle ? `<small>${escapeHtml(item.subtitle)}</small>` : ""}${item.place ? `<small>${escapeHtml(item.place)}</small>` : ""}</li>`).join("")}</ul>` : ""}</section>`);
   }
-  return `<nav class="calendar-nav" aria-label="Calendar view">${(["day", "week", "month"] as const).map((period) =>
+  return `${window.first ? `<nav class="calendar-nav" aria-label="Calendar view">${(["day", "week", "month"] as const).map((period) =>
     `<a href="${navigation(period, window.anchor)}"${period === window.period ? ' aria-current="page"' : ""}>${period[0].toUpperCase() + period.slice(1)}</a>`).join("")}
     ${window.previous ? `<a href="${navigation(window.period, window.previous)}">Previous</a>` : ""}
-    <a href="${navigation(window.period, window.today)}">Today</a>
-    ${window.next ? `<a href="${navigation(window.period, window.next)}">Next</a>` : ""}</nav>
+    <a href="${navigation(window.period, window.first)}">${window.first === window.today ? "Today" : "Start of range"}</a>
+    ${window.next ? `<a href="${navigation(window.period, window.next)}">Next</a>` : ""}</nav>` : ""}
     <h2>${escapeHtml(title)}</h2>
     ${days.size ? "" : "<p>No upcoming appointments in this view.</p>"}
     <div class="calendar-grid ${window.period === "day" ? "calendar-day" : ""}">${window.period === "day" ? "" : headings.map((name) =>

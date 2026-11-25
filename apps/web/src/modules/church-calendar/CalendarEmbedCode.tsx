@@ -7,9 +7,12 @@ function escapeAttribute(value: string) {
 type CalendarChoice = { id: string; name: string };
 
 export function CalendarEmbedCode({ url, calendars }: { url: string; calendars?: CalendarChoice[] }) {
+
   const [view, setView] = useState("eventView");
   const [period, setPeriod] = useState("month");
   const [days, setDays] = useState(60);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [entries, setEntries] = useState(20);
   const [searchEntry, setSearchEntry] = useState("");
   const [title, setTitle] = useState("");
@@ -20,11 +23,14 @@ export function CalendarEmbedCode({ url, calendars }: { url: string; calendars?:
   const available = calendars?.filter(({ id }) => !availableIds || availableIds.includes(id)) ?? [];
   const defaults = available.length < 2 ? available : available.filter(({ id }) => !defaultIds || defaultIds.includes(id));
   const source = new URL(url, window.location.origin);
+  const invalidRange = Boolean(startDate && endDate && endDate < startDate);
+  if (startDate) source.searchParams.set("startdate", startDate);
+  if (endDate) source.searchParams.set("enddate", endDate);
   if (view === "calView") {
     source.searchParams.set("viewname", view);
     source.searchParams.set("period", period);
   } else {
-    source.searchParams.set("days", String(days));
+    if (!endDate) source.searchParams.set("days", String(days));
     source.searchParams.set("entries", String(entries));
     if (searchEntry.trim()) source.searchParams.set("searchEntry", searchEntry.trim());
   }
@@ -50,9 +56,9 @@ export function CalendarEmbedCode({ url, calendars }: { url: string; calendars?:
     }}>
       <option value="month">Month</option><option value="week">Week</option><option value="day">Day</option>
     </select></label> : <>
-      <label>Show upcoming<select value={days} onChange={(event) => setDays(Number(event.target.value))}>
+      {!endDate && <label>Show upcoming<select value={days} onChange={(event) => setDays(Number(event.target.value))}>
         <option value={30}>30 days</option><option value={60}>60 days</option><option value={90}>90 days</option><option value={120}>120 days</option>
-      </select></label>
+      </select></label>}
       <label>Limit appointments<select value={entries} onChange={(event) => setEntries(Number(event.target.value))}>
         <option value={10}>10</option><option value={20}>20</option><option value={30}>30</option><option value={50}>50</option>
       </select></label>
@@ -60,6 +66,10 @@ export function CalendarEmbedCode({ url, calendars }: { url: string; calendars?:
         setSearchEntry(event.target.value); setFeedback("");
       }} /><small>Separate terms with commas. An appointment appears if its title, subtitle or place matches any term.</small></label>
     </>}
+    <label>Start date <input type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); setFeedback(""); }} /></label>
+    <label>End date <input type="date" min={startDate || undefined} value={endDate} onChange={(event) => { setEndDate(event.target.value); setFeedback(""); }} /></label>
+    {view === "eventView" && endDate && <small>Appointment lists show up to 120 days.</small>}
+    {invalidRange && <p role="alert">The end date must be on or after the start date.</p>}
     {calendars && calendars.length > 1 && <fieldset>
       <legend>Calendars visitors can choose</legend>
       {calendars.map(({ id, name }) => {
@@ -85,10 +95,10 @@ export function CalendarEmbedCode({ url, calendars }: { url: string; calendars?:
     <label className="church-calendar-check"><input type="checkbox" checked={darkMode} onChange={(event) => {
       setDarkMode(event.target.checked); setFeedback("");
     }} /> Force dark mode</label>
-    <label>Website embed code<textarea rows={4} value={code} readOnly onFocus={(event) => event.target.select()} /></label>
+    <label>Website embed code<textarea rows={4} value={invalidRange ? "" : code} readOnly onFocus={(event) => event.target.select()} /></label>
     <div className="church-calendar-feed-actions">
-      <a href={source.toString()} target="_blank" rel="noreferrer">Preview public agenda</a>
-      <button type="button" className="church-calendar-feed-button" onClick={() => void copy()}>Copy embed code</button>
+      {!invalidRange && <a href={source.toString()} target="_blank" rel="noreferrer">Preview public agenda</a>}
+      <button type="button" className="church-calendar-feed-button" disabled={invalidRange} onClick={() => void copy()}>Copy embed code</button>
     </div>
     {feedback && <p role="status">{feedback}</p>}
   </details>;

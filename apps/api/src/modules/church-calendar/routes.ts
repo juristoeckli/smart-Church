@@ -10,7 +10,7 @@ import { calendarImageMetadataSchema, defaultCalendarImageMetadata, normalizeCal
 import { registerCalendarEmailSubscriptions } from "./email-subscriptions.js";
 import { registerCalendarBookingDescriptions } from "./booking-descriptions.js";
 import { loadPublicAgenda, registerCalendarAgendaPublications } from "./calendar-agenda-publications.js";
-import { calendarEmbedContentPolicy, publicEmbedCalendarSelection, publicEmbedCalendarWindow, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
+import { calendarEmbedContentPolicy, publicEmbedCalendarSelection, publicEmbedDateRange, publicEmbedCalendarWindow, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
 import { registerCalendarTagDefinitions } from "./tag-definitions.js";
 import { loadOccurrenceRequestScope, occurrenceRequestKey, registerCalendarMeetingRequests } from "./meeting-requests.js";
 import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
@@ -372,13 +372,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          ${accessJoin}
         WHERE feed.token_hash=$1 AND calendar.archived_at IS NULL AND ${accessPredicate}`, [tokenHash])).rows[0];
     if (!source) return responseError(reply, 404, "Calendar feed not found.");
+    if (embed?.startdate && embed.enddate && embed.startdate > embed.enddate) {
+      return responseError(reply, 400, "The embed end date must be on or after the start date.");
+    }
     const window = publicEmbedCalendarWindow(source.local_today, embed);
     if (embed?.viewname === "calView" && !window) return responseError(reply, 400, "Choose a date within the public calendar range.");
     const calendarSelection = embed ? publicEmbedCalendarSelection(source.calendar_choices, embed) : undefined;
-    const from = window?.from ?? source.local_today;
-    const toDate = wallDate(`${from}T00:00:00`);
-    toDate.setUTCDate(toDate.getUTCDate() + (embed ? (embed.days ?? 60) - 1 : 366));
-    const to = window?.to ?? localDateTime(toDate).slice(0, 10);
+    const range = window ?? (embed ? publicEmbedDateRange(source.local_today, embed) : null);
+    const from = range?.from ?? source.local_today;
+    const to = range?.to ?? localDateTime(addDays(wallDate(`${from}T00:00:00`), 366)).slice(0, 10);
+    const sendEmbed = (settings: EmbedSettings, appointments: EmbedAppointment[]) => reply.type("text/html; charset=utf-8")
+      .header("Content-Security-Policy", calendarEmbedContentPolicy)
+      .header("X-Robots-Tag", "noindex, nofollow")
+      .send(renderCalendarEmbed(source.calendar_name, appointments, source.time_zone, settings, window ?? undefined, calendarSelection));
+    if (embed && from > to) return sendEmbed(embed, []);
     // An authored clock time can cross the public calendar's local date boundary.
     const fromDay = embed ? localDateTime(addDays(wallDate(`${from}T00:00`), -2)).slice(0, 10) : from;
     const throughDay = embed ? localDateTime(addDays(wallDate(`${to}T00:00`), 2)).slice(0, 10) : to;
@@ -487,12 +494,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         lines.push("END:VEVENT");
       }
     }
-    if (embed) {
-      return reply.type("text/html; charset=utf-8")
-        .header("Content-Security-Policy", calendarEmbedContentPolicy)
-        .header("X-Robots-Tag", "noindex, nofollow")
-        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed, window ?? undefined, calendarSelection));
-    }
+    if (embed) return sendEmbed(embed, publicAgenda);
     // Expand wall times using each appointment's time zone before exporting UTC instants.
     // Batch conversions to keep query size bounded even for large feeds.
     for (let offset = 0; offset < timedOccurrences.length; offset += 2000) {
@@ -535,6 +537,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       days: { type: "integer", minimum: 1, maximum: 120 }, entries: { type: "integer", minimum: 1, maximum: 50 },
       searchEntry: { type: "string", maxLength: 240 }, title: { type: "string", maxLength: 120 }, darkmode: { type: "boolean" },
       viewname: { type: "string", enum: ["eventView", "calView"] }, period: { type: "string", enum: ["day", "week", "month"] }, date: { type: "string", format: "date" },
+      startdate: { type: "string", format: "date" }, enddate: { type: "string", format: "date" },
       category_id: { type: "string", pattern: "^" + calendarIdsPattern + "$" },
       category_select: { type: "string", pattern: "^(?:" + calendarIdsPattern + ")?$" },
     } },
