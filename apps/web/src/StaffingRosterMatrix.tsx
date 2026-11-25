@@ -23,9 +23,9 @@ export function buildStaffingMatrix(
       const category = position.category?.trim() ?? "";
       const key = category.toLowerCase();
       if (!categories.has(key)) categories.set(key, category || "No role category");
-      const assignee = position.contactId ? names.get(position.contactId) ?? "Assigned person unavailable" : "";
-      const status = !position.contactId ? "Unfilled" : position.responseStatus === "accepted" ? "Confirmed"
-        : position.responseStatus === "declined" ? "Declined" : "Requested";
+      const assignee = names.get(position.contactId ?? "") ?? position.assigneeName ?? (position.contactId ? "Assigned person unavailable" : "");
+      const status = position.responseStatus === "accepted" ? "Confirmed"
+        : position.responseStatus === "declined" ? "Declined" : position.contactId ? "Requested" : assignee ? "Assigned" : "Unfilled";
       const role = { index, name: position.name, assignee, status };
       const current = roles.get(key);
       if (current) current.push(role);

@@ -2758,29 +2758,28 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
   const currentContactId = linkedContact.rows[0]?.contact_id ?? null;
   const visibleAssets = await visibleServiceResourceIds(selectedDepartmentId, [...new Set(result.rows.flatMap((row) => row.asset_ids ?? []))], request, pool);
-  const pastorAssignments = new Map(result.rows.map((row) => [row.id, (row.positions ?? [])
-    .filter((position) => isPastorServiceRole(position.name))
-    .filter((position) => position.contactId || position.sourcePastorName)]));
-  const pastorIds = [...new Set([...pastorAssignments.values()].flatMap((positions) => positions.flatMap((position) => position.contactId ? [position.contactId] : [])))];
-  const pastors = pastorIds.length ? await pool.query<{ id: string; name: string }>(
+  const assigneeIds = [...new Set(result.rows.flatMap((row) =>
+    (row.positions ?? []).flatMap((position) => position.contactId ? [position.contactId] : [])))];
+  const assignees = assigneeIds.length ? await pool.query<{ id: string; name: string }>(
     "SELECT id, trim(concat_ws(' ', first_name, last_name)) AS name FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])",
-    [selectedDepartmentId, pastorIds],
+    [selectedDepartmentId, assigneeIds],
   ) : { rows: [] };
-  const pastorsById = new Map(pastors.rows.map(({ id, name }) => [id, name]));
+  const assigneesById = new Map(assignees.rows.map(({ id, name }) => [id, name]));
   const responsesByPosition = new Map(responseRows.rows.map((row) => [`${row.event_id}:${row.position_index}`, row]));
   return result.rows.map((row) => {
     const event = mapServiceEvent({ ...row, asset_ids: (row.asset_ids ?? []).filter((id) => visibleAssets.has(id)) });
     const canManageRegistrations = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
     const visibleEvent = canManageRegistrations ? event : (({ registrationToken: _registrationToken, canManageAttachments: _attachments, ...safeEvent }) => safeEvent)(event);
-    return {
-      ...visibleEvent,
-      pastorNames: [...new Set((pastorAssignments.get(event.id) ?? []).map((position) => (position.contactId && pastorsById.get(position.contactId)) || position.sourcePastorName).filter((name): name is string => Boolean(name)))],
-      positions: (visibleEvent.positions ?? []).map((position, index) => {
-        const response = responsesByPosition.get(`${event.id}:${index}`);
-        const assignedToCurrentUser = Boolean(currentContactId && position.contactId === currentContactId);
-        return { ...position, responseStatus: response?.status ?? (position.contactId ? "pending" : undefined), canRespond: assignedToCurrentUser };
-      }),
-    };
+    const positions = (visibleEvent.positions ?? []).map((position, index) => {
+      const { sourceAssigneeName, sourcePastorName, ...role } = position;
+      const response = responsesByPosition.get(`${event.id}:${index}`);
+      const assignedToCurrentUser = Boolean(currentContactId && position.contactId === currentContactId);
+      const assigneeName = (position.contactId && assigneesById.get(position.contactId)) || sourceAssigneeName || sourcePastorName;
+      return { ...role, ...(assigneeName ? { assigneeName } : {}), responseStatus: response?.status ?? (position.contactId ? "pending" : undefined), canRespond: assignedToCurrentUser };
+    });
+    const pastorNames = [...new Set(positions.flatMap((position) =>
+      isPastorServiceRole(position.name) && position.assigneeName ? [position.assigneeName] : []))];
+    return { ...visibleEvent, pastorNames, positions };
   });
 });
 
@@ -3264,7 +3263,7 @@ app.post<{ Params: { id: string }; Body: { contactId: string; assignments: Array
     for (const assignment of assignments) {
       const position = nextPositions[assignment.positionIndex];
       if (!position || position.name.trim().toLocaleLowerCase() !== assignment.positionName.trim().toLocaleLowerCase()) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A selected role changed. Refresh the event and select the roles again." }); }
-      if (position.contactId) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `The ${position.name} role is no longer unfilled.` }); }
+      if (position.contactId || position.sourceAssigneeName || position.sourcePastorName) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `The ${position.name} role is no longer unfilled.` }); }
       nextPositions[assignment.positionIndex] = { ...position, contactId: request.body.contactId };
     }
     const nextEvent = { ...event, positions: nextPositions };

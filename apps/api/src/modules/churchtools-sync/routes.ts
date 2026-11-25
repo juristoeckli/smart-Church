@@ -1,4 +1,3 @@
-import { isPastorServiceRole } from "@smart-church/contracts";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
@@ -1189,6 +1188,19 @@ function churchToolsAssignments(row: JsonObject): JsonObject[] {
   return objectRows(row.eventServices ?? row.event_services ?? row.services);
 }
 
+async function readChurchToolsEventAssignments(config: Settings, token: string, events: JsonObject[]) {
+  return mapConcurrent(events, 6, async (row) => {
+    if ([row.eventServices, row.event_services, row.services].some(Array.isArray)) return row;
+    const id = idOf(row);
+    if (!id) return row;
+    const payload = await get(config.instance_url, token, `events/${encodeURIComponent(id)}`);
+    const detail = payload.data;
+    if (!detail || idOf(detail) !== id || !Array.isArray(detail.eventServices)) {
+      throw new Error("ChurchTools did not return event staffing. Check the integration account’s event access.");
+    }
+    return { ...row, eventServices: detail.eventServices };
+  });
+}
 async function churchToolsEventServiceNames(config: Settings, token: string, events: JsonObject[]) {
   if (!events.some(row => churchToolsAssignments(row).some(item => item.serviceId && !firstText(item.serviceName, item.service?.name)))) return new Map<string, string>();
   const catalog = await listComplete(config.instance_url, token, "services");
@@ -1225,13 +1237,16 @@ function mapEvents(events: JsonObject[], timeZone = "Europe/Zurich", serviceName
         const serviceId = String(item.serviceId ?? item.service?.id ?? "");
         const roleName = firstText(item.serviceName, item.service?.name, serviceNames.get(serviceId), item.title);
         const name = roleName || (!serviceId ? firstText(item.name) : "");
-        const personId = item.personId ?? item.person?.id;
+        const domainPersonId = item.person?.domainType === "person" ? item.person.domainIdentifier : undefined;
+        const personId = item.personId ?? domainPersonId ?? item.person?.id;
         if (!name || item.isValid === false) return [];
-        const sourcePastorName = isPastorServiceRole(name) ? firstText(
-          item.person?.name, item.person?.displayName, [item.person?.firstName, item.person?.lastName].filter(Boolean).join(" "),
-          item.personName, roleName ? item.name : undefined,
-        ).slice(0, 160) : "";
-        return [{ name, ...(personId ? { personId: String(personId) } : {}), ...(sourcePastorName ? { sourcePastorName } : {}) }];
+        const sourceAssigneeName = firstText(
+          item.personName, item.person?.name, item.person?.displayName,
+          item.person?.domainType === "person" ? item.person.title : undefined,
+          [item.person?.firstName, item.person?.lastName].filter(Boolean).join(" "),
+          roleName ? item.name : undefined,
+        ).slice(0, 160);
+        return [{ name, ...(personId ? { personId: String(personId) } : {}), ...(sourceAssigneeName ? { sourceAssigneeName } : {}) }];
       }),
       timePlan: agenda.flatMap((item) => {
         const song = item.song && typeof item.song === "object" ? item.song as JsonObject : {};
@@ -1318,7 +1333,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           }
         });
         const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
-        const services = mapEvents(events, departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich", await churchToolsEventServiceNames(config, token, events));
+        const staffedEvents = await readChurchToolsEventAssignments(config, token, events);
+        const services = mapEvents(staffedEvents, departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich", await churchToolsEventServiceNames(config, token, staffedEvents));
         const db = await pool.connect();
         try {
           await db.query("BEGIN");
@@ -1402,7 +1418,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             await db.query("DELETE FROM bookable_resources WHERE department_id=$1 AND source_system='churchtools' AND source_id<>ALL($2::text[])", [departmentId, resources.map(idOf).filter(Boolean)]);
           }
           for (const event of services) {
-            const positions = event.positions.map((item: any) => ({ name: item.name, ...(item.sourcePastorName ? { sourcePastorName: item.sourcePastorName } : {}), ...(item.personId && personMap.has(item.personId) ? { contactId: personMap.get(item.personId) } : {}) }));
+            const positions = event.positions.map((item: any) => ({ name: item.name, ...(item.sourceAssigneeName ? { sourceAssigneeName: item.sourceAssigneeName } : {}), ...(item.personId && personMap.has(item.personId) ? { contactId: personMap.get(item.personId) } : {}) }));
             const found = await db.query<{ id: string }>("SELECT id FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [departmentId, event.sourceId]);
             const data = [departmentId, event.title.slice(0, 160), event.date, event.isAllDay ?? false, event.start, event.end, event.location.slice(0, 160), event.description, event.room.slice(0, 160), JSON.stringify(positions), JSON.stringify(event.timePlan), event.sourceId];
             if (found.rowCount) {
@@ -1489,7 +1505,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const membersByGroup = new Map(memberResults.map((result) => [result.sourceId, result]));
         const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]);
         const timeZone = departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich";
-        const events = mapEvents(eventsResult.items, timeZone, await churchToolsEventServiceNames(config, token, eventsResult.items));
+        const staffedEvents = await readChurchToolsEventAssignments(config, token, eventsResult.items);
+        const events = mapEvents(staffedEvents, timeZone, await churchToolsEventServiceNames(config, token, staffedEvents));
         const mappedEvents = request.body.includeEventAgendas
           ? events.filter((event) => event.date >= request.body.startDate && event.date <= request.body.endDate)
           : events;
@@ -1771,7 +1788,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               const linkedPositionContacts = sourcePersonIds.length ? await db.query<{ source_id: string; id: string }>(`SELECT source_id,local_record_id::text AS id FROM churchtools_migration_links WHERE department_id=$1 AND area='person' AND source_id=ANY($2::text[])
                 UNION SELECT source_id,id::text FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id=ANY($2::text[])`, [dept, sourcePersonIds]) : { rows: [] as Array<{ source_id: string; id: string }> };
               const contactsBySource = new Map(linkedPositionContacts.rows.map((contact) => [contact.source_id, contact.id]));
-              const positions = sourcePositions.map((position) => ({ name: position.name, ...(position.sourcePastorName ? { sourcePastorName: position.sourcePastorName } : {}), ...(position.personId && contactsBySource.has(String(position.personId)) ? { contactId: contactsBySource.get(String(position.personId)) } : {}) }));
+              const positions = sourcePositions.map((position) => ({ name: position.name, ...(position.sourceAssigneeName ? { sourceAssigneeName: position.sourceAssigneeName } : {}), ...(position.personId && contactsBySource.has(String(position.personId)) ? { contactId: contactsBySource.get(String(position.personId)) } : {}) }));
               if (record.agendaState) {
                 const configured = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [dept, record.agendaInstanceUrl]);
                 if (!configured.rowCount) throw new Error("ChurchTools connection changed after preview.");

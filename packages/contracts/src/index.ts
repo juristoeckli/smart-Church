@@ -33,6 +33,8 @@ export type ServiceEventKind = "service" | "meeting" | "community" | "other";
 
 export interface ServicePosition {
   sourcePastorName?: string;
+  sourceAssigneeName?: string;
+  assigneeName?: string;
   name: string;
   swapAllowed?: boolean;
   category?: string;
