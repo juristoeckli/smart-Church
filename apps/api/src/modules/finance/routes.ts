@@ -1404,13 +1404,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return pool!.query("SELECT id FROM finance_bank_statement_imports WHERE department_id=$1 AND account_id=$2 AND content_sha256=$3",
       [departmentId, accountId, contentHash]);
   }
-  async function readPaypalReport(body: StatementUpload, content: string, client: Pool | PoolClient, departmentId: string) {
+  function parsePaypalReport(content: string, dateOrder?: PaypalDateOrder) {
     const csv = parseCsvRows(content, 128);
     if (typeof csv === "string") return csv;
-    const parsed = parsePaypalActivity(csv, body.paypalDateOrder, statementDate, cleanText);
+    return parsePaypalActivity(csv, dateOrder, statementDate, cleanText);
+  }
+
+  async function readPaypalReport(body: StatementUpload, content: string, client: Pool | PoolClient, departmentId: string) {
+    const parsed = parsePaypalReport(content, body.paypalDateOrder);
     if (typeof parsed === "string") return parsed;
     if (parsed.currency !== await statementCurrency(departmentId, client)) return "The PayPal report currency does not match this ledger.";
     return parsed;
+  }
+
+  async function lockPaypalImports(client: PoolClient, departmentId: string) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('finance-paypal-import:'||$1::uuid::text))", [departmentId]);
   }
 
   async function reviewPaypalRows(client: Pool | PoolClient, departmentId: string, accountId: string, entries: PaypalEntry[], currency: string) {
@@ -1421,7 +1429,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN finance_bank_statement_imports import ON import.department_id=row.department_id AND import.id=row.import_id
         WHERE key.department_id=$1 AND key.fingerprint=ANY($2::text[])`, [departmentId, entries.map(row => row.fingerprint)]);
     const previous = new Map(existing.rows.map(row => [row.fingerprint, row]));
-    if (existing.rows.some(row => row.account_id !== accountId)) return "Part of this PayPal report is already linked to a different ledger account.";
+    if (existing.rows.some(row => row.account_id !== accountId.toLowerCase())) return "Part of this PayPal report is already linked to a different ledger account.";
     for (const entry of entries) {
       const old = previous.get(entry.fingerprint);
       if (old && (old.currency_code !== currency || old.booking_date !== entry.date || Number(old.amount_cents) !== entry.amount ||
@@ -1666,6 +1674,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       let overlapCount = 0;
       let paypalByLine = new Map<number, PaypalEntry>();
       if (paypalReport) {
+        await lockPaypalImports(client, departmentId);
         const selected = await reviewPaypalRows(client, departmentId, request.body.accountId, paypalReport.entries, paypalReport.currency);
         if (typeof selected === "string" || !selected.length) {
           await client.query("ROLLBACK");
@@ -1739,50 +1748,72 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { id: batchId, rowCount: rows.length, suggestedCount };
   }
 
-  type StatementArchiveUpload = { accountId: string; fileName: string; zip: string; confirmSourceAccount?: boolean };
+  type StatementArchiveUpload = { accountId: string; fileName: string; zip: string; confirmSourceAccount?: boolean; paypalDateOrder?: PaypalDateOrder };
+  type ArchiveFile = { fileName: string; contentHash: string; rows: ImportedBankStatementEntry[]; paypalRows?: PaypalEntry[]; internalDuplicateCount?: number };
+  type ArchiveReview = { files: { file: ArchiveFile; alreadyImported: boolean }[]; overlapCount: number };
   const statementArchiveSchema = {
     type: "object", additionalProperties: false, required: ["accountId", "fileName", "zip"],
     properties: {
       accountId: uuid, fileName: { type: "string", minLength: 1, maxLength: 180 },
       zip: { type: "string", minLength: 4, maxLength: maximumArchiveUploadLength },
+      paypalDateOrder: { type: "string", enum: ["day-first", "month-first"] },
       confirmSourceAccount: { type: "boolean" },
     },
   } as const;
 
-  async function readNativeArchive(departmentId: string, encoded: string) {
+  async function readBankArchive(departmentId: string, encoded: string, dateOrder?: PaypalDateOrder) {
     const sources = await readStatementArchive(encoded);
     if (typeof sources === "string") return sources;
     const format = sources[0]!.format;
     if (sources.some(source => source.format !== format)) return "All statements in a ZIP must use the same format.";
-    const scope = await statementMappingScope(departmentId);
-    const files: { fileName: string; contentHash: string; rows: ImportedBankStatementEntry[] }[] = [];
+    const scope = format === "paypal" ? undefined : await statementMappingScope(departmentId);
+    const files: ArchiveFile[] = [];
     const hashes = new Set<string>();
-    let account: { digest: string; currency: string; accountEnding: string } | undefined;
-    let rowCount = 0;
+    let currency: string | undefined;
+    let account: { digest: string; accountEnding: string } | undefined;
+    let rowCount = 0, ignoredCount = 0, duplicateCount = 0;
     let firstDate = "9999-12-31", lastDate = "0000-01-01";
     for (const source of sources) {
-      const fileName = cleanText(source.filename).slice(0, 180) || `statement.${format}`;
+      const fileName = cleanText(source.filename).slice(0, 180) || `statement.${format === "paypal" ? "csv" : format}`;
       const content = source.content.replace(/^\uFEFF/, "").replace(/\r\n|\r/g, "\n");
-      const parsed = await readNativeStatement(departmentId, format, content, scope);
-      if (typeof parsed === "string") return `${fileName}: ${parsed}`;
-      if (account && (account.digest !== parsed.digest || account.currency !== parsed.currency)) {
-        return "All statements in a ZIP must belong to the same source account and currency.";
+      let rows: ImportedBankStatementEntry[];
+      let paypalRows: PaypalEntry[] | undefined;
+      let fileCurrency: string;
+      let internalDuplicateCount: number | undefined;
+      if (format === "paypal") {
+        const parsed = parsePaypalReport(content, dateOrder);
+        if (typeof parsed === "string") return `${fileName}: ${parsed}`;
+        rows = paypalRows = parsed.entries;
+        fileCurrency = parsed.currency;
+        ignoredCount += parsed.ignoredCount;
+        internalDuplicateCount = parsed.duplicateCount;
+        duplicateCount += internalDuplicateCount;
+      } else {
+        const parsed = await readNativeStatement(departmentId, format, content, scope);
+        if (typeof parsed === "string") return `${fileName}: ${parsed}`;
+        if (account && account.digest !== parsed.digest) return "All statements in a ZIP must belong to the same source account and currency.";
+        account = parsed;
+        fileCurrency = parsed.currency;
+        rows = parsed.entries;
       }
-      account ??= parsed;
+      if (currency && currency !== fileCurrency) return "All statements in a ZIP must use the same currency.";
+      currency = fileCurrency;
       const contentHash = createHash("sha256").update(content, "utf8").digest("hex");
       if (hashes.has(contentHash)) return "The ZIP contains multiple copies of the same statement file.";
       hashes.add(contentHash);
-      rowCount += parsed.entries.length;
-      if (rowCount > 20_000) return "A ZIP can contain at most 20,000 statement rows in total.";
-      for (const row of parsed.entries) {
+      rowCount += rows.length;
+      if (rowCount + ignoredCount + duplicateCount > 20_000) return "A ZIP can contain at most 20,000 statement rows in total.";
+      for (const row of rows) {
         if (row.date < firstDate) firstDate = row.date;
         if (row.date > lastDate) lastDate = row.date;
       }
-      files.push({ fileName, contentHash, rows: parsed.entries });
+      files.push({ fileName, contentHash, rows, paypalRows, internalDuplicateCount });
     }
-    if (!account || !rowCount) return "The ZIP has no statement rows.";
-    return { format, account, files, firstDate, lastDate };
+    if (!currency || !rowCount) return "The ZIP has no statement rows.";
+    return { format, currency, accountEnding: account?.accountEnding, files, firstDate, lastDate, ignoredCount, duplicateCount };
   }
+
+  type ParsedArchive = Exclude<Awaited<ReturnType<typeof readBankArchive>>, string>;
 
   async function verifyArchivePeriod(client: Pool | PoolClient, departmentId: string, archive: { firstDate: string; lastDate: string }, lock = false) {
     const result = await client.query<{ accounting_year: number }>(
@@ -1801,25 +1832,67 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return new Set(result.rows.map(row => row.content_sha256));
   }
 
+  async function reviewArchive(client: Pool | PoolClient, departmentId: string, accountId: string, archive: ParsedArchive): Promise<ArchiveReview | string> {
+    const old = await existingArchiveStatements(client, departmentId, accountId, archive.files.map(file => file.contentHash));
+    if (archive.format !== "paypal") {
+      return { files: archive.files.map(file => {
+        const alreadyImported = old.has(file.contentHash);
+        return { file: alreadyImported ? { ...file, rows: [] } : file, alreadyImported };
+      }), overlapCount: 0 };
+    }
+    const allRows = new Map<string, PaypalEntry>();
+    for (const { paypalRows } of archive.files) {
+      for (const entry of paypalRows!) {
+        const previous = allRows.get(entry.fingerprint);
+        if (previous && (previous.date !== entry.date || previous.amount !== entry.amount || previous.gross !== entry.gross || previous.fee !== entry.fee)) {
+          return "A PayPal transaction in multiple ZIP members has different booking data.";
+        }
+        if (!previous) allRows.set(entry.fingerprint, entry);
+      }
+    }
+    const eligible = await reviewPaypalRows(client, departmentId, accountId, [...allRows.values()], archive.currency);
+    if (typeof eligible === "string") return eligible;
+    // PayPal reports do not reliably identify the account owner, so unknown rows rely on
+    // confirmation. A known fingerprint is always checked against the chosen account.
+    const unused = new Set(eligible.map(row => row.fingerprint));
+    let overlapCount = archive.duplicateCount;
+    const files = archive.files.map(file => {
+      const alreadyImported = old.has(file.contentHash);
+      const paypalRows = alreadyImported ? [] : file.paypalRows!.filter(row => unused.delete(row.fingerprint));
+      overlapCount += file.rows.length - paypalRows.length;
+      return { file: { ...file, rows: paypalRows, paypalRows }, alreadyImported };
+    });
+    return { files, overlapCount };
+  }
+
   app.post<{ Body: StatementArchiveUpload }>("/api/modules/finance/bank-statements/archive/preview", {
     bodyLimit: 2_800_000, schema: { body: statementArchiveSchema },
   }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const { accountId, zip } = request.body;
     if (!await validateStatementAccount(departmentId, accountId)) return reply.code(400).send({ error: "Choose an active asset account for the archive." });
-    const archive = await readNativeArchive(departmentId, zip);
+    const archive = await readBankArchive(departmentId, zip, request.body.paypalDateOrder);
     if (typeof archive === "string") return reply.code(400).send({ error: archive });
-    if (archive.account.currency !== await statementCurrency(departmentId)) return reply.code(400).send({ error: "The ZIP statement currency does not match this ledger." });
+    if (archive.currency !== await statementCurrency(departmentId)) return reply.code(400).send({ error: "The ZIP statement currency does not match this ledger." });
     const accountingYear = await verifyArchivePeriod(pool!, departmentId, archive);
     if (accountingYear === null) return reply.code(400).send({ error: "Every ZIP statement row must fall in the same configured accounting year." });
-    const old = await existingArchiveStatements(pool!, departmentId, accountId, archive.files.map(file => file.contentHash));
-    const available = archive.files.filter(file => !old.has(file.contentHash)).flatMap(file => file.rows);
+    const reviewed = await reviewArchive(pool!, departmentId, accountId, archive);
+    if (typeof reviewed === "string") return reply.code(409).send({ error: reviewed });
+    const available = reviewed.files.flatMap(member => member.file.rows);
+    const isPaypal = archive.format === "paypal";
     return reply.header("Cache-Control", "private, no-store").send({
-      format: "zip", archiveFormat: archive.format, accountingYear, currency: archive.account.currency,
-      accountEnding: archive.account.accountEnding, duplicate: !available.length, rowCount: available.length,
-      files: archive.files.map(file => ({ fileName: file.fileName, rowCount: file.rows.length, alreadyImported: old.has(file.contentHash) })),
-      headers: ["Booking date", "Amount", "Description", "Reference"],
-      sample: available.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.amount), row.description, row.reference]),
+      format: "zip", archiveFormat: archive.format, accountingYear, currency: archive.currency,
+      accountEnding: archive.accountEnding, duplicate: !available.length, rowCount: available.length,
+      files: reviewed.files.map(({ file, alreadyImported }, index) => {
+        const receivedCount = archive.files[index]!.rows.length;
+        return { fileName: file.fileName, rowCount: isPaypal ? file.rows.length : receivedCount, alreadyImported,
+          ...(isPaypal ? { overlapCount: receivedCount + (file.internalDuplicateCount ?? 0) - file.rows.length } : {}) };
+      }),
+      ...(isPaypal ? { overlapCount: reviewed.overlapCount, ignoredCount: archive.ignoredCount } : {}),
+      headers: isPaypal ? ["Booking date", "Gross", "Fee", "Net", "Description"] : ["Booking date", "Amount", "Description", "Reference"],
+      sample: isPaypal ? reviewed.files.flatMap(member => member.file.paypalRows ?? []).slice(0, 5).map(row => {
+        return [row.date, statementPreviewAmount(row.gross), statementPreviewAmount(row.fee), statementPreviewAmount(row.amount), row.description];
+      }) : available.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.amount), row.description, row.reference]),
     });
   });
 
@@ -1830,11 +1903,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!validateMutation(request, reply)) return reply;
     const { accountId, zip, confirmSourceAccount } = request.body;
     if (!confirmSourceAccount) return reply.code(400).send({ error: "Confirm the ZIP source account matches the selected ledger account." });
-    const archive = await readNativeArchive(departmentId, zip);
+    const archive = await readBankArchive(departmentId, zip, request.body.paypalDateOrder);
     if (typeof archive === "string") return reply.code(400).send({ error: archive });
     const archiveName = cleanText(request.body.fileName).replace(/[\\/]/g, "_").slice(0, 180) || "statements.zip";
     const client = await pool!.connect();
     const imports: { id: string; rowCount: number; suggestedCount: number }[] = [];
+    let overlapCount = 0;
     try {
       await client.query("BEGIN");
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -1842,7 +1916,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(423).send({ error: "This location is read-only." });
       }
       if (!await validateStatementAccount(departmentId, accountId, client, true)
-        || archive.account.currency !== await statementCurrency(departmentId, client, "share")) {
+        || archive.currency !== await statementCurrency(departmentId, client, "share")) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "The ZIP statement account or currency does not match this ledger." });
       }
@@ -1851,8 +1925,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "Every ZIP statement row must fall in the same configured accounting year." });
       }
-      const old = await existingArchiveStatements(client, departmentId, accountId, archive.files.map(file => file.contentHash));
-      const available = archive.files.filter(file => !old.has(file.contentHash));
+      if (archive.format === "paypal") await lockPaypalImports(client, departmentId);
+      const reviewed = await reviewArchive(client, departmentId, accountId, archive);
+      if (typeof reviewed === "string") {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: reviewed });
+      }
+      overlapCount = reviewed.overlapCount;
+      const available = reviewed.files.map(member => member.file).filter(file => file.rows.length);
       if (!available.length) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "All statements in the ZIP are already imported for the selected account." });
@@ -1860,8 +1940,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       // Use the same insert order across overlapping archives to avoid locking hashes in opposite order.
       for (const file of available.sort((left, right) => left.contentHash.localeCompare(right.contentHash))) {
         imports.push(await writeStatementImport(client, departmentId, request, {
-          ...file, batchId: randomUUID(), accountId,
-          details: { format: archive.format, currency: archive.account.currency, archiveName, accountingYear },
+          ...file, batchId: randomUUID(), accountId, nativeCurrency: archive.currency,
+          paypalByLine: file.paypalRows && new Map(file.paypalRows.map(row => [row.line, row])),
+          details: { format: archive.format, currency: archive.currency, archiveName, accountingYear,
+            ...(archive.format === "paypal" ? { archiveOverlapCount: overlapCount, archiveIgnoredCount: archive.ignoredCount } : {}) },
         }));
       }
       await client.query("COMMIT");
@@ -1876,6 +1958,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       fileCount: imports.length,
       rowCount: imports.reduce((sum, item) => sum + item.rowCount, 0),
       suggestedCount: imports.reduce((sum, item) => sum + item.suggestedCount, 0),
+      ...(archive.format === "paypal" ? { overlapCount, ignoredCount: archive.ignoredCount } : {}),
     });
   });
 

@@ -7,9 +7,9 @@ const maximumArchiveEntries = 80;
 const maximumStatements = 16;
 const maximumDecodedBytes = 8_000_000;
 
-type ArchiveStatement = { filename: string; format: "camt053" | "mt940"; content: string };
+type ArchiveStatement = { filename: string; format: "camt053" | "mt940" | "paypal"; content: string };
 
-function decodeStatement(bytes: Buffer): Omit<ArchiveStatement, "filename"> | null {
+function decodeStatement(bytes: Buffer, filename: string): Omit<ArchiveStatement, "filename"> | null {
   const bom = bytes.readUInt16BE(0);
   const utf16 = bom === 0xfffe ? "utf-16le" : bom === 0xfeff ? "utf-16be" : null;
   const sniff = new TextDecoder(utf16 ?? "utf-8").decode(bytes);
@@ -27,6 +27,7 @@ function decodeStatement(bytes: Buffer): Omit<ArchiveStatement, "filename"> | nu
     }
     return { format: "mt940", content };
   }
+  if (/\.csv$/i.test(filename)) return { format: "paypal", content: new TextDecoder(utf16 ?? "utf-8", { fatal: true }).decode(bytes) };
   return null;
 }
 
@@ -61,8 +62,8 @@ export async function readStatementArchive(base64: string): Promise<ArchiveState
           chunks.push(chunk);
         }
         if (size !== entry.uncompressedSize || checksum !== entry.crc32) return "A ZIP statement failed its integrity check.";
-        const statement = decodeStatement(Buffer.concat(chunks, size));
-        if (!statement) return "A ZIP must contain only MT940 or only CAMT.053 statements.";
+        const statement = decodeStatement(Buffer.concat(chunks, size), filename);
+        if (!statement) return "A ZIP must contain only MT940, CAMT.053, or PayPal Activity Reports.";
         statements.push({ filename, ...statement });
       }
       return statements.length ? statements : "The ZIP has no statements.";
