@@ -245,6 +245,19 @@ async function copyRegistrationForm(client: PoolClient, departmentId: string, te
   );
 }
 
+async function createDraftRegistrationGroup(client: PoolClient, departmentId: string, appointmentId: string, title: string, start: string) {
+  const groupId = randomUUID();
+  const date = start.slice(0, 10);
+  const time = start.slice(11, 19).replace(/:/g, "");
+  const name = `Reg ${date}-${time} ${title.slice(0, 70)} ${appointmentId.slice(0, 8)}`;
+  await client.query(
+    `INSERT INTO church_groups(id,department_id,name,description,status,starts_on,ends_on,public_signup_enabled)
+     VALUES($1,$2,$3,'Registration group for a Calendar appointment.','draft',$4,$4,false)`,
+    [groupId, departmentId, name, date],
+  );
+  return groupId;
+}
+
 async function lockCalendarSeries(db: PoolClient, id: string, departmentId: string) {
   const { rows: [row] } = await db.query<{ starts_at: string; ends_at: string; recurrence: Recurrence | null }>(
     `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,recurrence
@@ -1586,9 +1599,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").header("X-Calendar-Image-Revision", file.revision).send(file.content);
   });
 
-  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string; newResourceBookings?: ResourceSelection[]; newSignupGroup?: { templateGroupId?: string } } }>("/api/modules/church-calendar/appointments", { schema: { body: {
+  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string; newResourceBookings?: ResourceSelection[]; newSignupGroup?: { templateGroupId?: string; throughDate?: string } } }>("/api/modules/church-calendar/appointments", { schema: { body: {
     type: "object", additionalProperties: false, required: ["calendarId", "title", "startsAt", "endsAt"],
-    properties: { newSignupGroup: { type: "object", additionalProperties: false, properties: { templateGroupId: { type: "string", format: "uuid" } } }, newResourceBookings: resourceSelectionListSchema, createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
+    properties: { newSignupGroup: { type: "object", additionalProperties: false, properties: { templateGroupId: { type: "string", format: "uuid" }, throughDate: { type: "string", format: "date" } } }, newResourceBookings: resourceSelectionListSchema, createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
   } } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -1614,12 +1627,34 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const isContributor = !canManageCalendar(request, calendar.scope, calendar.owner_user_id);
     const createEventTemplateId = request.body.createEventTemplateId;
     const newSignupGroup = request.body.newSignupGroup;
+    let signupOccurrenceStarts: string[] = [];
     if (newSignupGroup) {
       if (isContributor || !(request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage"))) {
         return responseError(reply, 403, "Calendar and group management access is required to create a registration group.");
       }
-      if (calendar.scope !== "community" || normalized.internalOnly || normalized.recurrence || normalized.signupGroupId) {
-        return responseError(reply, 400, "Create a registration group from a one-time community appointment without an existing signup link or internal visibility.");
+      if (calendar.scope !== "community" || normalized.internalOnly || normalized.signupGroupId) {
+        return responseError(reply, 400, "Create registration groups from a community appointment without an existing signup link or internal visibility.");
+      }
+      const throughDate = newSignupGroup.throughDate;
+      if (normalized.recurrence) {
+        const startDate = normalized.startsAt.slice(0, 10);
+        const last = wallDate(startDate + "T00:00:00");
+        last.setUTCFullYear(last.getUTCFullYear() + 5);
+        if (!throughDate || !cleanLocalDateTime(throughDate + "T00:00:00") || throughDate < startDate || throughDate > localDateTime(last).slice(0, 10)) {
+          return responseError(reply, 400, "Choose a registration end date from the series start through five years ahead.");
+        }
+        signupOccurrenceStarts = occurrenceStarts(
+          { starts_at: normalized.startsAt, recurrence: normalized.recurrence },
+          startDate + "T00:00:00", throughDate + "T23:59:59", 501,
+        ).map(localDateTime);
+        if (signupOccurrenceStarts.length > 500) {
+          return responseError(reply, 400, "Choose a registration range containing at most 500 occurrences.");
+        }
+        if (!signupOccurrenceStarts.length) {
+          return responseError(reply, 400, "No occurrences fall within the registration range.");
+        }
+      } else if (throughDate) {
+        return responseError(reply, 400, "A registration end date applies only to a repeating appointment.");
       }
     }
     const newResourceBookings = request.body.newResourceBookings;
@@ -1659,6 +1694,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const id = randomUUID();
     let linkedEventId = normalized.linkedEventId ?? null;
     let signupGroupId = normalized.signupGroupId ?? null;
+    const createdSignupGroupIds: string[] = [];
     let bookings: CalendarCreatedBooking[] | undefined;
     const client = await context.pool.connect();
     try {
@@ -1692,16 +1728,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           const problem = await lockRegistrationTemplate(client, departmentId, templateGroupId);
           if (problem) { await client.query("ROLLBACK"); return responseError(reply, problem.status, problem.error); }
         }
-        signupGroupId = randomUUID();
-        const date = normalized.startsAt.slice(0, 10);
-        const name = ("Reg " + date + " " + normalized.title.slice(0, 70) + " " + id.slice(0, 8)).slice(0, 120);
         await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [userId(request)]);
-        await client.query(
-          `INSERT INTO church_groups(id,department_id,name,description,status,starts_on,ends_on,public_signup_enabled)
-           VALUES($1,$2,$3,'Registration group for a Calendar appointment.','draft',$4,$4,false)`,
-          [signupGroupId, departmentId, name, date],
-        );
-        if (templateGroupId) await copyRegistrationForm(client, departmentId, templateGroupId, [signupGroupId]);
+        if (!normalized.recurrence) {
+          signupGroupId = await createDraftRegistrationGroup(client, departmentId, id, normalized.title, normalized.startsAt);
+          createdSignupGroupIds.push(signupGroupId);
+        }
       }
       if (createEventTemplateId) {
         const eligible = await client.query<{ name: string; time_zone: string; services_enabled: boolean }>(
@@ -1749,6 +1780,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
         [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, linkedEventId, signupGroupId, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request), normalized.timeZone ?? null],
       );
+      for (const start of signupOccurrenceStarts) {
+        const groupId = await createDraftRegistrationGroup(client, departmentId, id, normalized.title, start);
+        await client.query(
+          `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
+           VALUES($1,$2::timestamp,false,jsonb_build_object('signupGroupId',$3::text),$4)`,
+          [id, start, groupId, userId(request)],
+        );
+        createdSignupGroupIds.push(groupId);
+      }
+      if (newSignupGroup?.templateGroupId) {
+        await copyRegistrationForm(client, departmentId, newSignupGroup.templateGroupId, createdSignupGroupIds);
+      }
       if (createEventTemplateId && linkedEventId) {
         await client.query(
           "INSERT INTO church_calendar_event_generations(id,department_id,appointment_id,occurrence_start,service_event_id,template_id,actor_user_id) VALUES($1,$2,$3,$4,$5,$6,$7)",
@@ -1774,9 +1817,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-created", appointmentId: id });
-    if (newSignupGroup && signupGroupId) context.realtime.publish("core:groups:changed", departmentId, { action: "registration-group-created", groupId: signupGroupId });
+    if (createdSignupGroupIds.length) context.realtime.publish("core:groups:changed", departmentId, {
+      action: "registration-group-created", groupId: signupGroupId, count: createdSignupGroupIds.length,
+    });
     if (bookings?.length) context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
-    return reply.code(201).send({ id, ...(createEventTemplateId ? { linkedEventId } : {}), ...(bookings ? { bookings } : {}), ...(newSignupGroup ? { signupGroupId } : {}) });
+    return reply.code(201).send({ id, ...(createEventTemplateId ? { linkedEventId } : {}), ...(bookings ? { bookings } : {}), ...(newSignupGroup ? { ...(signupGroupId ? { signupGroupId } : {}), signupGroupCount: createdSignupGroupIds.length } : {}) });
   });
 
   app.get("/api/modules/church-calendar/archive", async (request, reply) => {
@@ -1842,14 +1887,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const event = await context.pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2", [normalized.linkedEventId, departmentId]);
       if (!event.rowCount) return responseError(reply, 400, "The linked event does not belong to this location.");
     }
+    const scope = request.query.scope ?? "series";
+    const occurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
     if (normalized.signupGroupId) {
       const group = await context.pool.query(`SELECT id FROM church_groups WHERE id=$1 AND department_id=$2
-        AND (status='active' OR (status='draft' AND id=$3)) AND source_system IS NULL`,
-        [normalized.signupGroupId, departmentId, row.signup_group_id ?? null]);
+        AND (status='active' OR (status='draft' AND (id=$3 OR ($4::boolean AND EXISTS (
+          SELECT 1 FROM church_calendar_appointment_exceptions
+           WHERE appointment_id=$5 AND original_start=$6::timestamp AND NOT cancelled
+             AND overrides->>'signupGroupId'=church_groups.id::text
+        ))))) AND source_system IS NULL`,
+        [normalized.signupGroupId, departmentId, row.signup_group_id ?? null,
+          Boolean(row.recurrence && scope !== "series" && occurrenceStart), row.id, occurrenceStart]);
       if (!group.rowCount) return responseError(reply, 400, "Choose a local group in this location.");
     }
     const values = normalized;
-    const scope = request.query.scope ?? "series";
     const updateSeriesLinks = normalized.resourceBookingIds !== undefined && !(scope === "occurrence" && row.recurrence);
     const timeZone = normalized.timeZone === undefined ? row.time_zone ?? null : normalized.timeZone;
     const effectiveZone = timeZone ?? (normalized.timeZone === null ? canonicalTimeZone(row.location_time_zone) : null);
@@ -1857,7 +1908,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (scope === "occurrence" && row.recurrence && normalized.timeZone !== undefined && timeZone !== (row.time_zone ?? null)) {
       return responseError(reply, 400, "Change the time zone for the whole series or future occurrences.");
     }
-    const occurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
     const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
     if (updateSeriesLinks && resourceIds.length) {
       const canManageResources = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
@@ -1979,7 +2029,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               WHERE id=$1 AND department_id=$2 RETURNING id
            ) UPDATE church_calendar_resource_links link SET occurrence_start=$6::timestamp
               FROM changed WHERE link.appointment_id=changed.id AND link.occurrence_start=$18::timestamp`,
-          [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone, row.recurrence ? null : row.starts_at],
+          [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId === undefined ? row.signup_group_id ?? null : values.signupGroupId, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone, row.recurrence ? null : row.starts_at],
         );
       }
       if (updateSeriesLinks) await updateCalendarSeriesResources(client, futureAppointmentId ?? row.id, resourceIds, userId(request), isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")));
