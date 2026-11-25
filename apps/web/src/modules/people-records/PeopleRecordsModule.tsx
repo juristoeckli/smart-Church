@@ -81,7 +81,8 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
       const index = group.indexOf(field);
       return <div key={field.id}>
         <p><strong>{field.label}</strong> · {field.fieldKey} · {field.type}{field.required ? " · required" : ""}{field.active ? " · Active" : " · Inactive"}{field.category ? " · " + field.category : ""}</p>
-        {canManage && <form className="module-toolbar" key={JSON.stringify([field.visibility, field.category, field.textMaxLength, field.active, field.showOnCreate])} onSubmit={(event) => void onSave(event, field)}>
+        {canManage && <form className="module-toolbar" key={JSON.stringify([field.label, field.visibility, field.category, field.textMaxLength, field.active, field.showOnCreate])} onSubmit={(event) => void onSave(event, field)}>
+          <label>Display name<input name="label" required aria-label={`Display name of ${field.label}`} maxLength={100} defaultValue={field.label} /></label>
           <label>Field category<input name="category" aria-label={`Category of ${field.label}`} list="people-field-categories" maxLength={60} defaultValue={field.category ?? ""}/></label>
           {field.type === "text" && <label>Maximum characters<input name="textMaxLength" aria-label={"Maximum characters for " + field.label} type="number" min={1} max={2000} placeholder="Default: 2000" defaultValue={field.textMaxLength ?? ""}/></label>}
           <label>Visibility<select name="visibility" aria-label={`Visibility of ${field.label}`} defaultValue={field.visibility ?? "private_people"}>
@@ -471,6 +472,8 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
   async function updateFieldSettings(event: FormEvent<HTMLFormElement>, field: Field) {
     event.preventDefault();
     const values = new FormData(event.currentTarget);
+    const nextLabel = String(values.get("label") ?? "").trim();
+    const labelChanged = nextLabel !== field.label;
     const visibility = values.get("visibility");
     if (visibility !== "private_people" && visibility !== "people_managers") return;
     const category = String(values.get("category") ?? "").trim() || null;
@@ -483,10 +486,18 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
     const activeChanged = active !== field.active;
     const showOnCreate = values.get("showOnCreate") === "on";
     const showOnCreateChanged = showOnCreate !== (field.showOnCreate ?? false);
-    if (!visibilityChanged && !categoryChanged && !lengthChanged && !activeChanged && !showOnCreateChanged) return;
+    if (!labelChanged && !visibilityChanged && !categoryChanged && !lengthChanged && !activeChanged && !showOnCreateChanged) return;
     if (activeChanged && !active && !window.confirm(`Deactivate “${field.label}”? People and imports cannot use it until it is reactivated. Existing values and history are kept.`)) return;
     if (visibilityChanged && visibility === "private_people" && !window.confirm(`Allow all users with private People access at this location to view “${field.label}” and its history?`)) return;
-    await act(() => request(`/api/people-records/fields/${field.id}`, { method: "PATCH", body: JSON.stringify({ visibility: visibilityChanged ? visibility : undefined, category: categoryChanged ? category : undefined, textMaxLength: lengthChanged ? textMaxLength : undefined, active: activeChanged ? active : undefined, expectedActive: activeChanged ? field.active : undefined, showOnCreate: showOnCreateChanged ? showOnCreate : undefined }) }), "Field settings updated.");
+    await act(() => request(`/api/people-records/fields/${field.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        label: labelChanged ? nextLabel : undefined, expectedLabel: labelChanged ? field.label : undefined,
+        visibility: visibilityChanged ? visibility : undefined, category: categoryChanged ? category : undefined,
+        textMaxLength: lengthChanged ? textMaxLength : undefined, active: activeChanged ? active : undefined,
+        expectedActive: activeChanged ? field.active : undefined, showOnCreate: showOnCreateChanged ? showOnCreate : undefined,
+      }),
+    }), "Field settings updated.");
   }
   async function addConsent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

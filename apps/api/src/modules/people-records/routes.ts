@@ -568,7 +568,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         client.release();
       }
     });
-    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean; expectedActive?: boolean; showOnCreate?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>(
+    routes.patch<{ Params: { id: string }; Body: { label?: string; expectedLabel?: string; options?: string[]; required?: boolean; active?: boolean; expectedActive?: boolean; showOnCreate?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>(
       "/api/people-records/fields/:id",
       { schema: { params: { type: "object", required: ["id"], properties: { id: uuid } } } },
       async (request, reply) => {
@@ -576,6 +576,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!departmentId || !validateMutation(request, reply)) return reply;
         const body = request.body;
         if (!body || typeof body !== "object" || Array.isArray(body)) return reply.code(400).send({ error: "Provide custom field settings." });
+        if ((body.label !== undefined && (typeof body.label !== "string" || !body.label.trim() || [...body.label.trim()].length > 100)) ||
+            (body.expectedLabel !== undefined && (typeof body.expectedLabel !== "string" || body.label === undefined))) {
+          return reply.code(400).send({ error: "Enter a field label of up to 100 characters." });
+        }
         if (body.visibility !== undefined && !customFieldVisibilities.includes(body.visibility)) {
           return reply.code(400).send({ error: "Choose a supported field visibility." });
         }
@@ -594,13 +598,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           if (!await context.lockDepartmentForWrite(client, departmentId)) {
             return reply.code(409).send({ error: "This location cannot be changed on this installation." });
           }
-          const { rows: [field] } = await client.query<{ field_key: string; field_type: string; active: boolean }>(
-            "SELECT field_key,field_type,active FROM people_record_fields WHERE department_id=$1 AND id=$2 FOR UPDATE",
+          const { rows: [field] } = await client.query<{ field_key: string; field_type: string; active: boolean; label: string }>(
+            "SELECT field_key,field_type,active,label FROM people_record_fields WHERE department_id=$1 AND id=$2 FOR UPDATE",
             [departmentId, fieldId],
           );
           if (!field) return reply.code(404).send({ error: "Custom field not found." });
           if (body.textMaxLength != null && field.field_type !== "text") {
             return reply.code(400).send({ error: "Only text fields accept a length limit." });
+          }
+          if (body.expectedLabel !== undefined && body.expectedLabel !== field.label) {
+            return reply.code(409).send({ error: "The field label changed. Refresh and try again." });
           }
           if (body.expectedActive !== undefined && body.expectedActive !== field.active) {
             return reply.code(409).send({ error: "The field status changed. Refresh and try again." });
