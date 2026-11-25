@@ -1,3 +1,4 @@
+import { ScopedGroupFinance } from "./ScopedGroupFinance";
 import { ScopedSimpleBooking, SimpleBookingGrantsPanel } from "./ScopedSimpleBooking";
 import { BookingPurposesPanel, type BookingPurpose } from "./BookingPurposesPanel";
 import { FinanceMasterDataImport } from "./FinanceMasterDataImport";
@@ -120,15 +121,23 @@ const initialLine = (): JournalLine => ({ accountId: "", costCenterId: "", donor
 export function FinanceModule(context: ModuleContext) {
   const grants = context.department.modulePermissions?.finance ?? [];
   const full = context.canManageSite || context.department.role === "site_admin" || grants.includes("view") || grants.includes("manage");
-  const [showSimple, setShowSimple] = useState(false);
-  if (!full) return <ScopedSimpleBooking key={context.departmentId} context={context} />;
+  const canBook = grants.includes("simple-booking");
+  const canRead = grants.includes("group-finance-view");
+  const [chosen, setChosen] = useState<"full" | "booking" | "read">();
+  const pages = [
+    ...(full ? [{ value: "full" as const, label: "Finance overview" }] : []),
+    ...(canRead ? [{ value: "read" as const, label: "Group finance" }] : []),
+    ...(canBook ? [{ value: "booking" as const, label: "Simple group booking" }] : []),
+  ];
+  const page = pages.find(item => item.value === chosen)?.value ?? pages[0]?.value;
   return <>
-    {grants.includes("simple-booking") && <nav className="finance-action-row" aria-label="Finance view">
-      <button type="button" className="button button-secondary" onClick={() => setShowSimple(false)} aria-pressed={!showSimple}>Finance overview</button>
-      <button type="button" className="button button-secondary" onClick={() => setShowSimple(true)} aria-pressed={showSimple}>Simple group booking</button>
+    {pages.length > 1 && <nav className="finance-action-row" aria-label="Finance view">
+      {pages.map(item => <button key={item.value} type="button" className="button button-secondary"
+        onClick={() => setChosen(item.value)} aria-pressed={page === item.value}>{item.label}</button>)}
     </nav>}
-    {showSimple && grants.includes("simple-booking")
-      ? <ScopedSimpleBooking key={context.departmentId} context={context} /> : <FullFinanceModule {...context} />}
+    {page === "full" && <FullFinanceModule {...context} />}
+    {page === "read" && <ScopedGroupFinance key={context.departmentId} departmentId={context.departmentId} />}
+    {page === "booking" && <ScopedSimpleBooking key={context.departmentId} context={context} />}
   </>;
 }
 

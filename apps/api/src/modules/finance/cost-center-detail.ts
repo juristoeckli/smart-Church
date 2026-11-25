@@ -14,11 +14,7 @@ export type StatementEntry = {
   id: string; transactionId: string; date: string; receiptNumber: string; bookingText: string; lineText: string;
   accountCode: string; accountName: string; debitCents: string; creditCents: string; isCostCenterTransfer: boolean;
 };
-export const costCenterEntriesSql = `
-  SELECT line.id,t.id AS "transactionId",to_char(t.booking_date,'YYYY-MM-DD') AS date,
-    t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",line.line_text AS "lineText",
-    a.code AS "accountCode",a.name AS "accountName",
-    line.debit_cents::text AS "debitCents",line.credit_cents::text AS "creditCents",t.is_cost_center_transfer AS "isCostCenterTransfer"
+const costCenterEntriesFromSql = `
   FROM finance_transactions t
   JOIN finance_transaction_lines line ON line.department_id=t.department_id AND line.transaction_id=t.id
   JOIN finance_accounts a ON a.department_id=line.department_id AND a.id=line.account_id
@@ -26,6 +22,28 @@ export const costCenterEntriesSql = `
     AND t.booking_date BETWEEN $4::date AND $5::date
     AND ($8::boolean OR NOT t.is_cost_center_transfer)
   ORDER BY t.booking_date,t.created_at,t.id,line.line_number LIMIT $6 OFFSET $7
+`;
+
+// Do not expose a full journal memo or receipt number if that journal also has another cost center.
+const sharedJournal = `EXISTS (
+  SELECT 1 FROM finance_transaction_lines other WHERE other.department_id=line.department_id
+    AND other.transaction_id=line.transaction_id AND other.cost_center_id IS NOT NULL AND other.cost_center_id<>line.cost_center_id
+)`;
+export const scopedCostCenterEntriesSql = `
+  SELECT to_char(t.booking_date,'YYYY-MM-DD') AS date,line.line_text AS "lineText",
+    CASE WHEN ${sharedJournal} THEN NULL ELSE t.booking_text END AS "bookingText",
+    CASE WHEN ${sharedJournal} THEN NULL ELSE t.receipt_number END AS "receiptNumber",
+    a.code AS "accountCode",a.name AS "accountName",
+    line.debit_cents::text AS "debitCents",line.credit_cents::text AS "creditCents",t.is_cost_center_transfer AS "isCostCenterTransfer"
+  ${costCenterEntriesFromSql}
+`;
+
+export const costCenterEntriesSql = `
+  SELECT line.id,t.id AS "transactionId",to_char(t.booking_date,'YYYY-MM-DD') AS date,
+    t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",line.line_text AS "lineText",
+    a.code AS "accountCode",a.name AS "accountName",
+    line.debit_cents::text AS "debitCents",line.credit_cents::text AS "creditCents",t.is_cost_center_transfer AS "isCostCenterTransfer"
+  ${costCenterEntriesFromSql}
 `;
 
 export type StatementBudget = {
