@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { parsePeopleNumber, validPeopleNumber } from "../src/modules/people-records/number-field.ts";
+import { normalizeMultilineField } from "../src/modules/people-records/multiline-field.ts";
 
 assert.equal(parsePeopleNumber(" -12.75 "), -12.75);
 assert.equal(parsePeopleNumber("+2.5e2"), 250);
@@ -18,5 +19,9 @@ assert.equal(parsePeopleNumber("12.75", 4), undefined);
 assert.equal(parsePeopleNumber("2e3", 3), undefined);
 assert.equal(parsePeopleNumber("2e3", 4), 2000);
 assert.ok(!validPeopleNumber(12.75, 4));
+
+assert.equal(normalizeMultilineField(" line one\r\nline two\rline three "), " line one\nline two\nline three ");
+assert.equal(normalizeMultilineField("\nkept\n\n"), "\nkept\n\n");
+assert.equal(normalizeMultilineField(""), "");
 
 console.log("People custom field type regressions passed.");
