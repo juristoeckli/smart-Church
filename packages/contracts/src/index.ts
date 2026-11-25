@@ -124,6 +124,7 @@ export interface ServicePlanTemplate {
 }
 
 export interface ServiceEvent {
+  pastorNames?: string[];
   canManageAttachments?: boolean;
   responsibleContactId?: string | null;
   id: string;

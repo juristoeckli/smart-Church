@@ -2757,6 +2757,15 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
   const currentContactId = linkedContact.rows[0]?.contact_id ?? null;
   const visibleAssets = await visibleServiceResourceIds(selectedDepartmentId, [...new Set(result.rows.flatMap((row) => row.asset_ids ?? []))], request, pool);
+  const pastorAssignments = new Map(result.rows.map((row) => [row.id, (row.positions ?? [])
+    .filter((position) => /^(?:pastor(?:in|e|a)?|pfarrer(?:in)?|pasteur(?:e)?|ministre)$/iu.test(position.name.trim()))
+    .flatMap((position) => position.contactId ? [position.contactId] : [])]));
+  const pastorIds = [...new Set([...pastorAssignments.values()].flat())];
+  const pastors = pastorIds.length ? await pool.query<{ id: string; name: string }>(
+    "SELECT id, trim(concat_ws(' ', first_name, last_name)) AS name FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])",
+    [selectedDepartmentId, pastorIds],
+  ) : { rows: [] };
+  const pastorsById = new Map(pastors.rows.map(({ id, name }) => [id, name]));
   const responsesByPosition = new Map(responseRows.rows.map((row) => [`${row.event_id}:${row.position_index}`, row]));
   return result.rows.map((row) => {
     const event = mapServiceEvent({ ...row, asset_ids: (row.asset_ids ?? []).filter((id) => visibleAssets.has(id)) });
@@ -2764,6 +2773,7 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
     const visibleEvent = canManageRegistrations ? event : (({ registrationToken: _registrationToken, canManageAttachments: _attachments, ...safeEvent }) => safeEvent)(event);
     return {
       ...visibleEvent,
+      pastorNames: [...new Set((pastorAssignments.get(event.id) ?? []).flatMap((id) => pastorsById.get(id) || []))],
       positions: (visibleEvent.positions ?? []).map((position, index) => {
         const response = responsesByPosition.get(`${event.id}:${index}`);
         const assignedToCurrentUser = Boolean(currentContactId && position.contactId === currentContactId);
