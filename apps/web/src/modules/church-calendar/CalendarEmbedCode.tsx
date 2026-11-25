@@ -5,6 +5,8 @@ function escapeAttribute(value: string) {
 }
 
 export function CalendarEmbedCode({ url }: { url: string }) {
+  const [view, setView] = useState("eventView");
+  const [period, setPeriod] = useState("month");
   const [days, setDays] = useState(60);
   const [entries, setEntries] = useState(20);
   const [searchEntry, setSearchEntry] = useState("");
@@ -12,9 +14,14 @@ export function CalendarEmbedCode({ url }: { url: string }) {
   const [darkMode, setDarkMode] = useState(false);
   const [feedback, setFeedback] = useState("");
   const source = new URL(url, window.location.origin);
-  source.searchParams.set("days", String(days));
-  source.searchParams.set("entries", String(entries));
-  if (searchEntry.trim()) source.searchParams.set("searchEntry", searchEntry.trim());
+  if (view === "calView") {
+    source.searchParams.set("viewname", view);
+    source.searchParams.set("period", period);
+  } else {
+    source.searchParams.set("days", String(days));
+    source.searchParams.set("entries", String(entries));
+    if (searchEntry.trim()) source.searchParams.set("searchEntry", searchEntry.trim());
+  }
   const customTitle = title.trim();
   if (customTitle) source.searchParams.set("title", customTitle);
   if (darkMode) source.searchParams.set("darkmode", "true");
@@ -27,15 +34,24 @@ export function CalendarEmbedCode({ url }: { url: string }) {
 
   return <details className="church-calendar-web-embed">
     <summary>Embed on a website</summary>
-    <label>Show upcoming<select value={days} onChange={(event) => setDays(Number(event.target.value))}>
-      <option value={30}>30 days</option><option value={60}>60 days</option><option value={90}>90 days</option><option value={120}>120 days</option>
+    <label>View<select value={view} onChange={(event) => { setView(event.target.value); setFeedback(""); }}>
+      <option value="eventView">Appointment list</option><option value="calView">Calendar grid</option>
     </select></label>
-    <label>Limit appointments<select value={entries} onChange={(event) => setEntries(Number(event.target.value))}>
-      <option value={10}>10</option><option value={20}>20</option><option value={30}>30</option><option value={50}>50</option>
-    </select></label>
-    <label>Filter by search terms<input type="search" maxLength={240} value={searchEntry} onChange={(event) => {
-      setSearchEntry(event.target.value); setFeedback("");
-    }} /><small>Separate terms with commas. An appointment appears if its title, subtitle or place matches any term.</small></label>
+    {view === "calView" ? <label>Initial calendar view<select value={period} onChange={(event) => {
+      setPeriod(event.target.value); setFeedback("");
+    }}>
+      <option value="month">Month</option><option value="week">Week</option><option value="day">Day</option>
+    </select></label> : <>
+      <label>Show upcoming<select value={days} onChange={(event) => setDays(Number(event.target.value))}>
+        <option value={30}>30 days</option><option value={60}>60 days</option><option value={90}>90 days</option><option value={120}>120 days</option>
+      </select></label>
+      <label>Limit appointments<select value={entries} onChange={(event) => setEntries(Number(event.target.value))}>
+        <option value={10}>10</option><option value={20}>20</option><option value={30}>30</option><option value={50}>50</option>
+      </select></label>
+      <label>Filter by search terms<input type="search" maxLength={240} value={searchEntry} onChange={(event) => {
+        setSearchEntry(event.target.value); setFeedback("");
+      }} /><small>Separate terms with commas. An appointment appears if its title, subtitle or place matches any term.</small></label>
+    </>}
     <label>Display title<input type="text" maxLength={120} value={title} onChange={(event) => {
       setTitle(event.target.value); setFeedback("");
     }} placeholder="Use the calendar or agenda name" /></label>

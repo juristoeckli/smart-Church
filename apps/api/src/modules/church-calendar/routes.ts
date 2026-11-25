@@ -10,7 +10,7 @@ import { calendarImageMetadataSchema, defaultCalendarImageMetadata, normalizeCal
 import { registerCalendarEmailSubscriptions } from "./email-subscriptions.js";
 import { registerCalendarBookingDescriptions } from "./booking-descriptions.js";
 import { loadPublicAgenda, registerCalendarAgendaPublications } from "./calendar-agenda-publications.js";
-import { calendarEmbedContentPolicy, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
+import { calendarEmbedContentPolicy, publicEmbedCalendarWindow, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
 import { registerCalendarTagDefinitions } from "./tag-definitions.js";
 import { loadOccurrenceRequestScope, occurrenceRequestKey, registerCalendarMeetingRequests } from "./meeting-requests.js";
 import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
@@ -371,10 +371,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          ${accessJoin}
         WHERE feed.token_hash=$1 AND calendar.archived_at IS NULL AND ${accessPredicate}`, [tokenHash])).rows[0];
     if (!source) return responseError(reply, 404, "Calendar feed not found.");
-    const from = source.local_today;
+    const window = publicEmbedCalendarWindow(source.local_today, embed);
+    if (embed?.viewname === "calView" && !window) return responseError(reply, 400, "Choose a date within the public calendar range.");
+    const from = window?.from ?? source.local_today;
     const toDate = wallDate(`${from}T00:00:00`);
     toDate.setUTCDate(toDate.getUTCDate() + (embed ? (embed.days ?? 60) - 1 : 366));
-    const to = localDateTime(toDate).slice(0, 10);
+    const to = window?.to ?? localDateTime(toDate).slice(0, 10);
     // An authored clock time can cross the public calendar's local date boundary.
     const fromDay = embed ? localDateTime(addDays(wallDate(`${from}T00:00`), -2)).slice(0, 10) : from;
     const throughDay = embed ? localDateTime(addDays(wallDate(`${to}T00:00`), 2)).slice(0, 10) : to;
@@ -487,7 +489,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.type("text/html; charset=utf-8")
         .header("Content-Security-Policy", calendarEmbedContentPolicy)
         .header("X-Robots-Tag", "noindex, nofollow")
-        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed));
+        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed, window ?? undefined));
     }
     // Expand wall times using each appointment's time zone before exporting UTC instants.
     // Batch conversions to keep query size bounded even for large feeds.
@@ -528,6 +530,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     querystring: { type: "object", additionalProperties: false, properties: {
       days: { type: "integer", minimum: 1, maximum: 120 }, entries: { type: "integer", minimum: 1, maximum: 50 },
       searchEntry: { type: "string", maxLength: 240 }, title: { type: "string", maxLength: 120 }, darkmode: { type: "boolean" },
+      viewname: { type: "string", enum: ["eventView", "calView"] }, period: { type: "string", enum: ["day", "week", "month"] }, date: { type: "string", format: "date" },
     } },
   } as const;
   app.get<{ Params: { token: string }; Querystring: EmbedSettings }>("/api/public/church-calendar/embed/:token", { schema: publicAgendaSchema },
