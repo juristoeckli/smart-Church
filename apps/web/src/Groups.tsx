@@ -721,7 +721,9 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
           {loadedDepartmentId === departmentId && selected.meetingPlace && <GroupMeetingPlaceDetails place={selected.meetingPlace} />}
           {canManage && !selected.importedFrom && selected.status !== "archived" && loadedDepartmentId === departmentId && <GroupMeetingPlaceEditor
             key={departmentId + ":" + selected.id} groupId={selected.id} initial={selected.meetingPlace}
-            departmentId={departmentId} csrfToken={csrfToken} onSaved={loadGroups} />}
+            departmentId={departmentId} csrfToken={csrfToken} onSaved={loadGroups}
+            signupToken={selected.publicSignupEnabled ? selected.publicSignupToken : undefined}
+            isPublic={selected.publicMeetingPlace === true} />}
           {canManage && !selected.importedFrom && selected.status !== "archived" && loadedDepartmentId === departmentId && <GroupMeetingPinEditor
             key={departmentId + ":" + selected.id} group={selected} departmentId={departmentId} csrfToken={csrfToken} onSaved={loadGroups} />}
           {canManage && !selected.importedFrom && loadedDepartmentId === departmentId && <GroupDuplicateForm

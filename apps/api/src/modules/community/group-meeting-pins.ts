@@ -23,7 +23,8 @@ export type ResolveGroupManager = (request: FastifyRequest, reply: FastifyReply)
 
 export async function editGroupMeetingLocation(
   context: ModuleServerContext, reply: FastifyReply, department: string, groupId: string,
-  kind: "pin" | "place", result: object, apply: (client: PoolClient) => Promise<void>,
+  kind: "pin" | "place", result: object,
+  apply: (client: PoolClient) => Promise<void | { status: number; error: string }>,
 ) {
   const client = await context.pool!.connect();
   try {
@@ -40,7 +41,11 @@ export async function editGroupMeetingLocation(
       if (group.source_system) return reply.code(403).send({ error: "This group is managed in its source system." });
       return reply.code(409).send({ error: `Restore the group before editing its meeting ${kind}.` });
     }
-    await apply(client);
+    const failure = await apply(client);
+    if (failure) {
+      await client.query("ROLLBACK");
+      return reply.code(failure.status).send({ error: failure.error });
+    }
     await client.query("COMMIT");
     context.realtime.publish("core:groups:changed", department, { groupId, action: `meeting-${kind}-updated` });
     return reply.header("Cache-Control", "private, no-store").send(result);

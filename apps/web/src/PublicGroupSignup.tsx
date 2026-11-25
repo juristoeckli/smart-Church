@@ -1,10 +1,12 @@
+import type { GroupMeetingPlace } from "@smart-church/contracts";
+import { GroupMeetingPlaceDetails } from "./GroupMeetingPlace";
 import { useEffect, useState, type FormEvent } from "react";
 import { GroupWithdrawal, withdrawalReceiptPattern } from "./GroupWithdrawal";
 import { Check, ContactRound } from "lucide-react";
 import type { SignupQuestion } from "./GroupSignupFormEditor";
 import { publicErrorText, publicLanguage, publicText } from "./public-translations";
 
-type PublicGroup = { name: string; description: string; revision?: string | null; questions?: SignupQuestion[]; heading?: string; signupState?: "scheduled" | "open" | "closed"; opensAt?: string | null; timeZone?: string; connectedAdmission?: boolean };
+type PublicGroup = { name: string; description: string; revision?: string | null; questions?: SignupQuestion[]; heading?: string; signupState?: "scheduled" | "open" | "closed"; opensAt?: string | null; timeZone?: string; connectedAdmission?: boolean; meetingPlace?: Omit<GroupMeetingPlace, "visibility"> };
 
 export function PublicGroupSignup({ token }: { token: string }) {
   const readReceipt = () => new URLSearchParams(window.location.hash.slice(1)).get("receipt");
@@ -85,6 +87,7 @@ function GroupSignupForm({ token }: { token: string }) {
       <h1>{group.heading || group.name}</h1>
       {group.heading && <p>{group.name}</p>}
       {group.description && <p className="public-registration-description">{group.description}</p>}
+      {group.meetingPlace && <GroupMeetingPlaceDetails place={group.meetingPlace} heading={publicText(language, "groupMeetingPlace")} />}
       {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, submitted === "approved" ? "groupJoined" : "groupRequestSent")}</h2><p>{publicText(language, submitted === "approved" ? "groupConnectedSuccess" : "groupRequestHelp")}</p>{withdrawalToken && <p><a href={window.location.pathname + "#receipt=" + withdrawalToken} target="_blank" rel="noreferrer">{publicText(language, "groupWithdrawalLink")}</a> · {publicText(language, "groupWithdrawalPrivacy")}</p>}</div></div> : group.signupState === "closed" || group.signupState === "scheduled" ? <div className="public-registration-message">
         <p>{publicText(language, group.signupState === "scheduled" ? "groupSignupScheduled" : "groupSignupClosed")}</p>
         {group.signupState === "scheduled" && group.opensAt && <p><time dateTime={group.opensAt}>

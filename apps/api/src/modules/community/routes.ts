@@ -62,6 +62,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!departmentId) return reply;
       const result = await pool!.query(
         `SELECT g.id, g.name, g.description, g.group_type, g.status, g.starts_on, g.ends_on, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token, pin.latitude, pin.longitude, meeting.place AS meeting_place,
+                (g.public_signup_enabled AND g.status='active'
+                AND meeting.public_approval_hash=encode(sha256(convert_to(g.public_signup_token::text || ':' || meeting.place::text,'UTF8')),'hex')) AS place_public,
                 EXISTS (SELECT 1 FROM department_memberships membership
                   JOIN contacts own_contact ON own_contact.id=membership.contact_id AND own_contact.department_id=membership.department_id
                   JOIN group_members own_member ON own_member.contact_id=own_contact.id AND own_member.group_id=g.id
@@ -76,7 +78,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
            FROM church_groups g LEFT JOIN group_meeting_pins pin ON pin.group_id=g.id AND pin.department_id=g.department_id
            LEFT JOIN group_meeting_places meeting ON meeting.group_id=g.id AND meeting.department_id=g.department_id
            LEFT JOIN group_members gm ON gm.group_id = g.id LEFT JOIN contacts c ON c.id=gm.contact_id
-          WHERE g.department_id = $1 GROUP BY g.id,pin.latitude,pin.longitude,meeting.place ORDER BY lower(g.name), g.created_at`,
+          WHERE g.department_id = $1 GROUP BY g.id,pin.latitude,pin.longitude,meeting.place,meeting.public_approval_hash ORDER BY lower(g.name), g.created_at`,
         [departmentId, request.authenticatedUser!.id],
       );
       const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
@@ -86,6 +88,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const placeVisible = row.status !== "archived" && (canManageGroups || (row.status === "active" && row.can_read_meeting_place));
         const group = { ...mapGroup(row), isMyGroup: row.is_my_group === true,
           ...(placeVisible && row.meeting_place ? { meetingPlace: row.meeting_place } : {}),
+          ...(canManageGroups && row.meeting_place ? { publicMeetingPlace: row.place_public === true } : {}),
           ...(pinVisible && typeof row.latitude === "number" && typeof row.longitude === "number"
             ? { meetingPin: { latitude: row.latitude, longitude: row.longitude } } : {}) };
         return canManageGroups ? group : (({ publicSignupToken: _token, ...safeGroup }) => safeGroup)(group);
@@ -674,13 +677,18 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
-      const result = await pool!.query<{ name: string; description: string; revision: string | null; questions: unknown[]; heading: string; opensAt: Date | null; closesAt: Date | null; timeZone: string; connectedAdmission: boolean }>(
+      const result = await pool!.query<{ name: string; description: string; revision: string | null; questions: unknown[]; heading: string; opensAt: Date | null; closesAt: Date | null; timeZone: string; connectedAdmission: boolean; meetingPlace: Omit<NonNullable<ChurchGroup["meetingPlace"]>, "visibility"> | null }>(
         `SELECT church_group.name,church_group.description,
                 CASE WHEN jsonb_array_length(form.questions)>0 THEN form.revision ELSE NULL END AS revision,
                 COALESCE(form.questions,'[]'::jsonb) AS questions, COALESCE(form.heading,'') AS heading,
-                form.opens_at AS "opensAt",form.closes_at AS "closesAt",site.time_zone AS "timeZone",COALESCE(form.connected_admission,false) AS "connectedAdmission"
+                form.opens_at AS "opensAt",form.closes_at AS "closesAt",site.time_zone AS "timeZone",COALESCE(form.connected_admission,false) AS "connectedAdmission",
+                  CASE WHEN meeting.group_id IS NOT NULL THEN jsonb_build_object(
+                    'name',meeting.place->>'name','street',meeting.place->>'street','postalCode',meeting.place->>'postalCode',
+                    'locality',meeting.place->>'locality','country',meeting.place->>'country') ELSE NULL END AS "meetingPlace"
            FROM church_groups church_group JOIN departments site ON site.id=church_group.department_id
            LEFT JOIN group_signup_forms form ON form.group_id=church_group.id AND form.department_id=church_group.department_id
+           LEFT JOIN group_meeting_places meeting ON meeting.group_id=church_group.id AND meeting.department_id=church_group.department_id
+            AND meeting.public_approval_hash=encode(sha256(convert_to(church_group.public_signup_token::text || ':' || meeting.place::text,'UTF8')),'hex')
           WHERE church_group.public_signup_token=$1 AND church_group.public_signup_enabled=true
             AND church_group.status='active' AND church_group.source_system IS NULL`,
         [request.params.token],
@@ -688,7 +696,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!result.rowCount) return reply.code(404).send({ error: "This group registration link is unavailable." });
       const form = result.rows[0];
       reply.header("cache-control", "private, no-store");
-      return { ...form, timeZone: editableSignupPolicy(defaultSignupPolicy, form.timeZone).timeZone, signupState: signupState(form.opensAt, form.closesAt) };
+      const { meetingPlace, ...publicForm } = form;
+      return { ...publicForm, ...(meetingPlace ? { meetingPlace } : {}), timeZone: editableSignupPolicy(defaultSignupPolicy, form.timeZone).timeZone, signupState: signupState(form.opensAt, form.closesAt) };
     });
 
     routes.post<{ Params: { token: string }; Body: { firstName: string; lastName: string; email: string; formRevision?: string; answers?: Record<string, string> } }>("/api/public/group-signups/:token", { schema: {

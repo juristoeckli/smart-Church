@@ -240,6 +240,7 @@ export interface ChurchGroup {
   publicSignupToken?: string;
   meetingPin?: { latitude: number; longitude: number };
   meetingPlace?: GroupMeetingPlace;
+  publicMeetingPlace?: boolean;
   importedFrom?: "churchtools" | "elvanto";
 }
 
