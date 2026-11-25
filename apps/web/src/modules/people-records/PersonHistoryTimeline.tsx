@@ -17,7 +17,7 @@ const actionLabels: Record<string, string> = {
   consent_recorded: "Consent recorded", relationship_added: "Relationship added", relationship_removed: "Relationship removed",
   household_linked: "Joined mailing household", household_unlinked: "Left mailing household", household_updated: "Mailing household updated",
   attachment_added: "Attachment uploaded", attachment_removed: "Attachment deleted",
-  person_archived: "Person archived", person_restored: "Person restored", person_merged: "People merged", csv_import_created: "Person imported",
+  person_created: "Person created", person_archived: "Person archived", person_restored: "Person restored", person_merged: "People merged", csv_import_created: "Person imported",
   membership_created: "Group membership added", membership_updated: "Group membership updated", membership_deleted: "Group membership removed",
 };
 

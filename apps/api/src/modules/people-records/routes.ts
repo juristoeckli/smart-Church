@@ -1,3 +1,4 @@
+import { registerPersonCreation } from "./create-person.js";
 import { fieldActivationBlocker } from "./field-activation.js";
 import { applyChoiceRename, choiceRemovalBlocker, inspectChoiceRename, lockChoiceDefinitionWrite, lockChoiceRenameContacts, withChoiceDefinitionWrite } from "./choice-rename.js";
 import { registerPersonalFollowups } from "./personal-followups.js";
@@ -99,6 +100,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       return departmentId;
     }
+    registerPersonCreation(routes, context, department, history);
     registerPersonAttachments(routes, context, department);
     registerPrivatePersonNotes(routes, context, department);
     const canFilterAttendedMeeting = registerPeopleMeetingFilter(routes, context, department);
@@ -308,7 +310,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     });
     routes.get("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply); if (!d) return reply;
-      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility,category,text_max_length AS \"textMaxLength\",tag_color AS \"tagColor\" FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label,id", [d,canManagePeopleFields(request)]); return result.rows;
+      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility,category,text_max_length AS \"textMaxLength\",show_on_create AS \"showOnCreate\",tag_color AS \"tagColor\" FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label,id", [d,canManagePeopleFields(request)]); return result.rows;
     });
     routes.post<{ Body: { label: string; fieldKey: string; type: "text"|"date"|"boolean"|"select"; options?: string[]; required?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply, true); if (!d) return reply; if (!validateMutation(request, reply)) return reply;
@@ -566,7 +568,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         client.release();
       }
     });
-    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean; expectedActive?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>(
+    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean; expectedActive?: boolean; showOnCreate?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>(
       "/api/people-records/fields/:id",
       { schema: { params: { type: "object", required: ["id"], properties: { id: uuid } } } },
       async (request, reply) => {
@@ -582,6 +584,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if ((body.active !== undefined && typeof body.active !== "boolean") ||
             (body.expectedActive !== undefined && (typeof body.expectedActive !== "boolean" || body.active === undefined))) {
           return reply.code(400).send({ error: "Choose a valid field status." });
+        }
+        if (body.showOnCreate !== undefined && typeof body.showOnCreate !== "boolean") {
+          return reply.code(400).send({ error: "Choose whether this field should appear when creating people." });
         }
         const fieldId = request.params.id;
         let updated = false;
@@ -608,11 +613,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             `UPDATE people_record_fields SET label=COALESCE($3,label),options=COALESCE($4::jsonb,options),
               required=COALESCE($5,required),active=COALESCE($6,active),visibility=COALESCE($7,visibility),
               category=CASE WHEN $8::boolean THEN $9::text ELSE category END,
-              text_max_length=CASE WHEN $10::boolean THEN $11::integer ELSE text_max_length END,updated_at=now()
+              text_max_length=CASE WHEN $10::boolean THEN $11::integer ELSE text_max_length END,
+              show_on_create=COALESCE($12,show_on_create),updated_at=now()
               WHERE department_id=$1 AND id=$2`,
             [departmentId, fieldId, body.label?.trim() || null, body.options === undefined ? null : JSON.stringify(body.options),
               body.required ?? null, body.active ?? null, body.visibility ?? null, body.category !== undefined,
-              body.category?.trim() || null, body.textMaxLength !== undefined, body.textMaxLength ?? null],
+              body.category?.trim() || null, body.textMaxLength !== undefined, body.textMaxLength ?? null, body.showOnCreate ?? null],
           );
           updated = true;
           return { ok: true };

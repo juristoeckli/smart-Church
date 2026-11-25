@@ -1,3 +1,4 @@
+import { cleanContactInput, contactInputProperties } from "./contact-input.js";
 import { captureSignupAnswers, prepareSignupQuestions, signupAnswerFields, signupQuestionsSchema, type SignupQuestion, type SignupQuestionDraft } from "./modules/community/signup-form.js";
 import { isResourceBookingManager } from "./resource-booking-policy.js";
 import { registerSharedEventAgenda } from "./event-shared-agenda.js";
@@ -2601,13 +2602,7 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
       type: "object",
       additionalProperties: false,
       required: ["firstName", "lastName", "status"],
-      properties: {
-        firstName: { type: "string", minLength: 1, maxLength: 80 },
-        lastName: { type: "string", minLength: 1, maxLength: 80 },
-        email: { type: "string", maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
-        phone: { type: "string", maxLength: 40 },
-        status: { type: "string", enum: ["member", "visitor"] },
-      },
+      properties: contactInputProperties,
     },
   },
 }, async (request, reply): Promise<Contact | { error: string }> => {
@@ -2617,17 +2612,14 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "people_manage");
   if (!selectedDepartmentId) return reply;
 
-  const firstName = request.body.firstName.trim();
-  const lastName = request.body.lastName.trim();
-  const email = request.body.email?.trim() || null;
-  const phone = request.body.phone?.trim() || null;
+  const { firstName, lastName, email, phone, status } = cleanContactInput(request.body);
   if (!firstName || !lastName) return reply.code(400).send({ error: "First and last name are required." });
 
   const result = await pool.query(
     `INSERT INTO contacts (id, department_id, first_name, last_name, email, phone, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id, first_name, last_name, email, phone, status`,
-    [randomUUID(), selectedDepartmentId, firstName, lastName, email, phone, request.body.status],
+    [randomUUID(), selectedDepartmentId, firstName, lastName, email, phone, status],
   );
   const row = result.rows[0];
   return reply.code(201).send({

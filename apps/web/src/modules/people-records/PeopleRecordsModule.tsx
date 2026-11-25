@@ -1,3 +1,4 @@
+import { PeopleCreateForm } from "./PeopleCreateForm";
 import { PersonalFollowupOverview } from "./PersonalFollowupOverview";
 import { PersonPersonalFollowups } from "./PersonPersonalFollowups";
 import { GrowthTrajectorySettings, PersonGrowthTrajectory } from "./GrowthTrajectory";
@@ -80,13 +81,14 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
       const index = group.indexOf(field);
       return <div key={field.id}>
         <p><strong>{field.label}</strong> · {field.fieldKey} · {field.type}{field.required ? " · required" : ""}{field.active ? " · Active" : " · Inactive"}{field.category ? " · " + field.category : ""}</p>
-        {canManage && <form className="module-toolbar" key={JSON.stringify([field.visibility, field.category, field.textMaxLength, field.active])} onSubmit={(event) => void onSave(event, field)}>
+        {canManage && <form className="module-toolbar" key={JSON.stringify([field.visibility, field.category, field.textMaxLength, field.active, field.showOnCreate])} onSubmit={(event) => void onSave(event, field)}>
           <label>Field category<input name="category" aria-label={`Category of ${field.label}`} list="people-field-categories" maxLength={60} defaultValue={field.category ?? ""}/></label>
           {field.type === "text" && <label>Maximum characters<input name="textMaxLength" aria-label={"Maximum characters for " + field.label} type="number" min={1} max={2000} placeholder="Default: 2000" defaultValue={field.textMaxLength ?? ""}/></label>}
           <label>Visibility<select name="visibility" aria-label={`Visibility of ${field.label}`} defaultValue={field.visibility ?? "private_people"}>
             <option value="private_people">Private People readers</option><option value="people_managers">People managers only</option>
           </select></label>
           <label><input name="active" type="checkbox" defaultChecked={field.active} /> Active</label>
+          <label><input name="showOnCreate" type="checkbox" defaultChecked={field.showOnCreate} /> Show when creating a person</label>
           <button type="submit">Save field settings</button>
           {!type && !visibility && !fieldStatus && group.length > 1 && <>
             <button type="button" aria-label={"Move " + field.label + " up within its category"}
@@ -105,7 +107,7 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
 }
 
 type FieldVisibility = "private_people" | "people_managers";
-type Field={id:string;label:string;fieldKey:string;type:"text"|"date"|"boolean"|"select";options:string[];required:boolean;active:boolean;visibility?:FieldVisibility;tagColor?:string|null;category?:string|null;textMaxLength?:number|null};
+type Field={id:string;label:string;fieldKey:string;type:"text"|"date"|"boolean"|"select";options:string[];required:boolean;active:boolean;visibility?:FieldVisibility;tagColor?:string|null;category?:string|null;textMaxLength?:number|null;showOnCreate?:boolean};
 type RelationshipVisibility="private_people"|"people_managers";
 type RelationshipType={id:string;label:string;reverseLabel:string;active:boolean;visibility:RelationshipVisibility};
 type Candidate={personId:string;firstName:string;lastName:string;email:string|null;matchId:string;matchFirstName:string;matchLastName:string;matchEmail:string|null;reason:string};
@@ -207,6 +209,7 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
   const canManagePeopleRecords = canManageSite || department.role === "site_admin" || department.permissions?.includes("people_manage") === true;
   const fieldScope = JSON.stringify([departmentId, accountId, department.role, department.permissions, canManagePeopleRecords]);
   const fields = loadedFields?.scope === fieldScope ? loadedFields.rows : [];
+  const [createScope, setCreateScope] = useState<string | null>(null);
   const [pageSelection,setSelectedPeople]=useState<string[]>([]),[bulkStatus,setBulkStatus]=useState<"member"|"visitor">("member"),[bulkFieldId,setBulkFieldId]=useState(""),[bulkFieldValue,setBulkFieldValue]=useState("");
   const [savedViews,setSavedViews]=useState<SavedView[]>([]),[viewName,setViewName]=useState(""),[activeSavedView,setActiveSavedView]=useState("");
   const [csvHeaders,setCsvHeaders]=useState<string[]>([]),[csvRows,setCsvRows]=useState<string[][]>([]),[csvMapping,setCsvMapping]=useState<Record<string,string>>({});
@@ -478,10 +481,12 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
     const lengthChanged = field.type === "text" && textMaxLength !== (field.textMaxLength ?? null);
     const active = values.get("active") === "on";
     const activeChanged = active !== field.active;
-    if (!visibilityChanged && !categoryChanged && !lengthChanged && !activeChanged) return;
+    const showOnCreate = values.get("showOnCreate") === "on";
+    const showOnCreateChanged = showOnCreate !== (field.showOnCreate ?? false);
+    if (!visibilityChanged && !categoryChanged && !lengthChanged && !activeChanged && !showOnCreateChanged) return;
     if (activeChanged && !active && !window.confirm(`Deactivate “${field.label}”? People and imports cannot use it until it is reactivated. Existing values and history are kept.`)) return;
     if (visibilityChanged && visibility === "private_people" && !window.confirm(`Allow all users with private People access at this location to view “${field.label}” and its history?`)) return;
-    await act(() => request(`/api/people-records/fields/${field.id}`, { method: "PATCH", body: JSON.stringify({ visibility: visibilityChanged ? visibility : undefined, category: categoryChanged ? category : undefined, textMaxLength: lengthChanged ? textMaxLength : undefined, active: activeChanged ? active : undefined, expectedActive: activeChanged ? field.active : undefined }) }), "Field settings updated.");
+    await act(() => request(`/api/people-records/fields/${field.id}`, { method: "PATCH", body: JSON.stringify({ visibility: visibilityChanged ? visibility : undefined, category: categoryChanged ? category : undefined, textMaxLength: lengthChanged ? textMaxLength : undefined, active: activeChanged ? active : undefined, expectedActive: activeChanged ? field.active : undefined, showOnCreate: showOnCreateChanged ? showOnCreate : undefined }) }), "Field settings updated.");
   }
   async function addConsent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -610,7 +615,27 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
   return <main className="module-page"><header className="module-header"><div><p className="eyebrow">PEOPLE ADMINISTRATION</p><h1>People Records</h1><p>Location-scoped directory extensions, consent records, relationships, and review tools.</p></div><button onClick={()=>void load()}><RefreshCw size={16}/> Refresh</button></header>
     <nav className="module-tabs">{[["directory","Directory"],["personal-followups","My follow-ups"],["fields","Custom fields"],["duplicates","Duplicate review"],...(canManage?[["import","Import preview"]]:[])].map(([id,name])=><button key={id} aria-current={tab===id?"page":undefined} onClick={()=>setTab(id)}>{name}</button>)}</nav>
     {error&&<p role="alert" className="module-error">{error}</p>}{message&&<p role="status">{message}</p>}
-    {tab==="directory"&&<><div className="module-toolbar"><label><input type="checkbox" checked={showArchived} onChange={e=>{setShowArchived(e.target.checked);setSelected(null);setSelectedPeople([])}}/> Show archived people</label><input aria-label="Search directory" placeholder="Search names, exact nickname, email, phone" value={filter} onChange={e=>{setFilter(e.target.value)}}/><select aria-label="Filter status" value={status} onChange={e=>{setStatus(e.target.value)}}><option value="">All statuses</option><option value="member">Member</option><option value="visitor">Visitor</option></select>{customFilters.map((item,index)=>{const currentField=fields.find(f=>f.fieldKey===item.field&&f.active);return <div className="people-custom-filter" key={index}><select aria-label={`Custom field filter ${index+1}`} value={item.field} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,field:e.target.value,value:"",operator:undefined}:entry))}}><option value="">Choose custom field</option>{fields.filter(f=>f.active&&(!customFilters.some((entry,entryIndex)=>entryIndex!==index&&entry.field===f.fieldKey)||f.fieldKey===item.field)).map(f=><option key={f.id} value={f.fieldKey}>{f.label}</option>)}</select>{currentField?.type==="select"&&<select aria-label={`Custom field value ${index+1}`} value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}><option value="">Any value</option>{currentField.options.map(option=><option key={option} value={option}>{option}</option>)}</select>}{currentField?.type==="boolean"&&<select aria-label={`Custom field value ${index+1}`} value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}><option value="">Any value</option><option value="true">Yes</option><option value="false">No</option></select>}{currentField?.type==="date"&&<select aria-label={`Date filter operator ${index+1}`} value={item.operator??"on"} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,operator:e.target.value as DirectoryFieldFilter["operator"],value:relativeDateOperators.includes(e.target.value)?"":entry.value}:entry))}}><option value="on">On</option><option value="before">Before</option><option value="after">After</option><option value="last_7_days">Within last 7 days</option><option value="last_30_days">Within last 30 days</option><option value="last_90_days">Within last 90 days</option><option value="next_7_days">Within next 7 days</option><option value="next_30_days">Within next 30 days</option><option value="next_90_days">Within next 90 days</option></select>}{currentField?.type==="date"&&!isRelativeDateFilter(item)&&<input aria-label={`Custom field value ${index+1}`} type="date" value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}/>}{currentField?.type==="text"&&<select aria-label={`Text filter operator ${index+1}`} value={item.operator??"equals"} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,operator:e.target.value as DirectoryFieldFilter["operator"]}:entry))}}><option value="equals">Exact</option><option value="contains">Contains</option></select>}{currentField?.type==="text"&&<input aria-label={`Custom field value ${index+1}`} type="search" maxLength={200} placeholder={item.operator==="contains"?"Contains text":"Exact value"} value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}/>}<button type="button" aria-label={`Remove custom field filter ${index+1}`} onClick={()=>{setCustomFilters(current=>current.filter((_,i)=>i!==index))}}>Remove</button></div>})}
+    {tab==="directory"&&<>
+      {canManagePeopleRecords && loadedFields?.scope === fieldScope && (
+        createScope === fieldScope ?
+          <PeopleCreateForm key={fieldScope} fields={fields.filter((field) => field.active && field.showOnCreate)}
+            onClose={() => setCreateScope(null)}
+            onCreate={async (input, signal) => {
+              const person = await request<Person>("/api/people-records/people", { method: "POST", body: JSON.stringify(input), signal });
+              if (signal.aborted) return;
+              setCreateScope(null);
+              setMessage("Person created.");
+              setSelected(person);
+              setDetailsSection("history");
+              setExtras([]);
+              setDates({ birthDate: null, weddingAnniversary: null });
+              void load();
+            }} /> :
+          <div className="module-toolbar"><button type="button" onClick={() => setCreateScope(fieldScope)}>
+            <UserRoundPlus size={16} /> Add person
+          </button></div>
+      )}
+      <div className="module-toolbar"><label><input type="checkbox" checked={showArchived} onChange={e=>{setShowArchived(e.target.checked);setSelected(null);setSelectedPeople([])}}/> Show archived people</label><input aria-label="Search directory" placeholder="Search names, exact nickname, email, phone" value={filter} onChange={e=>{setFilter(e.target.value)}}/><select aria-label="Filter status" value={status} onChange={e=>{setStatus(e.target.value)}}><option value="">All statuses</option><option value="member">Member</option><option value="visitor">Visitor</option></select>{customFilters.map((item,index)=>{const currentField=fields.find(f=>f.fieldKey===item.field&&f.active);return <div className="people-custom-filter" key={index}><select aria-label={`Custom field filter ${index+1}`} value={item.field} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,field:e.target.value,value:"",operator:undefined}:entry))}}><option value="">Choose custom field</option>{fields.filter(f=>f.active&&(!customFilters.some((entry,entryIndex)=>entryIndex!==index&&entry.field===f.fieldKey)||f.fieldKey===item.field)).map(f=><option key={f.id} value={f.fieldKey}>{f.label}</option>)}</select>{currentField?.type==="select"&&<select aria-label={`Custom field value ${index+1}`} value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}><option value="">Any value</option>{currentField.options.map(option=><option key={option} value={option}>{option}</option>)}</select>}{currentField?.type==="boolean"&&<select aria-label={`Custom field value ${index+1}`} value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}><option value="">Any value</option><option value="true">Yes</option><option value="false">No</option></select>}{currentField?.type==="date"&&<select aria-label={`Date filter operator ${index+1}`} value={item.operator??"on"} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,operator:e.target.value as DirectoryFieldFilter["operator"],value:relativeDateOperators.includes(e.target.value)?"":entry.value}:entry))}}><option value="on">On</option><option value="before">Before</option><option value="after">After</option><option value="last_7_days">Within last 7 days</option><option value="last_30_days">Within last 30 days</option><option value="last_90_days">Within last 90 days</option><option value="next_7_days">Within next 7 days</option><option value="next_30_days">Within next 30 days</option><option value="next_90_days">Within next 90 days</option></select>}{currentField?.type==="date"&&!isRelativeDateFilter(item)&&<input aria-label={`Custom field value ${index+1}`} type="date" value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}/>}{currentField?.type==="text"&&<select aria-label={`Text filter operator ${index+1}`} value={item.operator??"equals"} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,operator:e.target.value as DirectoryFieldFilter["operator"]}:entry))}}><option value="equals">Exact</option><option value="contains">Contains</option></select>}{currentField?.type==="text"&&<input aria-label={`Custom field value ${index+1}`} type="search" maxLength={200} placeholder={item.operator==="contains"?"Contains text":"Exact value"} value={item.value} onChange={e=>{setCustomFilters(current=>current.map((entry,i)=>i===index?{...entry,value:e.target.value}:entry))}}/>}<button type="button" aria-label={`Remove custom field filter ${index+1}`} onClick={()=>{setCustomFilters(current=>current.filter((_,i)=>i!==index))}}>Remove</button></div>})}
 {tags.length > 0 && <details className="people-directory-statistics">
   <summary>Tags</summary>
   <fieldset>

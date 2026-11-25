@@ -38,7 +38,7 @@ const profileHistory = `SELECT h.id,'profile:'||h.id::text AS cursor_key,h.actio
          WHEN h.action IN ('relationship_added','relationship_removed') THEN 'relationships'
          WHEN h.action IN ('household_linked','household_unlinked','household_updated') THEN 'household'
          WHEN h.action IN ('attachment_added','attachment_removed','attachment_access_changed') THEN 'attachments'
-         WHEN h.action IN ('person_archived','person_restored','person_merged','csv_import_created') THEN 'lifecycle'
+         WHEN h.action IN ('person_created','person_archived','person_restored','person_merged','csv_import_created') THEN 'lifecycle'
          ELSE 'profile' END AS category,
     COALESCE(field.label,h.subject) AS subject,NULL::uuid AS group_id,h.actor_user_id,h.historical_actor_name,h.created_at,
     CASE WHEN h.action='person_merged' THEN jsonb_build_object('mergedContactId',h.before_value->'mergedContactId') ELSE h.before_value END AS before_value,
