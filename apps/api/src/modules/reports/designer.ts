@@ -340,34 +340,38 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
   app.post<{ Body: { name: string; definition: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/designer/saved", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
-    const available = await datasets(request, departmentId);
-    const input = request.body.definition as Record<string, unknown>;
-    const dataset = available.find((item) => item.key === input?.dataset);
-    if (!dataset) return reply.code(403).send({ error: "That dataset is unavailable for your permissions." });
-    const definition = cleanDefinition(input, dataset.fields);
-    if (typeof definition === "string") return reply.code(400).send({ error: definition });
-    const name = typeof request.body.name === "string" ? request.body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120) : "";
-    if (!name) return reply.code(400).send({ error: "Enter a name for this report." });
     try {
-      const result = await withChoiceDefinitionWrite(pool!, departmentId, (client) => client.query("INSERT INTO saved_designer_reports(id,department_id,owner_user_id,name,definition,share_scope) VALUES($1,$2,$3,$4,$5::jsonb,$6) RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? "private"]));
-      return reply.code(201).send(result.rows[0]);
+      return await withChoiceDefinitionWrite(pool!, departmentId, async (client) => {
+        const available = await datasets(request, departmentId, client);
+        const input = request.body.definition as Record<string, unknown>;
+        const dataset = available.find((item) => item.key === input?.dataset);
+        if (!dataset) return reply.code(403).send({ error: "That dataset is unavailable for your permissions." });
+        const definition = cleanDefinition(input, dataset.fields);
+        if (typeof definition === "string") return reply.code(400).send({ error: definition });
+        const name = typeof request.body.name === "string" ? request.body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120) : "";
+        if (!name) return reply.code(400).send({ error: "Enter a name for this report." });
+        const result = await client.query("INSERT INTO saved_designer_reports(id,department_id,owner_user_id,name,definition,share_scope) VALUES($1,$2,$3,$4,$5::jsonb,$6) RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? "private"]);
+        reply.code(201); return result.rows[0];
+      });
     } catch { return reply.code(409).send({ error: "A personal report with that name already exists." }); }
   });
   app.put<{ Params: { id: string }; Body: { name: string; definition: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/designer/saved/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
-    const available = await datasets(request, departmentId);
-    const input = request.body.definition as Record<string, unknown>;
-    const dataset = available.find((item) => item.key === input?.dataset);
-    if (!dataset) return reply.code(403).send({ error: "That dataset is unavailable for your permissions." });
-    const definition = cleanDefinition(input, dataset.fields);
-    if (typeof definition === "string") return reply.code(400).send({ error: definition });
-    const name = request.body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120);
-    if (!name) return reply.code(400).send({ error: "Enter a name for this report." });
     try {
-      const result = await withChoiceDefinitionWrite(pool!, departmentId, (client) => client.query("UPDATE saved_designer_reports SET name=$4,definition=$5::jsonb,share_scope=COALESCE($6,share_scope),updated_at=now(), scheduled_result=NULL, last_run_status=NULL, last_run_at=NULL, next_run_at=CASE WHEN schedule_days IS NOT NULL THEN now() END WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [request.params.id, departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? null]));
-      if (!result.rowCount) return reply.code(404).send({ error: "Personal report not found." });
-      return result.rows[0];
+      return await withChoiceDefinitionWrite(pool!, departmentId, async (client) => {
+        const available = await datasets(request, departmentId, client);
+        const input = request.body.definition as Record<string, unknown>;
+        const dataset = available.find((item) => item.key === input?.dataset);
+        if (!dataset) return reply.code(403).send({ error: "That dataset is unavailable for your permissions." });
+        const definition = cleanDefinition(input, dataset.fields);
+        if (typeof definition === "string") return reply.code(400).send({ error: definition });
+        const name = request.body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120);
+        if (!name) return reply.code(400).send({ error: "Enter a name for this report." });
+        const result = await client.query("UPDATE saved_designer_reports SET name=$4,definition=$5::jsonb,share_scope=COALESCE($6,share_scope),updated_at=now(), scheduled_result=NULL, last_run_status=NULL, last_run_at=NULL, next_run_at=CASE WHEN schedule_days IS NOT NULL THEN now() END WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [request.params.id, departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? null]);
+        if (!result.rowCount) return reply.code(404).send({ error: "Personal report not found." });
+        return result.rows[0];
+      });
     } catch { return reply.code(409).send({ error: "A personal report with that name already exists." }); }
   });
   app.put<{ Params: { id: string }; Body: { shareScope: "private" | "department" } }>("/api/modules/reports/designer/saved/:id/sharing", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["shareScope"], properties: { shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {

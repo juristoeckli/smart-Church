@@ -1,3 +1,4 @@
+import { withChoiceDefinitionWrite } from "../people-records/choice-rename.js";
 import { peopleMembershipGrowthSql } from "./people-membership-growth.js";
 import { calendarSongUsageSql, overallSongUsageSql, songCalendarTablesSql } from "./song-usage.js";
 import { groupTypeDevelopmentSql, historicalGroupTypeOptionsSql } from "./group-type-development.js";
@@ -649,7 +650,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     if (!canModule(request, "manage")) return denied(reply);
     if (!validateMutation(request, reply)) return reply;
-    if (!(await installedReports(departmentId, request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
+    if (request.body.reportKey !== "people-first-contact-trend" && !(await installedReports(departmentId, request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
     const filters = normalizeFilters(request.body.filters);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
     if (["group-growth","people-first-contact-trend","group-attendance-by-role","event-recorded-facts-monthly","group-type-development"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
@@ -658,7 +659,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const name = cleanText(request.body.name, 120);
     if (!name) return reply.code(400).send({ error: "Enter a name for this saved report." });
     try {
-      const result = await pool!.query("INSERT INTO saved_report_definitions(id,department_id,owner_user_id,report_key,name,filters,share_scope) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING id,report_key AS \"reportKey\",name,filters,share_scope AS \"shareScope\",updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, request.body.reportKey, name, JSON.stringify(filters), request.body.shareScope ?? "private"]);
+      const write = (db: Pool | PoolClient) => db.query("INSERT INTO saved_report_definitions(id,department_id,owner_user_id,report_key,name,filters,share_scope) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING id,report_key AS \"reportKey\",name,filters,share_scope AS \"shareScope\",updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, request.body.reportKey, name, JSON.stringify(filters), request.body.shareScope ?? "private"]);
+      if (request.body.reportKey === "people-first-contact-trend") {
+        return await withChoiceDefinitionWrite(pool!, departmentId, async (client) => {
+          if (!(await installedReports(departmentId, request, client)).some((item) => item.key === request.body.reportKey)) return denied(reply);
+          const result = await write(client);
+          reply.code(201);
+          return result.rows[0];
+        });
+      }
+      const result = await write(pool!);
       return reply.code(201).send(result.rows[0]);
     } catch { return reply.code(409).send({ error: "A saved report with that name already exists in your account." }); }
   });

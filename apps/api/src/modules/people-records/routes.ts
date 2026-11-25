@@ -1,3 +1,4 @@
+import { fieldActivationBlocker } from "./field-activation.js";
 import { applyChoiceRename, choiceRemovalBlocker, inspectChoiceRename, lockChoiceDefinitionWrite, lockChoiceRenameContacts, withChoiceDefinitionWrite } from "./choice-rename.js";
 import { registerPersonalFollowups } from "./personal-followups.js";
 import { registerGrowthTrajectory } from "./growth-trajectory.js";
@@ -565,18 +566,61 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         client.release();
       }
     });
-    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>("/api/people-records/fields/:id", { schema: { params: { type:"object", required:["id"], properties:{id:uuid} } } }, async (request, reply) => {
-      const d=await department(request,reply,true); if(!d)return reply; if(!validateMutation(request,reply))return reply;
-      if (request.body.visibility !== undefined && !customFieldVisibilities.includes(request.body.visibility)) return reply.code(400).send({ error: "Choose a supported field visibility." });
-      if (!validFieldCategory(request.body.category)) return reply.code(400).send({ error: "Enter a field category of up to 60 characters." });
-      if (!validFieldTextMaxLength(request.body.textMaxLength)) return reply.code(400).send({ error: fieldTextMaxLengthError });
-      if (request.body.textMaxLength != null) {
-        const field = await pool!.query<{ field_type: string }>("SELECT field_type FROM people_record_fields WHERE department_id=$1 AND id=$2", [d, request.params.id]);
-        if (!field.rowCount) return reply.code(404).send({ error: "Custom field not found." });
-        if (field.rows[0].field_type !== "text") return reply.code(400).send({ error: "Only text fields accept a length limit." });
-      }
-      const r=await pool!.query("UPDATE people_record_fields SET label=COALESCE($3,label),options=COALESCE($4::jsonb,options),required=COALESCE($5,required),active=COALESCE($6,active),visibility=COALESCE($7,visibility),category=CASE WHEN $8::boolean THEN $9::text ELSE category END,text_max_length=CASE WHEN $10::boolean THEN $11::integer ELSE text_max_length END,updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id",[d,request.params.id,request.body.label?.trim()||null,request.body.options===undefined?null:JSON.stringify(request.body.options),request.body.required??null,request.body.active??null,request.body.visibility??null,request.body.category!==undefined,request.body.category?.trim()||null,request.body.textMaxLength!==undefined,request.body.textMaxLength??null]); if(!r.rowCount)return reply.code(404).send({error:"Custom field not found."}); changed(d); return {ok:true};
-    });
+    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean; expectedActive?: boolean; visibility?: CustomFieldVisibility; category?: string | null; textMaxLength?: number | null } }>(
+      "/api/people-records/fields/:id",
+      { schema: { params: { type: "object", required: ["id"], properties: { id: uuid } } } },
+      async (request, reply) => {
+        const departmentId = await department(request, reply, true);
+        if (!departmentId || !validateMutation(request, reply)) return reply;
+        const body = request.body;
+        if (!body || typeof body !== "object" || Array.isArray(body)) return reply.code(400).send({ error: "Provide custom field settings." });
+        if (body.visibility !== undefined && !customFieldVisibilities.includes(body.visibility)) {
+          return reply.code(400).send({ error: "Choose a supported field visibility." });
+        }
+        if (!validFieldCategory(body.category)) return reply.code(400).send({ error: "Enter a field category of up to 60 characters." });
+        if (!validFieldTextMaxLength(body.textMaxLength)) return reply.code(400).send({ error: fieldTextMaxLengthError });
+        if ((body.active !== undefined && typeof body.active !== "boolean") ||
+            (body.expectedActive !== undefined && (typeof body.expectedActive !== "boolean" || body.active === undefined))) {
+          return reply.code(400).send({ error: "Choose a valid field status." });
+        }
+        const fieldId = request.params.id;
+        let updated = false;
+        const result = await withChoiceDefinitionWrite(pool!, departmentId, async (client) => {
+          if (!await context.lockDepartmentForWrite(client, departmentId)) {
+            return reply.code(409).send({ error: "This location cannot be changed on this installation." });
+          }
+          const { rows: [field] } = await client.query<{ field_key: string; field_type: string; active: boolean }>(
+            "SELECT field_key,field_type,active FROM people_record_fields WHERE department_id=$1 AND id=$2 FOR UPDATE",
+            [departmentId, fieldId],
+          );
+          if (!field) return reply.code(404).send({ error: "Custom field not found." });
+          if (body.textMaxLength != null && field.field_type !== "text") {
+            return reply.code(400).send({ error: "Only text fields accept a length limit." });
+          }
+          if (body.expectedActive !== undefined && body.expectedActive !== field.active) {
+            return reply.code(409).send({ error: "The field status changed. Refresh and try again." });
+          }
+          if (field.active && body.active === false) {
+            const blocker = await fieldActivationBlocker(client, departmentId, fieldId, field.field_key);
+            if (blocker) return reply.code(409).send({ error: blocker });
+          }
+          await client.query(
+            `UPDATE people_record_fields SET label=COALESCE($3,label),options=COALESCE($4::jsonb,options),
+              required=COALESCE($5,required),active=COALESCE($6,active),visibility=COALESCE($7,visibility),
+              category=CASE WHEN $8::boolean THEN $9::text ELSE category END,
+              text_max_length=CASE WHEN $10::boolean THEN $11::integer ELSE text_max_length END,updated_at=now()
+              WHERE department_id=$1 AND id=$2`,
+            [departmentId, fieldId, body.label?.trim() || null, body.options === undefined ? null : JSON.stringify(body.options),
+              body.required ?? null, body.active ?? null, body.visibility ?? null, body.category !== undefined,
+              body.category?.trim() || null, body.textMaxLength !== undefined, body.textMaxLength ?? null],
+          );
+          updated = true;
+          return { ok: true };
+        });
+        if (updated) changed(departmentId);
+        return result;
+      },
+    );
     // Group lifecycle is supplied by the optional Community module. Older groups are active by default.
     const activeDirectoryGroup = "COALESCE(to_jsonb(g)->>'status','active')='active'";
     const activeGroupMembershipFilter = `(($6::uuid IS NULL AND $7::text IS NULL AND $8::text IS NULL AND $11::date IS NULL AND $12::date IS NULL) OR EXISTS (

@@ -30,6 +30,7 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
   const [category, setCategory] = useState("");
   const [type, setType] = useState("");
   const [visibility, setVisibility] = useState("");
+  const [fieldStatus, setFieldStatus] = useState("");
   const [moving, setMoving] = useState(false);
   const fieldsByCategory = new Map<string, Field[]>();
   for (const field of fields) {
@@ -50,6 +51,7 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
   const shown = fields.filter((field) =>
     (!selectedCategory || selectedCategory === (field.category ? "category:" + field.category : "uncategorized")) &&
     (!type || type === field.type) &&
+    (!fieldStatus || fieldStatus === (field.active ? "active" : "inactive")) &&
     (!visibility || visibility === (field.visibility ?? "private_people")));
   return <>
     <datalist id="people-field-categories">
@@ -64,6 +66,9 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
         <option value="">All types</option><option value="text">Text</option><option value="date">Date</option>
         <option value="boolean">Yes/no</option><option value="select">Choice list</option>
       </select></label>
+      <label>Filter by field status<select value={fieldStatus} onChange={(event) => setFieldStatus(event.target.value)}>
+        <option value="">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
+      </select></label>
       {canManage && <label>Filter by visibility<select value={visibility} onChange={(event) => setVisibility(event.target.value)}>
         <option value="">All visibility levels</option><option value="private_people">Private People readers</option>
         <option value="people_managers">People managers only</option>
@@ -74,15 +79,16 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
       const group = fieldsByCategory.get(field.category ?? "") ?? [];
       const index = group.indexOf(field);
       return <div key={field.id}>
-        <p><strong>{field.label}</strong> · {field.fieldKey} · {field.type}{field.required ? " · required" : ""}{field.category ? " · " + field.category : ""}</p>
-        {canManage && <form className="module-toolbar" key={JSON.stringify([field.visibility, field.category, field.textMaxLength])} onSubmit={(event) => void onSave(event, field)}>
+        <p><strong>{field.label}</strong> · {field.fieldKey} · {field.type}{field.required ? " · required" : ""}{field.active ? " · Active" : " · Inactive"}{field.category ? " · " + field.category : ""}</p>
+        {canManage && <form className="module-toolbar" key={JSON.stringify([field.visibility, field.category, field.textMaxLength, field.active])} onSubmit={(event) => void onSave(event, field)}>
           <label>Field category<input name="category" aria-label={`Category of ${field.label}`} list="people-field-categories" maxLength={60} defaultValue={field.category ?? ""}/></label>
           {field.type === "text" && <label>Maximum characters<input name="textMaxLength" aria-label={"Maximum characters for " + field.label} type="number" min={1} max={2000} placeholder="Default: 2000" defaultValue={field.textMaxLength ?? ""}/></label>}
           <label>Visibility<select name="visibility" aria-label={`Visibility of ${field.label}`} defaultValue={field.visibility ?? "private_people"}>
             <option value="private_people">Private People readers</option><option value="people_managers">People managers only</option>
           </select></label>
+          <label><input name="active" type="checkbox" defaultChecked={field.active} /> Active</label>
           <button type="submit">Save field settings</button>
-          {!type && !visibility && group.length > 1 && <>
+          {!type && !visibility && !fieldStatus && group.length > 1 && <>
             <button type="button" aria-label={"Move " + field.label + " up within its category"}
               disabled={moving || index <= 0} onClick={() => void move(field, group[index - 1], "up")}>Move up</button>
             <button type="button" aria-label={"Move " + field.label + " down within its category"}
@@ -470,9 +476,12 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
     const length = String(values.get("textMaxLength") ?? "");
     const textMaxLength = length ? Number(length) : null;
     const lengthChanged = field.type === "text" && textMaxLength !== (field.textMaxLength ?? null);
-    if (!visibilityChanged && !categoryChanged && !lengthChanged) return;
+    const active = values.get("active") === "on";
+    const activeChanged = active !== field.active;
+    if (!visibilityChanged && !categoryChanged && !lengthChanged && !activeChanged) return;
+    if (activeChanged && !active && !window.confirm(`Deactivate “${field.label}”? People and imports cannot use it until it is reactivated. Existing values and history are kept.`)) return;
     if (visibilityChanged && visibility === "private_people" && !window.confirm(`Allow all users with private People access at this location to view “${field.label}” and its history?`)) return;
-    await act(() => request(`/api/people-records/fields/${field.id}`, { method: "PATCH", body: JSON.stringify({ visibility: visibilityChanged ? visibility : undefined, category: categoryChanged ? category : undefined, textMaxLength: lengthChanged ? textMaxLength : undefined }) }), "Field settings updated.");
+    await act(() => request(`/api/people-records/fields/${field.id}`, { method: "PATCH", body: JSON.stringify({ visibility: visibilityChanged ? visibility : undefined, category: categoryChanged ? category : undefined, textMaxLength: lengthChanged ? textMaxLength : undefined, active: activeChanged ? active : undefined, expectedActive: activeChanged ? field.active : undefined }) }), "Field settings updated.");
   }
   async function addConsent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
