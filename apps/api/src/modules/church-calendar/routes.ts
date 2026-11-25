@@ -1,3 +1,4 @@
+import { registerSignupAppointmentLinks } from "./signup-appointment-links.js";
 import { registerCalendarSignupSchedule, setSignupSchedule, signupLeadDaysSchema, signupDeactivateDaysSchema, startCalendarSignupWorker } from "./signup-schedule.js";
 import { registrationFormTemplatesInstalled, lockRegistrationTemplate, copyRegistrationForm, createDraftRegistrationGroup } from "./registration-groups.js";
 import { registerCalendarRemoval } from "./remove-appointment.js";
@@ -267,6 +268,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   registerCalendarEmailSubscriptions(app, context);
   registerCalendarReplication(context);
   registerAppointmentTemplates(app, context, canManageCalendar);
+  registerSignupAppointmentLinks(app, context, hasGroupVisibility);
   registerCalendarSignupSchedule(app, context, (request) => canManageCalendar(request, "community", null)
     && (request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage")));
   startCalendarSignupWorker(app, context);

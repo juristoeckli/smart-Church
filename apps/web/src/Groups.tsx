@@ -1,3 +1,4 @@
+import { GroupSignupAppointments } from "./GroupSignupAppointments";
 import { GroupMeetingPlaceDetails, GroupMeetingPlaceEditor } from "./GroupMeetingPlace";
 import { GroupDirectoryMap, GroupMeetingPinEditor } from "./GroupDirectoryMap";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -10,7 +11,7 @@ import { GroupMeetingCompletion } from "./GroupMeetingCompletion";
 import { GroupSignupFormEditor } from "./GroupSignupFormEditor";
 import { GroupWaitlist } from "./GroupWaitlist";
 import { GroupAttendanceReport } from "./GroupAttendanceReport";
-import type { DirectorySearchNavigation } from "./module-registry";
+import type { CalendarAppointmentTarget, DirectorySearchNavigation } from "./module-registry";
 import { getActiveLanguage, translate } from "./i18n";
 import { translateModuleMessage } from "./modules/translations";
 
@@ -97,7 +98,7 @@ function GroupTypeHistory({ departmentId, groupId, groupType }: { departmentId: 
   </details>;
 }
 
-export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, directorySearch: directorySearchNavigation, createRequestId = 0, onNavigationHandled, onOpenGroupPeople }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; directorySearch?: DirectorySearchNavigation; createRequestId?: number; onNavigationHandled?: (requestId: number) => void; onOpenGroupPeople?: (groupId: string) => void }) {
+export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, directorySearch: directorySearchNavigation, createRequestId = 0, onNavigationHandled, onOpenGroupPeople, onOpenCalendarAppointment }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; directorySearch?: DirectorySearchNavigation; createRequestId?: number; onNavigationHandled?: (requestId: number) => void; onOpenGroupPeople?: (groupId: string) => void; onOpenCalendarAppointment?: (target: CalendarAppointmentTarget) => void }) {
   const [groups, setGroups] = useState<(ChurchGroup & { isMyGroup?: boolean })[]>([]);
   const [loadedDepartmentId, setLoadedDepartmentId] = useState("");
   const [directorySearch, setDirectorySearch] = useState("");
@@ -718,6 +719,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       <section className="directory-card community-group-detail">
         {selected ? <>
           <div className="directory-heading"><div><h2>{selected.name}</h2><p>{selected.importedFrom ? translate("groups.importedReadOnly") : selected.description || translate("groups.descriptionFallback")}</p><small className="community-group-lifecycle">{selected.groupType ? `${selected.groupType} · ` : ""}{selected.status}{selected.startsOn ? ` · starts ${formatUserDate(selected.startsOn)}` : ""}{selected.endsOn ? ` · ends ${formatUserDate(selected.endsOn)}` : ""}</small></div>{canManage && !selected.importedFrom && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => setEditing((current) => !current)}><Pencil size={14} />{editing ? translate("groups.cancelEdit") : translate("groups.edit")}</button><button className="button button-danger" type="button" onClick={() => void deleteGroup(selected)}><Trash2 size={14} />{translate("groups.delete")}</button></div>}</div>
+          {loadedDepartmentId === departmentId && !detailsGroup && onOpenCalendarAppointment && <GroupSignupAppointments
+            key={departmentId + ":" + selected.id} departmentId={departmentId} groupId={selected.id} onOpen={onOpenCalendarAppointment} />}
           {loadedDepartmentId === departmentId && selected.meetingPlace && <GroupMeetingPlaceDetails place={selected.meetingPlace} />}
           {canManage && !selected.importedFrom && selected.status !== "archived" && loadedDepartmentId === departmentId && <GroupMeetingPlaceEditor
             key={departmentId + ":" + selected.id} groupId={selected.id} initial={selected.meetingPlace}
@@ -786,7 +789,9 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       </section>
     </section>
     {detailsGroup && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsGroup(null)}><section className="modal item-details-modal" role="dialog" aria-modal="true" aria-labelledby="group-details-title"><div className="modal-heading"><div><span className="eyebrow">{translate("groups.eyebrow")}</span><h2 id="group-details-title">{detailsGroup.name}</h2><p>{detailsGroup.groupType ? `${detailsGroup.groupType} · ` : ""}{detailsGroup.importedFrom ? translate("groups.importedReadOnly") : translate("groups.personCount").replace("{count}", String(detailsGroup.memberCount))}</p></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsGroup(null)}>×</button></div><dl className="event-details-grid"><div><dt>Group type</dt><dd>{detailsGroup.groupType || "Not set"}</dd></div><div><dt>{translate("groups.members")}</dt><dd>{detailsGroup.memberCount}</dd></div><div><dt>{translate("groups.description")}</dt><dd>{detailsGroup.description || translate("groups.descriptionFallback")}</dd></div></dl>{loadedDepartmentId === departmentId && selected?.id === detailsGroup.id && selected.meetingPlace
-      && <GroupMeetingPlaceDetails place={selected.meetingPlace} />}{detailsGroup.memberIds.length > 0 && <section className="event-details-section"><h3>{translate("groups.members")}</h3><ul>{detailsGroup.memberIds.map((id) => { const person = contacts.find((contact) => contact.id === id); return person ? <li key={id}><strong>{person.firstName} {person.lastName}</strong><span>{person.status === "member" ? translate("groups.member") : translate("groups.visitor")}</span></li> : null; })}</ul></section>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsGroup(null)}>{translate("events.close")}</button><button className="button button-primary" type="button" onClick={() => { setSelectedId(detailsGroup.id); setDetailsGroup(null); }}>{translate("groups.edit")}</button></div></section></div>}
+      && <GroupMeetingPlaceDetails place={selected.meetingPlace} />}{loadedDepartmentId === departmentId && selected?.id === detailsGroup.id && onOpenCalendarAppointment &&
+      <GroupSignupAppointments key={departmentId + ":" + detailsGroup.id} departmentId={departmentId} groupId={detailsGroup.id}
+        onOpen={(target) => { setDetailsGroup(null); onOpenCalendarAppointment(target); }} />}{detailsGroup.memberIds.length > 0 && <section className="event-details-section"><h3>{translate("groups.members")}</h3><ul>{detailsGroup.memberIds.map((id) => { const person = contacts.find((contact) => contact.id === id); return person ? <li key={id}><strong>{person.firstName} {person.lastName}</strong><span>{person.status === "member" ? translate("groups.member") : translate("groups.visitor")}</span></li> : null; })}</ul></section>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsGroup(null)}>{translate("events.close")}</button><button className="button button-primary" type="button" onClick={() => { setSelectedId(detailsGroup.id); setDetailsGroup(null); }}>{translate("groups.edit")}</button></div></section></div>}
     <footer className="page-footer"><span>{translate("groups.footer")}</span><span>© 2026 Smart Church</span></footer>
   </>;
 }
