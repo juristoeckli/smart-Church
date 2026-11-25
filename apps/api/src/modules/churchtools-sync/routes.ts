@@ -1419,6 +1419,24 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           }
           for (const event of services) {
             const positions = event.positions.map((item: any) => ({ name: item.name, ...(item.sourceAssigneeName ? { sourceAssigneeName: item.sourceAssigneeName } : {}), ...(item.personId && personMap.has(item.personId) ? { contactId: personMap.get(item.personId) } : {}) }));
+            const { rows: [migrated] } = await db.query<{ id: string }>(`
+              SELECT local.id FROM churchtools_service_event_provenance provenance
+              JOIN service_events local ON local.id=provenance.event_id AND local.department_id=provenance.department_id
+              WHERE provenance.department_id=$1 AND provenance.instance_url=$2 AND provenance.source_event_id=$3
+              FOR UPDATE OF local`, [departmentId, config.instance_url, event.sourceId]);
+            if (migrated) {
+              // Reviewed migration events are editable locally. Only empty rosters and rosters
+              // written by this sync are eligible for a staffing refresh.
+              if (positions.length) {
+                const syncedPositions = positions.map(position => ({ ...position, churchToolsManaged: true }));
+                await db.query(`UPDATE service_events SET positions=$3::jsonb,updated_at=now()
+                  WHERE id=$1 AND department_id=$2 AND cancelled_at IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(positions,'[]'::jsonb)) AS slot
+                      WHERE slot->'churchToolsManaged' IS DISTINCT FROM 'true'::jsonb)
+                    AND positions IS DISTINCT FROM $3::jsonb`, [migrated.id, departmentId, JSON.stringify(syncedPositions)]);
+              }
+              continue;
+            }
             const found = await db.query<{ id: string }>("SELECT id FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [departmentId, event.sourceId]);
             const data = [departmentId, event.title.slice(0, 160), event.date, event.isAllDay ?? false, event.start, event.end, event.location.slice(0, 160), event.description, event.room.slice(0, 160), JSON.stringify(positions), JSON.stringify(event.timePlan), event.sourceId];
             if (found.rowCount) {
