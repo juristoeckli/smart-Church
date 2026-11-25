@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { parsePeopleNumber, validPeopleNumber } from "../src/modules/people-records/number-field.ts";
 import { normalizeMultilineField } from "../src/modules/people-records/multiline-field.ts";
+import { normalizePeopleLocalDateTime } from "../src/modules/people-records/local-datetime.ts";
 
 assert.equal(parsePeopleNumber(" -12.75 "), -12.75);
 assert.equal(parsePeopleNumber("+2.5e2"), 250);
@@ -23,5 +24,12 @@ assert.ok(!validPeopleNumber(12.75, 4));
 assert.equal(normalizeMultilineField(" line one\r\nline two\rline three "), " line one\nline two\nline three ");
 assert.equal(normalizeMultilineField("\nkept\n\n"), "\nkept\n\n");
 assert.equal(normalizeMultilineField(""), "");
+
+assert.equal(normalizePeopleLocalDateTime("2024-02-29 08:15"), "2024-02-29T08:15:00");
+assert.equal(normalizePeopleLocalDateTime("2026-03-29T02:30"), "2026-03-29T02:30:00");
+assert.equal(normalizePeopleLocalDateTime("2026-10-25T02:30:45"), "2026-10-25T02:30:45");
+for (const invalid of [null, "0000-01-01T00:00", "2025-02-29T08:15", "2026-01-02", "2026-01-02T24:00", "2026-01-02T08:15Z", "2026-01-02T08:15+01:00"]) {
+  assert.equal(normalizePeopleLocalDateTime(invalid), null);
+}
 
 console.log("People custom field type regressions passed.");
