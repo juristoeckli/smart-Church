@@ -9,13 +9,14 @@ type PublicationInput = { name: string; calendarIds: string[] };
 type CalendarAccess = (request: FastifyRequest) => boolean;
 
 type PublicationSource = {
-  department_id: string; calendar_ids: string[]; calendar_name: string;
+  department_id: string; calendar_ids: string[]; calendar_choices: CalendarChoice[]; calendar_name: string;
   calendar_scope: "community"; time_zone: string; local_today: string;
 };
 
 export async function loadPublicAgenda(db: Pool, tokenHash: string) {
   const { rows: [source] } = await db.query<PublicationSource>(
     `SELECT publication.department_id,array_agg(calendar.id ORDER BY membership.position) AS calendar_ids,
+            jsonb_agg(jsonb_build_object('id',calendar.id,'name',calendar.name) ORDER BY membership.position) AS calendar_choices,
             publication.name AS calendar_name,'community' AS calendar_scope,
             COALESCE(zone.name,'UTC') AS time_zone,to_char(now() AT TIME ZONE COALESCE(zone.name,'UTC'),'YYYY-MM-DD') AS local_today
        FROM church_calendar_agenda_publications publication

@@ -4,7 +4,9 @@ function escapeAttribute(value: string) {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-export function CalendarEmbedCode({ url }: { url: string }) {
+type CalendarChoice = { id: string; name: string };
+
+export function CalendarEmbedCode({ url, calendars }: { url: string; calendars?: CalendarChoice[] }) {
   const [view, setView] = useState("eventView");
   const [period, setPeriod] = useState("month");
   const [days, setDays] = useState(60);
@@ -12,7 +14,11 @@ export function CalendarEmbedCode({ url }: { url: string }) {
   const [searchEntry, setSearchEntry] = useState("");
   const [title, setTitle] = useState("");
   const [darkMode, setDarkMode] = useState(false);
+  const [availableIds, setAvailableIds] = useState<string[] | null>(null);
+  const [defaultIds, setDefaultIds] = useState<string[] | null>(null);
   const [feedback, setFeedback] = useState("");
+  const available = calendars?.filter(({ id }) => !availableIds || availableIds.includes(id)) ?? [];
+  const defaults = available.length < 2 ? available : available.filter(({ id }) => !defaultIds || defaultIds.includes(id));
   const source = new URL(url, window.location.origin);
   if (view === "calView") {
     source.searchParams.set("viewname", view);
@@ -22,6 +28,8 @@ export function CalendarEmbedCode({ url }: { url: string }) {
     source.searchParams.set("entries", String(entries));
     if (searchEntry.trim()) source.searchParams.set("searchEntry", searchEntry.trim());
   }
+  if (availableIds?.length) source.searchParams.set("category_id", availableIds.join(","));
+  if (defaults.length !== available.length) source.searchParams.set("category_select", defaults.map(({ id }) => id).join(","));
   const customTitle = title.trim();
   if (customTitle) source.searchParams.set("title", customTitle);
   if (darkMode) source.searchParams.set("darkmode", "true");
@@ -52,6 +60,25 @@ export function CalendarEmbedCode({ url }: { url: string }) {
         setSearchEntry(event.target.value); setFeedback("");
       }} /><small>Separate terms with commas. An appointment appears if its title, subtitle or place matches any term.</small></label>
     </>}
+    {calendars && calendars.length > 1 && <fieldset>
+      <legend>Calendars visitors can choose</legend>
+      {calendars.map(({ id, name }) => {
+        const checked = available.some((option) => option.id === id);
+        return <label key={id}><input type="checkbox" checked={checked} disabled={checked && available.length === 1}
+          onChange={(event) => {
+            setAvailableIds(event.target.checked ? [...available.map((option) => option.id), id] : available.filter((option) => option.id !== id).map((option) => option.id));
+            setFeedback("");
+          }} /> {name}</label>;
+      })}
+    </fieldset>}
+    {available.length > 1 && <fieldset>
+      <legend>Calendars shown initially</legend>
+      {available.map(({ id, name }) => <label key={id}><input type="checkbox" checked={defaults.some((option) => option.id === id)}
+        onChange={(event) => {
+          setDefaultIds(event.target.checked ? [...defaults.map((option) => option.id), id] : defaults.filter((option) => option.id !== id).map((option) => option.id));
+          setFeedback("");
+        }} /> {name}</label>)}
+    </fieldset>}
     <label>Display title<input type="text" maxLength={120} value={title} onChange={(event) => {
       setTitle(event.target.value); setFeedback("");
     }} placeholder="Use the calendar or agenda name" /></label>

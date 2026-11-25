@@ -13,7 +13,7 @@ export function CalendarPublicAgendas({ departmentId, csrfToken, calendars }: {
   const [revision, setRevision] = useState(0);
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
-  const [issued, setIssued] = useState<{ id: string; name: string; embedUrl: string } | null>(null);
+  const [issued, setIssued] = useState<(Agenda & { embedUrl: string }) | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [error, setError] = useState("");
@@ -44,9 +44,10 @@ export function CalendarPublicAgendas({ departmentId, csrfToken, calendars }: {
         headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken, ...(form ? { "content-type": "application/json" } : {}) },
         ...(form ? { body: JSON.stringify(form) } : {}),
       });
-      const result = await response.json() as { id?: string; name?: string; embedUrl?: string; error?: string };
+      const result = await response.json() as { id?: string; name?: string; embedUrl?: string; calendars?: CalendarChoice[]; error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not update the public agenda.");
-      if (result.id && result.name && result.embedUrl) setIssued({ id: result.id, name: result.name, embedUrl: result.embedUrl });
+      if (result.id && result.name && result.embedUrl) setIssued({ id: result.id, name: result.name, embedUrl: result.embedUrl,
+        calendars: result.calendars ?? rows.find((row) => row.id === result.id)?.calendars ?? [] });
       if (method === "DELETE" && issued?.id === path.slice(1)) setIssued(null);
       if (form) { setName(""); setSelected([]); }
       setRevision((value) => value + 1);
@@ -88,6 +89,6 @@ export function CalendarPublicAgendas({ departmentId, csrfToken, calendars }: {
         if (window.confirm("Revoke this agenda link? Its website embed will stop working.")) void mutate("DELETE", `/${agenda.id}`);
       }}>Revoke</button>
     </li>)}</ul>}
-    {issued && <section aria-label="Published agenda embed"><strong>{issued.name}</strong><CalendarEmbedCode key={issued.embedUrl} url={issued.embedUrl} /></section>}
+    {issued && <section aria-label="Published agenda embed"><strong>{issued.name}</strong><CalendarEmbedCode key={issued.embedUrl} url={issued.embedUrl} calendars={(rows.find((row) => row.id === issued.id)?.calendars ?? issued.calendars).filter((calendar) => calendars.some(({ id }) => id === calendar.id))} /></section>}
   </details>;
 }

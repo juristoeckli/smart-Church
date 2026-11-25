@@ -10,7 +10,7 @@ import { calendarImageMetadataSchema, defaultCalendarImageMetadata, normalizeCal
 import { registerCalendarEmailSubscriptions } from "./email-subscriptions.js";
 import { registerCalendarBookingDescriptions } from "./booking-descriptions.js";
 import { loadPublicAgenda, registerCalendarAgendaPublications } from "./calendar-agenda-publications.js";
-import { calendarEmbedContentPolicy, publicEmbedCalendarWindow, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
+import { calendarEmbedContentPolicy, publicEmbedCalendarSelection, publicEmbedCalendarWindow, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
 import { registerCalendarTagDefinitions } from "./tag-definitions.js";
 import { loadOccurrenceRequestScope, occurrenceRequestKey, registerCalendarMeetingRequests } from "./meeting-requests.js";
 import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
@@ -361,8 +361,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ON membership.department_id=feed.department_id AND membership.user_id=feed.user_id` : "";
     const accessPredicate = audience === "subscription" ? calendarSubscriptionAudience : "feed.revoked_at IS NULL AND calendar.scope='community'";
     const tokenHash = hashFeedToken(token);
-    const source = audience === "agenda" ? await loadPublicAgenda(context.pool, tokenHash) : (await context.pool.query<{ department_id: string; calendar_ids: string[]; calendar_name: string; calendar_scope: CalendarScope; time_zone: string; local_today: string }>(
-      `SELECT feed.department_id,ARRAY[feed.calendar_id] AS calendar_ids,calendar.name AS calendar_name,calendar.scope AS calendar_scope,
+    const source = audience === "agenda" ? await loadPublicAgenda(context.pool, tokenHash) : (await context.pool.query<{ department_id: string; calendar_ids: string[]; calendar_choices: { id: string; name: string }[]; calendar_name: string; calendar_scope: CalendarScope; time_zone: string; local_today: string }>(
+      `SELECT feed.department_id,ARRAY[feed.calendar_id] AS calendar_ids,
+              jsonb_build_array(jsonb_build_object('id',calendar.id,'name',calendar.name)) AS calendar_choices,calendar.name AS calendar_name,calendar.scope AS calendar_scope,
               COALESCE(zone.name,'UTC') AS time_zone,to_char(now() AT TIME ZONE COALESCE(zone.name,'UTC'),'YYYY-MM-DD') AS local_today
          FROM ${sourceTable} feed
          JOIN departments department ON department.id=feed.department_id
@@ -373,6 +374,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!source) return responseError(reply, 404, "Calendar feed not found.");
     const window = publicEmbedCalendarWindow(source.local_today, embed);
     if (embed?.viewname === "calView" && !window) return responseError(reply, 400, "Choose a date within the public calendar range.");
+    const calendarSelection = embed ? publicEmbedCalendarSelection(source.calendar_choices, embed) : undefined;
     const from = window?.from ?? source.local_today;
     const toDate = wallDate(`${from}T00:00:00`);
     toDate.setUTCDate(toDate.getUTCDate() + (embed ? (embed.days ?? 60) - 1 : 366));
@@ -402,7 +404,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             ${embed ? `OR EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions exception
               WHERE exception.appointment_id=appointment.id AND NOT exception.cancelled AND ${alteredStart})
                OR EXISTS (SELECT 1 FROM church_calendar_extra_dates extra WHERE extra.appointment_id=appointment.id AND extra.starts_at BETWEEN $3::timestamp AND $4::timestamp)` : ""})
-        ORDER BY appointment.starts_at,appointment.title,appointment.id LIMIT 2000`, [source.department_id, source.calendar_ids, fromTimestamp, throughTimestamp, source.calendar_scope, ...(audience === "agenda" ? [tokenHash] : [])]);
+        ORDER BY appointment.starts_at,appointment.title,appointment.id LIMIT 2000`, [source.department_id, calendarSelection?.selectedIds ?? source.calendar_ids, fromTimestamp, throughTimestamp, source.calendar_scope, ...(audience === "agenda" ? [tokenHash] : [])]);
     const ids = events.rows.map((item) => item.id);
     const exceptionRows = ids.length ? await context.pool.query<{ appointment_id: string; original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
       `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=ANY($1::uuid[])`, [ids]) : { rows: [] };
@@ -489,7 +491,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.type("text/html; charset=utf-8")
         .header("Content-Security-Policy", calendarEmbedContentPolicy)
         .header("X-Robots-Tag", "noindex, nofollow")
-        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed, window ?? undefined));
+        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed, window ?? undefined, calendarSelection));
     }
     // Expand wall times using each appointment's time zone before exporting UTC instants.
     // Batch conversions to keep query size bounded even for large feeds.
@@ -525,12 +527,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     params: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" } } },
   } }, (request, reply) => serveCalendarFeed(reply, request.params.token, "community"));
 
+  const calendarIdPattern = "[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}";
+  const calendarIdsPattern = calendarIdPattern + "(?:," + calendarIdPattern + "){0,7}";
   const publicAgendaSchema = {
     params: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" } } },
     querystring: { type: "object", additionalProperties: false, properties: {
       days: { type: "integer", minimum: 1, maximum: 120 }, entries: { type: "integer", minimum: 1, maximum: 50 },
       searchEntry: { type: "string", maxLength: 240 }, title: { type: "string", maxLength: 120 }, darkmode: { type: "boolean" },
       viewname: { type: "string", enum: ["eventView", "calView"] }, period: { type: "string", enum: ["day", "week", "month"] }, date: { type: "string", format: "date" },
+      category_id: { type: "string", pattern: "^" + calendarIdsPattern + "$" },
+      category_select: { type: "string", pattern: "^(?:" + calendarIdsPattern + ")?$" },
     } },
   } as const;
   app.get<{ Params: { token: string }; Querystring: EmbedSettings }>("/api/public/church-calendar/embed/:token", { schema: publicAgendaSchema },

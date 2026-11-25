@@ -6,6 +6,7 @@ type CalendarPeriod = "day" | "week" | "month";
 export type EmbedSettings = {
   days?: number; entries?: number; searchEntry?: string; title?: string; darkmode?: boolean;
   viewname?: "eventView" | "calView"; period?: CalendarPeriod; date?: string;
+  category_id?: string; category_select?: string;
 };
 const dayKey = (date: Date) => localDateTime(date).slice(0, 10);
 
@@ -42,17 +43,38 @@ function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
 }
 
+type CalendarChoice = { id: string; name: string };
+export function publicEmbedCalendarSelection(calendars: CalendarChoice[], { category_id, category_select }: EmbedSettings) {
+  const identifiers = (value: string) => new Set(value.toLowerCase().split(","));
+  const allowed = category_id === undefined ? null : identifiers(category_id);
+  const selected = category_select === undefined ? null : identifiers(category_select);
+  const choices = allowed ? calendars.filter(({ id }) => allowed.has(id)) : calendars;
+  return { choices, selectedIds: choices.filter(({ id }) => !selected || selected.has(id)).map(({ id }) => id) };
+}
+
+function embedNavigation(settings: EmbedSettings) {
+  const keys = ["viewname", "period", "date", "title", "searchEntry", "entries", "days", "darkmode", "category_id", "category_select"] as const;
+  const query = new URLSearchParams();
+  for (const key of keys) {
+    const value = settings[key];
+    if (value !== undefined) query.set(key, String(value));
+  }
+  return escapeHtml("?" + query);
+}
+
+function renderCalendarSelector(selection: ReturnType<typeof publicEmbedCalendarSelection>, settings: EmbedSettings) {
+  if (selection.choices.length < 2) return "";
+  const selected = new Set(selection.selectedIds);
+  return `<nav class="calendar-nav" aria-label="Show or hide calendars">${selection.choices.map(({ id, name }) => {
+    const visible = selected.has(id);
+    const next = selection.choices.filter((choice) => choice.id === id ? !visible : selected.has(choice.id)).map((choice) => choice.id);
+    return `<a href="${embedNavigation({ ...settings, category_select: next.join(",") })}">${visible ? "Hide" : "Show"} ${escapeHtml(name)}</a>`;
+  }).join("")}</nav>`;
+}
+
 function renderCalendarGrid(window: NonNullable<ReturnType<typeof publicEmbedCalendarWindow>>, days: Map<string, EmbedAppointment[]>,
   timeLabel: Intl.DateTimeFormat, settings: EmbedSettings) {
-  function navigation(period: CalendarPeriod, date: string) {
-    const query = new URLSearchParams({ viewname: "calView", period, date });
-    if (settings.title) query.set("title", settings.title);
-    if (settings.searchEntry) query.set("searchEntry", settings.searchEntry);
-    if (settings.entries !== undefined) query.set("entries", String(settings.entries));
-    if (settings.days !== undefined) query.set("days", String(settings.days));
-    if (settings.darkmode) query.set("darkmode", "true");
-    return escapeHtml("?" + query);
-  }
+  const navigation = (period: CalendarPeriod, date: string) => embedNavigation({ ...settings, viewname: "calView", period, date });
   const headings = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
   const label = new Intl.DateTimeFormat("en", { dateStyle: "full", timeZone: "UTC" });
   const month = new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" });
@@ -85,7 +107,7 @@ function searchText(value: string) {
   return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
 }
 
-export function renderCalendarEmbed(calendarName: string, appointments: EmbedAppointment[], timeZone: string, settings: EmbedSettings, grid?: NonNullable<ReturnType<typeof publicEmbedCalendarWindow>>) {
+export function renderCalendarEmbed(calendarName: string, appointments: EmbedAppointment[], timeZone: string, settings: EmbedSettings, grid?: NonNullable<ReturnType<typeof publicEmbedCalendarWindow>>, calendarSelection?: ReturnType<typeof publicEmbedCalendarSelection>) {
   const { entries = 20, searchEntry = "", darkmode = false } = settings;
   const title = settings.title?.trim() || calendarName;
   const terms = grid ? [] : searchEntry.split(",").map((value) => searchText(value.trim())).filter(Boolean);
@@ -123,5 +145,6 @@ li>div{overflow-wrap:anywhere}
 .calendar-day{grid-template-columns:1fr}.calendar-weekday,.calendar-date{background:Canvas;color:CanvasText;padding:.35rem}.calendar-date{min-height:3.5rem;overflow-wrap:anywhere}.calendar-date h3{font-size:.9rem;margin:0}.calendar-date ul{list-style:none;padding:0;margin:0}.calendar-date li{display:block;font-size:.8rem;padding:.3rem 0}.calendar-date small{display:block}.calendar-date time[aria-current]{text-decoration:underline}
 @media(max-width:32rem){.calendar-grid{grid-template-columns:1fr}.calendar-weekday,.calendar-spacer{display:none}.calendar-date{min-height:0}.calendar-date h3 time::after{content:" · " attr(aria-label)}}
 </style></head><body><main><h1>${escapeHtml(title)}</h1><p>Times shown in ${escapeHtml(timeZone)}</p>
+${calendarSelection ? renderCalendarSelector(calendarSelection, settings) : ""}
 ${schedule || (terms.length ? "<p>No upcoming appointments match the search terms.</p>" : "<p>No upcoming appointments.</p>")}</main></body></html>`;
 }
