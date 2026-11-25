@@ -108,15 +108,19 @@ export function registerPersonAttachments(routes: FastifyInstance, context: Modu
     return reply.header("cache-control", "private, no-store").send(result.rows);
   });
 
-  routes.post<{ Params: { contactId: string }; Querystring: { filename: string }; Body: Buffer }>(attachmentPath, {
+  routes.post<{ Params: { contactId: string }; Querystring: { filename: string; useAsPortrait?: boolean }; Body: Buffer }>(attachmentPath, {
     bodyLimit: maxAttachmentBytes,
-    schema: { params: contactParams, querystring: { type: "object", required: ["filename"], additionalProperties: false, properties: { filename: { type: "string", minLength: 1, maxLength: 255 } } } },
+    schema: { params: contactParams, querystring: { type: "object", required: ["filename"], additionalProperties: false, properties: { filename: { type: "string", minLength: 1, maxLength: 255 }, useAsPortrait: { type: "boolean" } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply, true);
     if (!departmentId || !validateMutation(request, reply)) return reply;
     const content = request.body;
     if (!Buffer.isBuffer(content) || !content.length) return reply.code(400).send({ error: "Choose a non-empty file to upload." });
     if (content.length > maxAttachmentBytes) return reply.code(413).send({ error: "Attachments must be 10 MiB or smaller." });
+    const useAsPortrait = request.query.useAsPortrait === true;
+    if (useAsPortrait && !isPortraitPng(content)) {
+      return reply.code(400).send({ error: "The portrait must be a supported PNG no larger than 2 MiB and 1 million pixels." });
+    }
     const fileName = filenameForUpload(request.query.filename);
     const { contactId } = request.params;
     const actorId = request.authenticatedUser!.id;
@@ -124,14 +128,29 @@ export function registerPersonAttachments(routes: FastifyInstance, context: Modu
       const { rows } = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM people_record_attachments WHERE department_id=$1 AND contact_id=$2", [departmentId, contactId]);
       if (rows[0].count >= maxPersonAttachments) return { status: 409, payload: { error: `A person can have up to ${maxPersonAttachments} attachments.` } };
       const id = randomUUID();
+      let previousPortraitId: string | null = null;
+      if (useAsPortrait) {
+        const { rows: [previous] } = await client.query<{ id: string }>(
+          "UPDATE people_record_attachments SET is_portrait=false WHERE department_id=$1 AND contact_id=$2 AND is_portrait RETURNING id",
+          [departmentId, contactId],
+        );
+        previousPortraitId = previous?.id ?? null;
+      }
       await client.query(
-        "INSERT INTO people_record_attachments (id,department_id,contact_id,file_name,file_size,file_data,uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7)",
-        [id, departmentId, contactId, fileName, content.length, content, actorId],
+        "INSERT INTO people_record_attachments (id,department_id,contact_id,file_name,file_size,file_data,uploaded_by,is_portrait) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+        [id, departmentId, contactId, fileName, content.length, content, actorId, useAsPortrait],
       );
       await client.query(
         "INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,after_value) VALUES($1,$2,$3,$4,'attachment_added',$5,$6::jsonb)",
         [randomUUID(), departmentId, contactId, actorId, id, JSON.stringify({ fileSize: content.length })],
       );
+      if (useAsPortrait) {
+        await client.query(
+          "INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,'portrait_selected','portrait',$5::jsonb,$6::jsonb)",
+          [randomUUID(), departmentId, contactId, actorId,
+            JSON.stringify(previousPortraitId ? { attachmentId: previousPortraitId } : null), JSON.stringify({ attachmentId: id })],
+        );
+      }
       return { status: 201, payload: { id } };
     });
   });

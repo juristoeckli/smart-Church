@@ -5,6 +5,30 @@ type Attachment = { id: string; fileName: string; fileSize: number; isPortrait?:
 const maxAttachmentBytes = 10 * 1024 * 1024;
 const maxPortraitBytes = 2 * 1024 * 1024;
 
+async function portraitFile(file: File) {
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    throw new Error("Choose a JPEG, PNG or WebP image.");
+  }
+  const image = await createImageBitmap(file).catch(() => {
+    throw new Error("The image could not be opened.");
+  });
+  try {
+    const scale = Math.min(1, 600 / Math.max(image.width, image.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+    const drawing = canvas.getContext("2d");
+    if (!drawing) throw new Error("The portrait could not be prepared.");
+    drawing.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!png || png.size > maxPortraitBytes) throw new Error("The portrait could not be prepared.");
+    const base = file.name.replace(/\.[^.]*$/, "").slice(0, 172);
+    return new File([png], (base || "portrait") + ".png", { type: "image/png" });
+  } finally {
+    image.close();
+  }
+}
+
 async function expectSuccess(response: Response, fallback: string) {
   if (response.ok) return;
   const result = await response.json().catch(() => null) as { error?: string; message?: string } | null;
@@ -69,7 +93,7 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
     return () => controller.abort();
   }, [departmentId, open, path, revision]);
 
-  async function upload(event: FormEvent<HTMLFormElement>) {
+  async function upload(event: FormEvent<HTMLFormElement>, useAsPortrait = false) {
     event.preventDefault();
     const form = event.currentTarget;
     const file = new FormData(form).get("attachment");
@@ -78,14 +102,16 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
       return;
     }
     await submitAttachmentAction(async () => {
-      const query = new URLSearchParams({ filename: file.name });
+      const content = useAsPortrait ? await portraitFile(file) : file;
+      const query = new URLSearchParams({ filename: content.name });
+      if (useAsPortrait) query.set("useAsPortrait", "true");
       const response = await fetch(`${path}?${query}`, { method: "POST", headers: {
         "content-type": "application/vnd.smart-church.person-attachment", "x-department-id": departmentId, "x-csrf-token": csrfToken,
-      }, body: file });
+      }, body: content });
       await expectSuccess(response, "Could not upload the attachment.");
       form.reset();
       setRevision((current) => current + 1);
-      setNotice("Attachment added.");
+      setNotice(useAsPortrait ? "Portrait uploaded." : "Attachment added.");
     });
   }
 
@@ -138,6 +164,10 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
       {visiblePortrait && !portraitError && <img src={visiblePortrait} alt="Profile portrait" width={120} height={120}
         style={{ objectFit: "cover" }} onError={() => setPortraitError("The selected PNG could not be displayed.")} />}
       {canWrite && visiblePortrait && <button type="button" disabled={busy} onClick={() => void setPortraitAttachment(null)}>Remove portrait</button>}
+      {canWrite && <form className="module-toolbar" onSubmit={(event) => void upload(event, true)}>
+        <label>Portrait image<input name="attachment" type="file" accept="image/jpeg,image/png,image/webp" required disabled={busy} /></label>
+        <button type="submit" disabled={busy}>Upload portrait</button>
+      </form>}
       {portraitError && <p role="alert">{portraitError}</p>}
       {notice && <p role="status">{notice}</p>}
       {actionError && <p role="alert">{actionError}</p>}
