@@ -630,7 +630,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     publish(departmentId, "account-created", id); return reply.code(201).send({ id, code, name, accountType: request.body.accountType, active: true });
   });
 
-  app.post<{ Params: { dataset: "accounts" | "cost-centers"; stage: "preview" | "apply" }; Body: { csv: string; review?: string } }>(
+  app.post<{ Params: { dataset: "accounts" | "cost-centers"; stage: "preview" | "apply" }; Body: { csv: string; review?: string; accountingYear?: number } }>(
     "/api/modules/finance/:dataset/import/:stage",
     { bodyLimit: 1_600_000, schema: {
       params: { type: "object", required: ["dataset", "stage"], properties: {
@@ -638,12 +638,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         stage: { type: "string", enum: ["preview", "apply"] },
       } },
       body: { type: "object", additionalProperties: false, required: ["csv"],
-        properties: { csv: { type: "string", minLength: 1, maxLength: 256_000 }, review: { type: "string", pattern: "^[a-f0-9]{64}$" } } },
+        properties: { csv: { type: "string", minLength: 1, maxLength: 256_000 }, review: { type: "string", pattern: "^[a-f0-9]{64}$" }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 } } },
     } },
     async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId || !validateMutation(request, reply)) return reply;
-      const { csv, review } = request.body;
+      const { csv, review, accountingYear } = request.body;
       const { dataset, stage } = request.params;
       const isChart = dataset === "accounts";
       const table = isChart ? "finance_accounts" : "finance_cost_centers";
@@ -656,10 +656,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const headers = parsed[0].map(value => value.trim().toLowerCase());
       const required = isChart ? ["code", "name", "type", "active"] : ["code", "name", "active"];
-      if (headers.length !== required.length || required.some(name => !headers.includes(name))) {
+      const includesBudget = !isChart && headers.includes("budget");
+      if (headers.length !== required.length + Number(includesBudget) || required.some(name => !headers.includes(name))) {
         return reply.code(400).send({ error: isChart
           ? "The CSV must have Code, Name, Type, and Active columns."
-          : "The CSV must have Code, Name, and Active columns." });
+          : "The CSV must have Code, Name, and Active columns, with an optional Budget column." });
       }
       const seen = new Set<string>();
       const candidates = parsed.slice(1).map((columns, index) => {
@@ -672,14 +673,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const name = cleanText(rawName);
         const accountType = rawType.trim().toLowerCase();
         const activeValue = rawActive.trim().toLowerCase();
+        const budgetText = includesBudget ? column("budget").trim() : "";
+        const amount = /^(\d{1,16})(?:[.,](\d{1,2}))?$/.exec(budgetText);
+        const cents = amount ? BigInt(amount[1]) * 100n + BigInt((amount[2] ?? "").padEnd(2, "0")) : null;
+        const budgetCents = cents !== null && cents <= 9_000_000_000_000_000n ? Number(cents) : null;
         let error: string | undefined;
         if (!code || code.length > 32 || !name || name.length > 160) error = "Enter a code up to 32 and a name up to 160 characters.";
         else if (isChart && !["asset", "liability", "equity", "income", "expense"].includes(accountType)) error = "Choose a supported account type.";
         else if (!["true", "false"].includes(activeValue)) error = "Active must be true or false.";
+        else if (budgetText && budgetCents === null) error = "Enter a non-negative budget with up to two decimal places.";
         else if (seen.has(code)) error = "Duplicate code in this file.";
         seen.add(code);
-        return { rowNumber: index + 2, code, name, accountType, active: activeValue === "true", error };
+        return { rowNumber: index + 2, code, name, accountType, active: activeValue === "true", budgetCents, error };
       });
+      const wantsBudgets = candidates.some(candidate => candidate.budgetCents !== null);
+      if (wantsBudgets && !accountingYear) return reply.code(400).send({ error: "Choose an open accounting year for the budgets." });
       const client = await pool!.connect();
       try {
         if (applying) {
@@ -689,27 +697,52 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             return reply.code(423).send({ error: "This location is read-only." });
           }
         }
-        const { rows: existing } = await client.query<{ code: string }>(
-          `SELECT code FROM ${table} WHERE department_id=$1 AND code=ANY($2::text[])`,
-          [departmentId, candidates.map(candidate => candidate.code)],
+        if (wantsBudgets) {
+          const { rows: [period] } = await client.query<{ status: string }>(
+            `SELECT status FROM finance_accounting_years WHERE department_id=$1 AND accounting_year=$2 ${applying ? "FOR SHARE" : ""}`,
+            [departmentId, accountingYear]);
+          if (period?.status !== "open") {
+            if (applying) await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "Choose an open configured accounting year for the budgets." });
+          }
+        }
+        const { rows: existing } = await client.query<{ id: string; code: string; active: boolean }>(
+          `SELECT id,code,active FROM ${table} WHERE department_id=$1 AND code=ANY($2::text[]) ORDER BY code
+            ${applying && wantsBudgets ? "FOR SHARE" : ""}`, [departmentId, candidates.map(candidate => candidate.code)],
         );
-        const existingCodes = new Set(existing.map(account => account.code));
-        const rows = candidates.map(candidate => ({ ...candidate,
-          status: candidate.error ? "invalid" : existingCodes.has(candidate.code) ? "skip" : "create" }));
+        const byCode = new Map(existing.map(record => [record.code, record]));
+        const existingBudgets = wantsBudgets ? await client.query<{ cost_center_id: string }>(
+          `SELECT cost_center_id FROM finance_budgets WHERE department_id=$1 AND accounting_year=$2
+             AND account_id IS NULL AND cost_center_id=ANY($3::uuid[])`,
+          [departmentId, accountingYear, existing.map(center => center.id)]) : null;
+        const budgeted = new Set(existingBudgets?.rows.map(budget => budget.cost_center_id));
+        const rows = candidates.map(candidate => {
+          const existing = byCode.get(candidate.code);
+          const hasBudget = candidate.budgetCents !== null;
+          const skipBudget = hasBudget && Boolean(existing && budgeted.has(existing.id));
+          const error = candidate.error ?? (hasBudget && !skipBudget && !(existing?.active ?? candidate.active)
+            ? "A new budget requires an active cost center." : undefined);
+          return { ...candidate, error, status: error ? "invalid" : existing ? "skip" : "create",
+            budgetStatus: !hasBudget || error ? null : skipBudget ? "skip" : "create" };
+        });
         const creates = rows.filter(row => row.status === "create");
+        const budgets = rows.filter(row => row.budgetStatus === "create");
+        const skippedBudgets = rows.filter(row => row.budgetStatus === "skip").length;
         const skips = rows.filter(row => row.status === "skip").length;
         const errors = rows.filter(row => row.status === "invalid").length;
-        const fingerprint = createHash("sha256").update(JSON.stringify([departmentId, dataset, csv, rows.map(row => row.status)])).digest("hex");
-        if (!applying) return { rows, creates: creates.length, skips, errors, review: fingerprint };
-        if (review !== fingerprint || errors || !creates.length) {
+        const fingerprint = createHash("sha256").update(JSON.stringify(
+          [departmentId, dataset, wantsBudgets ? accountingYear : null, csv,
+            rows.map(row => [row.status, row.budgetStatus, byCode.get(row.code)?.id])])).digest("hex");
+        if (!applying) return { rows, creates: creates.length, skips, errors, budgetCreates: budgets.length, budgetSkips: skippedBudgets, review: fingerprint };
+        if (review !== fingerprint || errors || (!creates.length && !budgets.length)) {
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "The import is no longer ready. Review the CSV again." });
         }
-        const inserted = await client.query(
+        const inserted = await client.query<{ id: string; code: string }>(
           `INSERT INTO ${table}(id,department_id,code,name,active${accountTypeColumn})
             SELECT id,$1,code,name,active${accountTypeColumn}
             FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[]) AS source(id,code,name,account_type,active)
-            ORDER BY code ON CONFLICT (department_id,code) DO NOTHING RETURNING id`,
+            ORDER BY code ON CONFLICT (department_id,code) DO NOTHING RETURNING id,code`,
           [departmentId, creates.map(() => randomUUID()), creates.map(row => row.code), creates.map(row => row.name),
             creates.map(row => row.accountType), creates.map(row => row.active)],
         );
@@ -717,13 +750,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "A code was added during import. Review the CSV again." });
         }
+        if (budgets.length) {
+          const ids = new Map([...existing, ...inserted.rows].map(center => [center.code, center.id]));
+          const insertedBudgets = await client.query(
+            `INSERT INTO finance_budgets(id,department_id,accounting_year,cost_center_id,amount_cents,created_by)
+              SELECT id,$1,$2,cost_center_id,amount_cents,$3
+              FROM unnest($4::uuid[], $5::uuid[], $6::bigint[]) AS source(id,cost_center_id,amount_cents)
+              ORDER BY cost_center_id ON CONFLICT DO NOTHING RETURNING id`,
+            [departmentId, accountingYear, request.authenticatedUser?.id ?? null, budgets.map(() => randomUUID()),
+              budgets.map(row => ids.get(row.code)), budgets.map(row => row.budgetCents)]);
+          if (insertedBudgets.rowCount !== budgets.length) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "A budget was added during import. Review the CSV again." });
+          }
+        }
         const importId = randomUUID();
         await audit(client, departmentId, request, isChart ? "accounts_imported" : "cost_centers_imported",
           isChart ? "account_import" : "cost_center_import", importId,
-          { imported: creates.length, skipped: skips, sha256: createHash("sha256").update(csv).digest("hex") });
+          { imported: creates.length, skipped: skips,
+            ...(wantsBudgets ? { accountingYear, budgetImported: budgets.length, budgetSkipped: skippedBudgets } : {}), sha256: createHash("sha256").update(csv).digest("hex") });
         await client.query("COMMIT");
         publish(departmentId, isChart ? "accounts-imported" : "cost-centers-imported", importId);
-        return reply.code(201).send({ imported: creates.length, skipped: skips });
+        return reply.code(201).send({ imported: creates.length, skipped: skips, ...(wantsBudgets ? { budgetImported: budgets.length, budgetSkipped: skippedBudgets } : {}) });
       } catch (error) {
         if (applying) await client.query("ROLLBACK");
         throw error;
