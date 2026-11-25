@@ -318,16 +318,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position,visibility,category,text_max_length) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0),$8,$9,$10)", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false,b.visibility ?? "private_people",b.category?.trim() || null,b.textMaxLength??null]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
       changed(d); return reply.code(201).send({ id });
     });
-    type ChoiceOptionChange = { add: string } | { from: number; direction: "up" | "down" };
+    type ChoiceOptionChange = { add: string } | { from: number; direction: "up" | "down" } | { from: number; rename: string };
     const optionChangeSchema = {
       type: "object", additionalProperties: false,
       properties: {
         add: { type: "string", minLength: 1, maxLength: 120 },
+        rename: { type: "string", minLength: 1, maxLength: 120 },
         from: { type: "integer", minimum: 0, maximum: 99 },
         direction: { type: "string", enum: ["up", "down"] },
       },
-      oneOf: [{ required: ["add"], not: { anyOf: [{ required: ["from"] }, { required: ["direction"] }] } },
-        { required: ["from", "direction"], not: { required: ["add"] } }],
+      oneOf: [
+        { required: ["add"], not: { anyOf: [{ required: ["from"] }, { required: ["direction"] }, { required: ["rename"] }] } },
+        { required: ["from", "direction"], not: { anyOf: [{ required: ["add"] }, { required: ["rename"] }] } },
+        { required: ["from", "rename"], not: { anyOf: [{ required: ["add"] }, { required: ["direction"] }] } },
+      ],
     } as const;
     routes.patch<{ Params: { id: string }; Body: { expected: string[]; change: ChoiceOptionChange } }>("/api/people-records/fields/:id/options", {
       schema: {
@@ -347,8 +351,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!await context.lockDepartmentForWrite(client, departmentId)) {
           return reply.code(409).send({ error: "This location cannot be changed on this installation." });
         }
-        const { rows: [field] } = await client.query<{ options: unknown }>(
-          "SELECT options FROM people_record_fields WHERE department_id=$1 AND id=$2 AND field_type='select' FOR UPDATE",
+        const { rows: [field] } = await client.query<{ options: unknown; field_key: string }>(
+          "SELECT options,field_key FROM people_record_fields WHERE department_id=$1 AND id=$2 AND field_type='select' FOR UPDATE",
           [departmentId, fieldId],
         );
         if (!field) return reply.code(404).send({ error: "Choice field not found at this location." });
@@ -363,6 +367,45 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             return reply.code(400).send({ error: "Enter a new non-empty option. A field can have up to 100 choices." });
           }
           next.push(option);
+        } else if ("rename" in change) {
+          const current = next[change.from];
+          const option = change.rename.trim();
+          if (current === undefined || !option || next.includes(option)) {
+            return reply.code(400).send({ error: "Enter a new non-empty name for this choice." });
+          }
+          const values = [current, option];
+          const usage = await client.query<{ in_use: boolean }>(
+            `SELECT EXISTS (
+              SELECT 1 FROM people_record_values WHERE department_id=$1 AND field_id=$2 AND jsonb_typeof(value)='string' AND value #>> '{}' = ANY($4::text[])
+            ) OR EXISTS (
+              SELECT 1 FROM people_record_saved_views v WHERE v.department_id=$1 AND (
+                (v.criteria->>'field'=$3 AND v.criteria->>'value'=ANY($4::text[])) OR EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v.criteria->'filters')='array' THEN v.criteria->'filters' ELSE '[]'::jsonb END) filter
+                  WHERE filter->>'field'=$3 AND filter->>'value'=ANY($4::text[])
+                )
+              )
+            ) AS in_use`,
+            [departmentId, fieldId, field.field_key, values],
+          );
+          if (usage.rows[0]?.in_use) {
+            return reply.code(409).send({ error: "This name is referenced by existing People records or saved views." });
+          }
+          const tables = await client.query<{ installed: boolean }>("SELECT to_regclass('public.saved_designer_reports') IS NOT NULL AS installed");
+          if (tables.rows[0]?.installed) {
+            const reportField = "custom_" + fieldId.replace(/-/g, "");
+            const reportFilters = await client.query(
+              `SELECT 1 FROM saved_designer_reports report WHERE report.department_id=$1 AND report.definition->>'dataset'='people'
+                AND EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(report.definition->'filters')='array'
+                    THEN report.definition->'filters' ELSE '[]'::jsonb END) filter WHERE filter->>'field'=$2
+                ) LIMIT 1`,
+              [departmentId, reportField],
+            );
+            if (reportFilters.rowCount) {
+              return reply.code(409).send({ error: "This choice field is used by a saved report filter." });
+            }
+          }
+          next[change.from] = option;
         } else {
           const to = change.from + (change.direction === "up" ? -1 : 1);
           if (change.from >= next.length || to < 0 || to >= next.length) {
