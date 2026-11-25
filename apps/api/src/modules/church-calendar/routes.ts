@@ -26,7 +26,7 @@ type AppointmentInput = {
 type AppointmentRow = {
   id: string; calendar_id: string; title: string; subtitle: string; description: string; starts_at: string; ends_at: string;
   all_day: boolean; place: string; url: string; internal_only: boolean; tags: string[]; recurrence: Recurrence | null;
-  linked_event_id: string | null; created_by: string; calendar_scope: CalendarScope; calendar_name: string; responsible_contact_id?: string | null; responsible_name?: string | null;
+  linked_event_id: string | null; created_by: string | null; calendar_scope: CalendarScope; calendar_name: string; responsible_contact_id?: string | null; responsible_name?: string | null;
   owner_user_id: string | null; group_id: string | null; signup_group_id?: string | null; has_image?: boolean;
   time_zone?: string | null; location_time_zone?: string;
 };
@@ -1736,8 +1736,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         await moveCalendarOccurrenceLinks(client, row.id, newId, occurrenceStart!, selectedOverrides, plan.targetOccurrence);
         await client.query(
-          `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
-           SELECT $2,resource_booking_id,created_by FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL`, [row.id, newId],
+          `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by,historical_actor_id,historical_actor_name)
+           SELECT $2,resource_booking_id,created_by,historical_actor_id,historical_actor_name FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL`, [row.id, newId],
         );
       } else {
         const currentOccurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
