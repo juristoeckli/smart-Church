@@ -32,7 +32,7 @@ type AppointmentRow = {
 };
 type Occurrence = Record<string, unknown> & {
   appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string;
-  startsAtUtc?: string | null; viewStartsAt?: string; allDay?: boolean;
+  startsAtUtc?: string | null; viewStartsAt?: string; viewEndsAt?: string; allDay?: boolean;
 };
 
 const calendarFields = ["title", "subtitle", "description", "startsAt", "endsAt", "allDay", "place", "url", "internalOnly", "tags", "linkedEventId", "signupGroupId", "responsibleContactId"] as const;
@@ -844,7 +844,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { removed: true };
   });
 
-  app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string; appointmentId?: string; meetingRequests?: "mine" | "invitations" } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string; appointmentId?: string; includeOverlapping?: string; meetingRequests?: "mine" | "invitations" } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
@@ -859,6 +859,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (meetingRequests) reply.header("Cache-Control", "private, no-store");
     const preference = request.query.displayTimeZone;
     const projected = preference !== undefined;
+    const overlapping = projected && request.query.includeOverlapping === "true";
     let displayZone = preference === "appointments" || preference === undefined ? null : canonicalTimeZone(preference);
     if (preference === "location") {
       const location = await context.pool.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
@@ -878,7 +879,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const from = pad ? localDateTime(addDays(startOfDay(visibleFrom), -pad)) : visibleFrom;
     const to = pad ? `${localDateTime(addDays(startOfDay(visibleTo), pad)).slice(0, 10)}T23:59:59` : visibleTo;
     const overrideWindow = `left(exception.overrides->>'startsAt',10)
-      BETWEEN to_char($2::timestamp,'YYYY-MM-DD') AND to_char($3::timestamp,'YYYY-MM-DD')`;
+      BETWEEN to_char($2::timestamp,'YYYY-MM-DD') AND to_char($3::timestamp,'YYYY-MM-DD')
+      ${overlapping ? "OR (left(exception.overrides->>'endsAt',10) >= to_char($2::timestamp,'YYYY-MM-DD') AND COALESCE(left(exception.overrides->>'startsAt',10),to_char(exception.original_start,'YYYY-MM-DD')) <= to_char($3::timestamp,'YYYY-MM-DD'))" : ""}`;
     const result = await context.pool.query<AppointmentRow>(
       `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
               to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
@@ -894,11 +896,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND ($7::uuid IS NULL OR appointment.id=$7)
           AND ((appointment.starts_at <= $3::timestamp
             AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $2::timestamp)
-              OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $2::timestamp::date)))
+              OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $2::timestamp::date ${overlapping ? ' - (appointment.ends_at - appointment.starts_at)' : ''})))
             OR ($6::boolean AND (
               EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions exception
-                       WHERE exception.appointment_id=appointment.id AND NOT exception.cancelled AND ${overrideWindow})
-              OR EXISTS (SELECT 1 FROM church_calendar_extra_dates extra WHERE extra.appointment_id=appointment.id AND extra.starts_at BETWEEN $2::timestamp AND $3::timestamp)
+                       WHERE exception.appointment_id=appointment.id AND NOT exception.cancelled AND (${overrideWindow}))
+              OR EXISTS (SELECT 1 FROM church_calendar_extra_dates extra WHERE extra.appointment_id=appointment.id AND extra.starts_at <= $3::timestamp AND ${overlapping ? 'extra.ends_at' : 'extra.starts_at'} >= $2::timestamp)
             )))
           AND (calendar.scope='community' OR calendar.owner_user_id=$4 OR (calendar.scope='group' AND ($5 OR EXISTS (
             SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
@@ -927,7 +929,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE extra.appointment_id=ANY($1::uuid[]) AND ((extra.starts_at <= $3::timestamp AND extra.ends_at >= $2::timestamp)
           OR ($4::boolean AND EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions exception
                  WHERE exception.appointment_id=extra.appointment_id AND exception.original_start=extra.starts_at
-                   AND NOT exception.cancelled AND ${overrideWindow})))`, [ids, from, to, projected],
+                   AND NOT exception.cancelled AND (${overrideWindow}))))`, [ids, from, to, projected],
     );
     const resourceLinks = await context.pool.query<{
       appointment_id: string; resource_booking_id: string; occurrence_start: string | null; name: string; status: string;
@@ -949,7 +951,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const movedStarts = new Map<string, string[]>();
     if (projected) for (const exception of exceptions.rows) {
       const start = cleanLocalDateTime(exception.overrides?.startsAt);
-      if (exception.cancelled || !start || start < from || start > to) continue;
+      const end = overlapping ? cleanLocalDateTime(exception.overrides?.endsAt) : null;
+      if (exception.cancelled || (start ?? exception.original_start) > to
+        || !((start && start >= from) || (end && end >= from))) continue;
       const list = movedStarts.get(exception.appointment_id);
       if (list) list.push(exception.original_start); else movedStarts.set(exception.appointment_id, [exception.original_start]);
     }
@@ -1006,7 +1010,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const baseStart = wallDate(row.starts_at);
       const baseEnd = wallDate(row.ends_at);
       const duration = Math.max(0, baseEnd.getTime() - baseStart.getTime());
-      const starts = occurrenceStarts(row, from, to);
+      const firstCandidate = overlapping ? localDateTime(new Date(wallDate(from).getTime() - duration)) : from;
+      const starts = occurrenceStarts(row, firstCandidate, to);
       const extraEnds = new Map((extraMap.get(row.id) ?? []).map((extra) => [extra.startsAt, extra.endsAt]));
       const originals = new Set([...starts.map(localDateTime), ...extraEnds.keys()]);
       for (const original of movedStarts.get(row.id) ?? []) {
@@ -1033,8 +1038,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const instants = allDay ? null : appointmentInstants(startAt, endAt, timeZone);
         const viewTimeZone = displayZone ?? timeZone;
         const viewStartsAt = instants ? appointmentWallTime(Date.parse(instants.startsAtUtc), viewTimeZone) : startAt;
-        if (projected && (viewStartsAt < visibleFrom || viewStartsAt > visibleTo)) continue;
         const resourceWindow = allDay ? calendarBookingWindow(startAt, endAt, true, timeZone) : instants;
+        const viewEndsAt = resourceWindow ? appointmentWallTime(Date.parse(resourceWindow.endsAtUtc), allDay ? timeZone : viewTimeZone) : endAt;
+        const inRange = viewStartsAt <= visibleTo && (viewStartsAt >= visibleFrom || (overlapping && viewEndsAt > visibleFrom));
+        if (projected && !inRange) continue;
         const requestKey = requestScope && row.calendar_scope === "group" && resourceWindow
           ? occurrenceRequestKey(row.id, original, resourceWindow.startsAtUtc, resourceWindow.endsAtUtc)
           : null;
@@ -1050,7 +1057,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }));
         output.push({
           appointmentId: row.id, occurrenceStartAt: startAt, occurrenceEndAt: endAt, originalOccurrenceStartAt: original, seriesTimeZone, timeZone,
-          ...(projected ? { viewStartsAt, viewTimeZone } : {}),
+          ...(projected ? { viewStartsAt, viewEndsAt, viewTimeZone } : {}),
           reminder: reminders.get(`${row.id}:${original}`) ?? null,
           startsAtUtc: instants?.startsAtUtc ?? null, endsAtUtc: instants?.endsAtUtc ?? null, timeShifted: instants?.shifted ?? false, seriesStartsAt: row.starts_at, calendarId: row.calendar_id,
           calendarName: row.calendar_name, calendarScope: row.calendar_scope, groupId: row.group_id,

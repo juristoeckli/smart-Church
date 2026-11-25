@@ -36,3 +36,30 @@
   height: .65rem;
   width: .65rem;
 }
+
+.church-calendar-time-scroll { overflow: auto; max-height: 72vh; border: 1px solid var(--calendar-border, #d0d7de); border-radius: 8px; }
+.church-calendar-time-grid { --calendar-hour-height: 4rem; min-width: max(100%, calc(5rem + var(--calendar-grid-days) * 7rem)); }
+.church-calendar-time-headers, .church-calendar-time-all-day, .church-calendar-time-body { display: grid; grid-template-columns: 5rem repeat(var(--calendar-grid-days), minmax(0, 1fr)); }
+.church-calendar-time-headers, .church-calendar-time-all-day { position: sticky; z-index: 2; background: var(--calendar-grid-background, Canvas); border-bottom: 1px solid var(--calendar-border, #d0d7de); }
+.church-calendar-time-headers { top: 0; height: 2.75rem; }
+.church-calendar-time-all-day { top: 2.75rem; max-height: 10rem; overflow-y: auto; }
+.church-calendar-time-headers header {
+  display: flex; align-items: center; justify-content: space-between; gap: .25rem; padding: .25rem .5rem;
+}
+.church-calendar-time-headers header button { display: grid; place-items: center; background: transparent; color: inherit; border: 0; border-radius: 4px; cursor: pointer; }
+.church-calendar-time-all-day > span { padding: .45rem; font-size: .75rem; }
+.church-calendar-time-all-day > div { display: grid; align-content: start; gap: .2rem; padding: .2rem; }
+.church-calendar-time-headers > header, .church-calendar-time-all-day > div, .church-calendar-time-day { border-left: 1px solid var(--calendar-border, #d0d7de); min-width: 0; }
+.church-calendar-time-hours > div { height: var(--calendar-hour-height); padding: .15rem .35rem; text-align: right; font-size: .75rem; }
+.church-calendar-time-day {
+  position: relative;
+  background: repeating-linear-gradient(to bottom, transparent 0 calc(var(--calendar-hour-height) - 1px), var(--calendar-border, #d0d7de) calc(var(--calendar-hour-height) - 1px) var(--calendar-hour-height));
+}
+.church-calendar-grid-event {
+  display: block; min-width: 0; overflow: hidden; text-align: left; font: inherit; font-size: .78rem; line-height: 1.15;
+  padding: .1rem .25rem; color: inherit; background: color-mix(in srgb, var(--calendar-accent) 15%, Canvas);
+  border: 1px solid Canvas; border-inline-start: 3px solid var(--calendar-accent); border-radius: 5px; cursor: pointer;
+}
+.church-calendar-grid-event strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.church-calendar-grid-event:focus-visible { z-index: 1; outline: 2px solid currentColor; outline-offset: -2px; }
+.church-calendar-timed-event { position: absolute; }
