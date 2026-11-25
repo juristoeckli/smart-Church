@@ -437,11 +437,35 @@ function EventBulkRoleAssignment({ event, rosterEvents, contacts, qualifications
   </form>;
 }
 
-function EventDetailStaffing(props: Omit<EventRoleAssignmentProps, "categoryFilter" | "directRoleIndex">) {
+function EventDetailStaffing(props: Omit<EventRoleAssignmentProps, "categoryFilter" | "directRoleIndex"> & { csrfToken: string; onRefreshed: () => Promise<void> }) {
   const { event, contacts, canManage, onAssigned } = props;
   const [roleIndex, setRoleIndex] = useState<number>();
   const positions = event.positions ?? [];
-  if (!positions.length) return null;
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState("");
+  async function refreshStaffing() {
+    setRefreshing(true);
+    setRefreshMessage("");
+    try {
+      const response = await fetch("/api/modules/sync/churchtools/events/" + event.id + "/staffing", {
+        method: "POST",
+        headers: { "x-department-id": props.departmentId, "x-csrf-token": props.csrfToken },
+      });
+      const result = await response.json() as { imported?: number; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not refresh ChurchTools staffing.");
+      if (result.imported) await props.onRefreshed();
+      else setRefreshMessage("ChurchTools returned no visible staffing positions for this event.");
+    } catch (error) {
+      setRefreshMessage(error instanceof Error ? error.message : "Could not refresh ChurchTools staffing.");
+    } finally { setRefreshing(false); }
+  }
+  if (!positions.length) return <section className="event-details-section">
+    <h3>{translate("events.positions")}</h3>
+    <p>{event.importedFrom === "churchtools" ? "No staffing positions were imported from ChurchTools for this event." : "No staffing positions are recorded for this event."}</p>
+    {canManage && !event.cancelledAt && event.importedFrom !== "elvanto" && <button type="button" className="button button-secondary"
+      onClick={() => void refreshStaffing()} disabled={refreshing}>{refreshing ? "Refreshing staffing…" : "Refresh ChurchTools staffing"}</button>}
+    {refreshMessage && <p role="status">{refreshMessage}</p>}
+  </section>;
   const editable = canManage && !event.importedFrom && !event.cancelledAt;
   return <section className="event-details-section">
     <h3>{translate("events.positions")}</h3>
@@ -559,6 +583,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       }
       if (signal?.aborted) return;
       setEvents(result);
+      setDetailsEvent(current => current ? result.find(event => event.id === current.id) ?? current : null);
       setEventsDepartmentId(departmentId);
       const swapsResponse = await fetch("/api/event-position-swaps", { headers: { "x-department-id": departmentId }, signal });
       const swapsData = await swapsResponse.json() as EventPositionSwap[] | { error?: string };
@@ -1210,13 +1235,13 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       <footer className="page-footer"><span>{translate("events.footer")}</span><span>© 2026 Smart Church</span></footer>
       {qualificationManagerOpen && canManage && <VolunteerQualificationSettings departmentId={departmentId} contacts={contacts} qualifications={volunteerQualifications} onChanged={() => loadVolunteerQualifications()} onClose={() => setQualificationManagerOpen(false)} />}{isWorshipLibraryOpen && <WorshipPlanning departmentId={departmentId} canManage={canManage} initialTemplate={newWorshipTemplate} onClose={() => { setIsWorshipLibraryOpen(false); setNewWorshipTemplate(undefined); }} onChanged={() => void refreshWorshipLibrary()} onNotice={onNotice} selectedSongId={linkedSongNavigation?.id} directorySearch={songSearchNavigation} selectedSongRequestId={linkedSongNavigation?.requestId} onSelectedSongHandled={(requestId) => onLinkedSongHandled?.(requestId)} />}
 
-      {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{eventKindLabel(detailsEvent.kind)}</span><h2 id="event-details-title">{detailsEvent.title}</h2>{canManage && detailsEvent.canManageAttachments && !detailsEvent.cancelledAt && <ServiceEventFilesPanel key={`files:${departmentId}:${detailsEvent.id}`} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} />}{detailsEvent.cancelledAt && <span className="event-cancelled-badge">Cancelled</span>}</div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatEventDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{eventTimeLabel(detailsEvent)}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div>{Boolean(detailsEvent.pastorNames?.length) && <div><dt>{detailsEvent.pastorNames!.length === 1 ? "Pastor" : "Pastors"}</dt><dd>{detailsEvent.pastorNames?.join(", ")}</dd></div>}{responsibleName(detailsEvent) && <div><dt>Responsible person</dt><dd>{responsibleName(detailsEvent)}</dd></div>}</dl>{canManage && !detailsEvent.cancelledAt && <EventVolunteerAvailabilityWarning key={`${departmentId}:${detailsEvent.id}`} departmentId={departmentId} eventId={detailsEvent.id} t={(message) => translateModuleText(message, eventTranslations, getActiveLanguage())} />}{canManage && <ServiceEventFactsPanel key={"facts:" + departmentId + ":" + detailsEvent.id} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} eventDate={detailsEvent.eventDate} />}{detailsEvent.cancelledAt && <p className="event-details-summary"><strong>Cancelled</strong> · {detailsEvent.cancellationReason || "No reason provided"} · {new Date(detailsEvent.cancelledAt).toLocaleString()}{detailsEvent.cancelledBy ? ` · by ${detailsEvent.cancelledBy}` : ""}</p>}{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}{detailsEvent.registrationEnabled && <p className="event-details-summary">{translate("events.registration").replace("{count}", String(detailsEvent.registrationCount ?? 0))}{detailsEvent.registrationCapacity ? ` / ${detailsEvent.registrationCapacity}` : ` ${translate("events.registered")}`}{detailsEvent.registrationCapacity && (detailsEvent.registrationCount ?? 0) >= detailsEvent.registrationCapacity ? translate("events.waitlistOpen") : ""}</p>}{canManage && !detailsEvent.importedFrom && <EventRegistrationFormSettings key={detailsEvent.id} departmentId={departmentId} eventId={detailsEvent.id} csrfToken={csrfToken} readOnly={Boolean(detailsEvent.cancelledAt)} />}{detailsEvent.attendanceRecordedAt && <p className="event-details-summary">{translate("events.attendance").replace("{adults}", String(detailsEvent.attendanceAdults ?? 0)).replace("{children}", String(detailsEvent.attendanceChildren ?? 0))}</p>}<EventDetailStaffing key={detailsEvent.id} event={detailsEvent} rosterEvents={events} contacts={contacts}
-        qualifications={volunteerQualifications} staffingGroups={staffingGroups} canManage={canManage} departmentId={departmentId}
+      {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{eventKindLabel(detailsEvent.kind)}</span><h2 id="event-details-title">{detailsEvent.title}</h2>{canManage && detailsEvent.canManageAttachments && !detailsEvent.cancelledAt && <ServiceEventFilesPanel key={`files:${departmentId}:${detailsEvent.id}`} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} />}{detailsEvent.cancelledAt && <span className="event-cancelled-badge">Cancelled</span>}</div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatEventDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{eventTimeLabel(detailsEvent)}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div>{Boolean(detailsEvent.pastorNames?.length) && <div><dt>{detailsEvent.pastorNames!.length === 1 ? "Pastor" : "Pastors"}</dt><dd>{detailsEvent.pastorNames?.join(", ")}</dd></div>}{responsibleName(detailsEvent) && <div><dt>Responsible person</dt><dd>{responsibleName(detailsEvent)}</dd></div>}</dl><EventDetailStaffing key={detailsEvent.id} event={detailsEvent} rosterEvents={events} contacts={contacts}
+        qualifications={volunteerQualifications} staffingGroups={staffingGroups} canManage={canManage} departmentId={departmentId} csrfToken={csrfToken} onRefreshed={async () => { await loadEvents(); }}
         onAssigned={(updated) => {
           setDetailsEvent((current) => current?.id === updated.id ? updated : current);
           onNotice("Volunteer assigned.");
           void loadEvents();
-        }} />
+        }} />{canManage && !detailsEvent.cancelledAt && <EventVolunteerAvailabilityWarning key={`${departmentId}:${detailsEvent.id}`} departmentId={departmentId} eventId={detailsEvent.id} t={(message) => translateModuleText(message, eventTranslations, getActiveLanguage())} />}{canManage && <ServiceEventFactsPanel key={"facts:" + departmentId + ":" + detailsEvent.id} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} eventDate={detailsEvent.eventDate} />}{detailsEvent.cancelledAt && <p className="event-details-summary"><strong>Cancelled</strong> · {detailsEvent.cancellationReason || "No reason provided"} · {new Date(detailsEvent.cancelledAt).toLocaleString()}{detailsEvent.cancelledBy ? ` · by ${detailsEvent.cancelledBy}` : ""}</p>}{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}{detailsEvent.registrationEnabled && <p className="event-details-summary">{translate("events.registration").replace("{count}", String(detailsEvent.registrationCount ?? 0))}{detailsEvent.registrationCapacity ? ` / ${detailsEvent.registrationCapacity}` : ` ${translate("events.registered")}`}{detailsEvent.registrationCapacity && (detailsEvent.registrationCount ?? 0) >= detailsEvent.registrationCapacity ? translate("events.waitlistOpen") : ""}</p>}{canManage && !detailsEvent.importedFrom && <EventRegistrationFormSettings key={detailsEvent.id} departmentId={departmentId} eventId={detailsEvent.id} csrfToken={csrfToken} readOnly={Boolean(detailsEvent.cancelledAt)} />}{detailsEvent.attendanceRecordedAt && <p className="event-details-summary">{translate("events.attendance").replace("{adults}", String(detailsEvent.attendanceAdults ?? 0)).replace("{children}", String(detailsEvent.attendanceChildren ?? 0))}</p>}
       {eventsDepartmentId === departmentId && <SharedEventAgenda key={departmentId + ":" + detailsEvent.id} target={detailsEvent}
         events={events} canManage={canManage} departmentId={departmentId} csrfToken={csrfToken} formatTime={eventTimeLabel}
         onChanged={() => { setDetailsEvent(null); setScheduleRevision((current) => current + 1); }}

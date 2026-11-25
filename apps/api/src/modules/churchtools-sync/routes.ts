@@ -3237,6 +3237,76 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       await pool!.query("INSERT INTO churchtools_sync_settings (department_id,instance_url,encrypted_login_token,enabled) VALUES ($1,$2,$3,true) ON CONFLICT (department_id) DO UPDATE SET instance_url=EXCLUDED.instance_url,encrypted_login_token=EXCLUDED.encrypted_login_token,enabled=true,last_sync_error=NULL,updated_at=now()", [dept, base, encrypted]);
       return { saved: true, instanceUrl: base };
     });
+    routes.post<{ Params: { id: string } }>("/api/modules/sync/churchtools/events/:id/staffing", {
+      schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true);
+      if (!dept || !deps.validateMutation(request, reply)) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "ChurchTools is not configured for this location." });
+      const eventId = request.params.id;
+      const { rows: [event] } = await pool!.query<{ source_id: string; time_zone: string }>(
+        `SELECT COALESCE(provenance.source_event_id, CASE WHEN event.source_system='churchtools' THEN event.source_id END) AS source_id,
+                location.time_zone
+           FROM service_events event JOIN departments location ON location.id=event.department_id
+           LEFT JOIN churchtools_service_event_provenance provenance ON provenance.department_id=event.department_id
+             AND provenance.event_id=event.id AND provenance.instance_url=$3
+          WHERE event.department_id=$1 AND event.id=$2 AND event.cancelled_at IS NULL
+            AND jsonb_array_length(COALESCE(event.positions,'[]'::jsonb))=0`, [dept, eventId, config.instance_url],
+      );
+      if (!event?.source_id || !/^[1-9][0-9]{0,15}$/.test(event.source_id)) {
+        return reply.code(404).send({ error: "This event has no verified ChurchTools link or already has staffing." });
+      }
+      let positions: ReturnType<typeof mapEvents>[number]["positions"];
+      try {
+        const token = decrypt(config.encrypted_login_token);
+        const { data } = await get(config.instance_url, token, "events/" + encodeURIComponent(event.source_id));
+        if (!data || idOf(data) !== event.source_id || !Array.isArray(data.eventServices)) {
+          return reply.code(502).send({ error: "ChurchTools did not return staffing for this event." });
+        }
+        positions = mapEvents([data], event.time_zone, await churchToolsEventServiceNames(config, token, [data]))[0]?.positions ?? [];
+      } catch {
+        return reply.code(502).send({ error: "ChurchTools staffing is unavailable. Check the integration’s event permissions." });
+      }
+      if (!positions.length) return { imported: 0 };
+      const db = await pool!.connect();
+      try {
+        await db.query("BEGIN");
+        if (!await deps.lockDepartmentForWrite(db, dept)) {
+          await db.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const current = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE",
+          [dept, config.instance_url, config.encrypted_login_token]);
+        if (!current.rowCount) {
+          await db.query("ROLLBACK");
+          return reply.code(409).send({ error: "The ChurchTools connection changed. Try again." });
+        }
+        const personIds = [...new Set(positions.flatMap(position => position.personId ? [position.personId] : []))];
+        const { rows: people } = await db.query<{ id: string; source_id: string }>(`
+          SELECT id,source_id FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id=ANY($2::text[])
+          UNION SELECT contact.id,link.source_id FROM churchtools_migration_links link
+            JOIN contacts contact ON contact.id=link.local_record_id AND contact.department_id=link.department_id
+           WHERE link.department_id=$1 AND link.area='person' AND link.source_id=ANY($2::text[])`, [dept, personIds]);
+        const contactIds = new Map(people.map(person => [person.source_id, person.id]));
+        const roster = positions.map(({ personId, ...position }) => {
+          const contactId = personId ? contactIds.get(personId) : undefined;
+          return { ...position, ...(contactId ? { contactId } : {}) };
+        });
+        const updated = await db.query(`UPDATE service_events event SET positions=$3::jsonb,updated_at=now()
+          WHERE event.id=$1 AND event.department_id=$2 AND event.cancelled_at IS NULL AND jsonb_array_length(COALESCE(event.positions,'[]'::jsonb))=0
+            AND ((event.source_system='churchtools' AND event.source_id=$4) OR EXISTS (
+              SELECT 1 FROM churchtools_service_event_provenance provenance WHERE provenance.department_id=$2
+                AND provenance.event_id=event.id AND provenance.source_event_id=$4 AND provenance.instance_url=$5
+            )) RETURNING id`, [eventId, dept, JSON.stringify(roster), event.source_id, config.instance_url]);
+        await db.query("COMMIT");
+        if (!updated.rowCount) return reply.code(409).send({ error: "The event changed. Reopen it to see the current roster." });
+      } catch (error) {
+        await db.query("ROLLBACK");
+        throw error;
+      } finally { db.release(); }
+      return { imported: positions.length };
+    });
     routes.post("/api/modules/sync/churchtools/run", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       try { return await run(dept); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Sync failed." }); }
