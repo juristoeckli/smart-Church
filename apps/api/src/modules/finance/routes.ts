@@ -1,3 +1,4 @@
+import { registerSimpleBookingGrants, scopedSimplePurposes, simpleBookingInput, type SimpleBookingBody } from "./simple-booking.js";
 import { readBookingPurpose, registerBookingPurposes } from "./booking-purposes.js";
 import { maximumArchiveUploadLength, readStatementArchive } from "./bank-statement-archive.js";
 import { parsePaypalActivity, type PaypalDateOrder, type PaypalEntry, isPaypalActivityHeader } from "./paypal-activity.js";
@@ -880,41 +881,62 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   registerBookingPurposes(app, context, { department, cleanText, audit, publish });
+  registerSimpleBookingGrants(app, context, { department, audit });
   registerCostCenterTransfers(app,context,{ department,audit,publish,periodForDate,cleanText,validDateOnly });
   registerTransactionEvidence(app,context,{department,audit});
   registerJournalNumbering(app,context,department,audit);
 
   app.post<{ Body: FinanceTransactionBody }>("/api/modules/finance/transactions", { schema: { body: transactionSchema } }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
-    const automatic = request.body.receiptNumber === undefined && Boolean(request.body.submissionId);
-    let receiptNumber = cleanText(request.body.receiptNumber ?? "");
-    const bookingText = cleanText(request.body.bookingText);
-    const lines = request.body.lines.map((line) => ({ ...line, text: cleanText(line.text ?? "") }));
+    return postJournal(request, reply, departmentId, request.body);
+  });
+
+  async function postJournal(request: FastifyRequest, reply: FastifyReply, departmentId: string, input: FinanceTransactionBody,
+    simpleScope?: { userId: string; purposeId: string; currency: string }) {
+    const automatic = input.receiptNumber === undefined && Boolean(input.submissionId);
+    let receiptNumber = cleanText(input.receiptNumber ?? "");
+    const bookingText = cleanText(input.bookingText);
+    const lines = input.lines.map((line) => ({ ...line, text: cleanText(line.text ?? "") }));
     if ((!automatic && !receiptNumber) || !bookingText) return reply.code(400).send({ error: "Receipt number and booking text are required." });
     if (lines.some((line) => (line.debitCents > 0) === (line.creditCents > 0))) return reply.code(400).send({ error: "Each line must contain either a debit or a credit amount." });
     const debitTotal = lines.reduce((sum, line) => sum + line.debitCents, 0); const creditTotal = lines.reduce((sum, line) => sum + line.creditCents, 0);
     if (!Number.isSafeInteger(debitTotal) || !Number.isSafeInteger(creditTotal) || debitTotal <= 0 || debitTotal !== creditTotal) return reply.code(400).send({ error: "Debits and credits must be equal and greater than zero." });
-    const bookingDate = request.body.bookingDate;
+    const bookingDate = input.bookingDate;
     if (!validDateOnly(bookingDate) || bookingDate.startsWith("0000-")) return reply.code(400).send({ error: "Booking date is invalid." });
-    const id = automatic ? request.body.submissionId!.toLowerCase() : randomUUID();
+    const id = automatic ? input.submissionId!.toLowerCase() : randomUUID();
     const actorId = request.authenticatedUser?.id ?? null;
-    const bankRowId = request.body.bankStatementRowId?.toLowerCase();
-    const paypalMode = request.body.paypalBookingMode;
-    const purposeId = request.body.bookingPurposeId?.toLowerCase();
+    const bankRowId = input.bankStatementRowId?.toLowerCase();
+    const paypalMode = input.paypalBookingMode;
+    const purposeId = input.bookingPurposeId?.toLowerCase();
     if (purposeId && !bankRowId) return reply.code(400).send({ error: "Choose a statement row to apply a booking purpose." });
     if (paypalMode && !bankRowId) return reply.code(400).send({ error: "Choose a PayPal statement row to post." });
     const submissionHash = automatic ? createHash("sha256").update(JSON.stringify([bookingDate,bookingText,
       lines.map(line => [line.accountId.toLowerCase(),line.costCenterId?.toLowerCase() ?? null,line.donorId?.toLowerCase() ?? null,
-        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : []), ...(paypalMode ? [paypalMode] : []), ...(purposeId ? [purposeId] : [])])).digest("hex") : null;
+        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : []), ...(paypalMode ? [paypalMode] : []), ...(purposeId ? [purposeId] : []), ...(simpleScope ? ["simple-booking", simpleScope.purposeId, simpleScope.currency] : [])])).digest("hex") : null;
     const client = await pool!.connect();
     let accountingYear = 0;
     try {
       await client.query("BEGIN");
-      if (automatic || bankRowId) {
+      if (automatic || bankRowId || simpleScope) {
         if (!await context.lockDepartmentForWrite(client,departmentId)) {
           await client.query("ROLLBACK");
           return reply.code(423).send({error:"This location is read-only."});
         }
+      }
+      let simpleAudit: { bookingPurposeId: string; bookingPurposeName: string; groupId: string; groupRole: string; grantId: string } | undefined;
+      if (simpleScope) {
+        if (simpleScope.currency !== await statementCurrency(departmentId, client, "share")) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The ledger currency changed. Review the booking amount." });
+        }
+        const [purpose] = await scopedSimplePurposes(client, departmentId, simpleScope.userId, simpleScope.purposeId, true);
+        if (!purpose || lines[0]?.accountId !== purpose.bankAccountId || lines[1]?.accountId !== purpose.counterAccountId
+          || lines[1]?.costCenterId !== purpose.costCenterId || (lines[0]!.debitCents > 0) !== (purpose.direction === "income")) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The booking purpose is no longer available for your group. Review your selection." });
+        }
+        simpleAudit = { bookingPurposeId: purpose.id, bookingPurposeName: purpose.name,
+          groupId: purpose.groupId, groupRole: purpose.groupRole, grantId: purpose.grantId };
       }
       if (automatic) {
         await client.query("SELECT pg_advisory_xact_lock(hashtext('finance-journal-submission:'||$1::text))",[id]);
@@ -1054,7 +1076,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await audit(client, departmentId, request, "bank_statement_row_matched", "bank_statement_row", bankRowId,
           { importId: bankImportId, transactionId: id, createdPosting: true, ...paypalAudit, ...purposeAudit });
       }
-      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...paypalAudit, ...purposeAudit, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
+      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...paypalAudit, ...purposeAudit, ...simpleAudit, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -1064,7 +1086,52 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       throw error;
     } finally { client.release(); }
     if (bankRowId) publish(departmentId, "bank-statement-row-reconciled", bankRowId);
-    publish(departmentId, "transaction-posted", id); return reply.code(201).send({ id, bookingDate, accountingYear, receiptNumber, bookingText, status: "posted", debitCents: debitTotal, creditCents: creditTotal });
+    if (!simpleScope) publish(departmentId, "transaction-posted", id);
+    return reply.code(201).send({ id, bookingDate, accountingYear, receiptNumber, bookingText, status: "posted", debitCents: debitTotal, creditCents: creditTotal });
+  }
+
+  async function simpleBookingContext(request: FastifyRequest, reply: FastifyReply) {
+    if (!pool || !isDatabaseReady()) {
+      reply.code(503).send({ error: "Finance is unavailable because the database is not ready." });
+      return null;
+    }
+    const departmentId = await resolveDepartmentId(request, reply);
+    if (!departmentId) return null;
+    const userId = request.authenticatedUser?.id;
+    if (!userId || !(request.activeDepartmentModulePermissions?.finance ?? []).includes("simple-booking")) {
+      reply.code(403).send({ error: "Simple group booking access is required." });
+      return null;
+    }
+    return { departmentId, userId };
+  }
+
+  app.get("/api/modules/finance/simple-booking", async (request, reply) => {
+    const scope = await simpleBookingContext(request, reply); if (!scope) return reply;
+    const [currency, choices] = await Promise.all([
+      statementCurrency(scope.departmentId), scopedSimplePurposes(pool!, scope.departmentId, scope.userId),
+    ]);
+    const purposes = new Map(choices.map(({ id, name, direction }) => [id, { id, name, direction }]));
+    return reply.header("Cache-Control", "private, no-store").send({ currency, purposes: [...purposes.values()] });
+  });
+
+  app.post<{ Body: SimpleBookingBody }>("/api/modules/finance/simple-booking", { schema: { body: simpleBookingInput } }, async (request, reply) => {
+    const scope = await simpleBookingContext(request, reply); if (!scope) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    const { purposeId, amountCents, bookingDate, bookingText, receiptNumber, submissionId, currency } = request.body;
+    if (Boolean(receiptNumber) === Boolean(submissionId)) {
+      return reply.code(400).send({ error: "Enter a receipt number or request automatic numbering." });
+    }
+    const [purpose] = await scopedSimplePurposes(pool!, scope.departmentId, scope.userId, purposeId);
+    if (!purpose) return reply.code(404).send({ error: "Booking purpose not found for your group." });
+    const income = purpose.direction === "income";
+    return postJournal(request, reply, scope.departmentId, {
+      bookingDate, bookingText, receiptNumber, submissionId,
+      lines: [
+        { accountId: purpose.bankAccountId, debitCents: income ? amountCents : 0, creditCents: income ? 0 : amountCents },
+        { accountId: purpose.counterAccountId, costCenterId: purpose.costCenterId,
+          debitCents: income ? 0 : amountCents, creditCents: income ? amountCents : 0 },
+      ],
+    }, { userId: scope.userId, purposeId: purpose.id, currency });
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/finance/transactions/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {

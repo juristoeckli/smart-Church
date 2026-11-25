@@ -1,3 +1,4 @@
+import { ScopedSimpleBooking, SimpleBookingGrantsPanel } from "./ScopedSimpleBooking";
 import { BookingPurposesPanel, type BookingPurpose } from "./BookingPurposesPanel";
 import { FinanceMasterDataImport } from "./FinanceMasterDataImport";
 import { FinanceTransactionEvidence } from "./FinanceTransactionEvidence";
@@ -116,7 +117,22 @@ const readFinanceQuery = (key: string) => new URLSearchParams(window.location.se
 const validDateQuery = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 const initialLine = (): JournalLine => ({ accountId: "", costCenterId: "", donorId: "", debit: "", credit: "", text: "" });
 
-export function FinanceModule({ department, departmentId, csrfToken, canManageSite, language }: ModuleContext) {
+export function FinanceModule(context: ModuleContext) {
+  const grants = context.department.modulePermissions?.finance ?? [];
+  const full = context.canManageSite || context.department.role === "site_admin" || grants.includes("view") || grants.includes("manage");
+  const [showSimple, setShowSimple] = useState(false);
+  if (!full) return <ScopedSimpleBooking key={context.departmentId} context={context} />;
+  return <>
+    {grants.includes("simple-booking") && <nav className="finance-action-row" aria-label="Finance view">
+      <button type="button" className="button button-secondary" onClick={() => setShowSimple(false)} aria-pressed={!showSimple}>Finance overview</button>
+      <button type="button" className="button button-secondary" onClick={() => setShowSimple(true)} aria-pressed={showSimple}>Simple group booking</button>
+    </nav>}
+    {showSimple && grants.includes("simple-booking")
+      ? <ScopedSimpleBooking key={context.departmentId} context={context} /> : <FullFinanceModule {...context} />}
+  </>;
+}
+
+function FullFinanceModule({ department, departmentId, csrfToken, canManageSite, language }: ModuleContext) {
   const canManage = canManageSite || (department.modulePermissions?.finance ?? []).includes("manage");
   const [tab, setTab] = useState<Tab>("transactions");
   const [exportFormat, setExportFormat] = useState<"csv" | "xlsx" | "html" | "pdf">("csv");
@@ -1168,6 +1184,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     {showAccount && <div className="finance-overlay"><section className="finance-dialog" role="dialog" aria-modal="true"><header><h2>{t("New account")}</h2><button className="finance-close" type="button" onClick={() => setShowAccount(false)}>×</button></header><form onSubmit={(event) => void addAccount(event)} className="finance-form-grid"><label>{t("Account code")}<input required maxLength={32} value={accountDraft.code} onChange={(event) => setAccountDraft({ ...accountDraft, code: event.target.value })} /></label><label>{t("Name")}<input required maxLength={160} value={accountDraft.name} onChange={(event) => setAccountDraft({ ...accountDraft, name: event.target.value })} /></label><label>{t("Type")}<select value={accountDraft.accountType} onChange={(event) => setAccountDraft({ ...accountDraft, accountType: event.target.value as Account["accountType"] })}>{["asset", "liability", "equity", "income", "expense"].map((type) => <option key={type}>{type}</option>)}</select></label><div className="finance-form-actions"><button className="button button-primary" type="submit" disabled={saving}>{t("Save account")}</button></div></form></section></div>}
     {tab === "accounts" && canManage && <BookingPurposesPanel key={departmentId} purposes={bookingPurposes}
       accounts={bootstrap.accounts} centers={bootstrap.costCenters} busy={saving} save={saveBookingPurpose} />}
+    {tab === "accounts" && canManage && <SimpleBookingGrantsPanel key={departmentId} send={send} centers={bootstrap.costCenters} />}
     {tab === "accounts" && <section className="finance-section">
       <h3>Tax types</h3>
       <p>Reference rates for your location. These rates do not calculate taxes or post entries.</p>

@@ -9,10 +9,11 @@ export const moduleRegistration: ModuleRegistration = {
   enabledByDefault: false,
   accessLabel: "Finance",
   accessLevels: [
+    { value: "simple-booking", label: "Simple group booking", description: "Use booking purposes for explicitly granted group roles and cost centers." },
     { value: "view", label: "View finance", description: "View the ledger, donors, budgets, and reports." },
     { value: "manage", label: "Manage finance", description: "Maintain accounting data and post or reverse transactions." },
   ],
-  isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("finance") && (canManageSite || department.role === "site_admin" || (department.modulePermissions?.finance ?? []).some((grant) => grant === "view" || grant === "manage")),
+  isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("finance") && (canManageSite || department.role === "site_admin" || (department.modulePermissions?.finance ?? []).some((grant) => grant === "view" || grant === "manage" || grant === "simple-booking")),
   pageClassName: "page-wrap-finance",
   component: lazy(() => import("./FinanceModule").then(({ FinanceModule }) => ({ default: FinanceModule }))),
 };
