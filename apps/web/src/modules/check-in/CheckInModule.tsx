@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Check, ChevronDown, Printer, RotateCcw, Search, UserPlus, Users } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import "./module.css";
+import { CalendarGroupAttendance } from "./CalendarGroupAttendance";
 import { GroupMeetingAttendance } from "./GroupMeetingAttendance";
 import { checkInPrintFormats, checkInPrintItems, readCheckInPrintOptions, writeCheckInPrintDocument, type CheckInPrintMode, type CheckInPrintOptions } from "./printing";
 
@@ -23,6 +24,7 @@ function deskCode(departmentId: string, eventId: string, personId: string) {
 
 export function CheckInModule({ csrfToken, department, departmentId, realtime, state, onStateChange }: ModuleContext) {
   const [groupAttendanceOpen, setGroupAttendanceOpen] = useState(false);
+  const [calendarAttendanceOpen, setCalendarAttendanceOpen] = useState(false);
   const canManageGroupAttendance = department.role === "site_admin" || (department.permissions ?? []).includes("groups_manage");
   const [events, setEvents] = useState<EventRow[]>([]); const [groups, setGroups] = useState<GroupRow[]>([]);
   const [eventId, setEventId] = useState(""); const [groupIds, setGroupIds] = useState<string[]>([]); const [attendees, setAttendees] = useState<Attendee[]>([]);
@@ -318,6 +320,13 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
     <p>Choose the matching paper or roll in your browser’s print dialog.</p>
   </details>;
 
+  const canUseCalendarAttendance = canManageGroupAttendance && department.enabledModules?.includes("church-calendar");
+  if (canUseCalendarAttendance && calendarAttendanceOpen) {
+    return <CalendarGroupAttendance key={departmentId} departmentId={departmentId} csrfToken={csrfToken}
+      timeZone={department.timeZone} realtime={realtime}
+      parentByGroup={new Map(groups.flatMap(group => group.parentGroupId ? [[group.id, group.parentGroupId]] : []))}
+      onBack={() => setCalendarAttendanceOpen(false)} />;
+  }
   if (canManageGroupAttendance && groupAttendanceOpen) {
     return <GroupMeetingAttendance key={departmentId} departmentId={departmentId} csrfToken={csrfToken} realtime={realtime} showAttendanceCodes printOptions={printOptions} onBack={() => setGroupAttendanceOpen(false)} />;
   }
@@ -364,7 +373,7 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
   }
 
   return <main className="checkin-module">
-    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a service event and groups to build a shared attendee roster.</p></div><div className="checkin-print-actions">{canManageGroupAttendance && <button type="button" className="checkin-print" onClick={() => setGroupAttendanceOpen(true)}>Group meeting attendance</button>}{canManage && <button type="button" className="checkin-print" disabled={!rosterReady || busy || visitorBusy} onClick={() => { setQuery(""); setCodeQuery(""); setAttendanceFilter("all"); setStationScope(rosterScope); }}>Open check-in station</button>}<button type="button" className="checkin-print" onClick={() => printRoster("labels")} disabled={!rosterReady || !shown.length}><Printer size={17}/> Print name labels</button>{canManage && <button type="button" className="checkin-print" onClick={() => printRoster("pickup")} disabled={!rosterReady || !presentForPickup.length}><Printer size={17}/> Print pickup pairs</button>}</div></header>
+    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a service event and groups to build a shared attendee roster.</p></div><div className="checkin-print-actions">{canManageGroupAttendance && <button type="button" className="checkin-print" onClick={() => setGroupAttendanceOpen(true)}>Group meeting attendance</button>}{canUseCalendarAttendance && <button type="button" className="checkin-print" onClick={() => setCalendarAttendanceOpen(true)}>Calendar appointment check-in</button>}{canManage && <button type="button" className="checkin-print" disabled={!rosterReady || busy || visitorBusy} onClick={() => { setQuery(""); setCodeQuery(""); setAttendanceFilter("all"); setStationScope(rosterScope); }}>Open check-in station</button>}<button type="button" className="checkin-print" onClick={() => printRoster("labels")} disabled={!rosterReady || !shown.length}><Printer size={17}/> Print name labels</button>{canManage && <button type="button" className="checkin-print" onClick={() => printRoster("pickup")} disabled={!rosterReady || !presentForPickup.length}><Printer size={17}/> Print pickup pairs</button>}</div></header>
     {error && <div className="checkin-error" role="alert">{error}</div>}
     {printOptionsPanel}
     <div className="checkin-view-controls">

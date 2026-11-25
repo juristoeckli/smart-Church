@@ -1,3 +1,4 @@
+import { registerCalendarGroupAttendance } from "./calendar-group-attendance.js";
 import { registerSignupAssignment } from "./signup-assignment.js";
 import { registerSignupAppointmentLinks } from "./signup-appointment-links.js";
 import { registerCalendarSignupSchedule, setSignupSchedule, signupLeadDaysSchema, signupDeactivateDaysSchema, startCalendarSignupWorker } from "./signup-schedule.js";
@@ -266,6 +267,7 @@ async function moveCalendarOccurrenceLinks(db: PoolClient, oldId: string, newId:
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  registerCalendarGroupAttendance(app, context);
   registerCalendarEmailSubscriptions(app, context);
   registerCalendarReplication(context);
   registerAppointmentTemplates(app, context, canManageCalendar);
