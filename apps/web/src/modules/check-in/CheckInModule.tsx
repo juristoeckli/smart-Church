@@ -347,7 +347,7 @@ export function CheckInModule({ csrfToken, department, departmentId, accountId, 
 
   if (canUseCalendarAttendance && (calendarAttendanceOpen || calendarTarget)) {
     return <CalendarGroupAttendance key={JSON.stringify([departmentId, accountId, calendarTarget?.requestId])}
-      departmentId={departmentId} csrfToken={csrfToken} initialTarget={calendarTarget ?? undefined}
+      departmentId={departmentId} csrfToken={csrfToken} initialTarget={calendarTarget ?? undefined} printOptions={printOptions}
       timeZone={department.timeZone} realtime={realtime}
       parentByGroup={new Map(groups.flatMap(group => group.parentGroupId ? [[group.id, group.parentGroupId]] : []))}
       onBack={() => {

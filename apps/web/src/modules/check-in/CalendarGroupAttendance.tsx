@@ -2,19 +2,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
 import { setGroupAttendanceCompletion, type CompletionFeedbackDraft, type GroupAttendanceStatus } from "../../group-attendance";
 import { checkInLocationDate, checkInOccurrenceKey } from "../../check-in-navigation";
+import { useCheckInLabelTemplates } from "./CheckInLabelTemplates";
+import { checkInPrintItems, readCheckInPrintOptions, writeCheckInPrintDocument, type CheckInPrintOptions } from "./printing";
 import type { CalendarAppointmentTarget, ModuleRealtime } from "../../module-registry";
 
 type Appointment = { appointmentId: string; originalOccurrenceStartAt: string; occurrenceStartAt: string; viewStartsAt?: string; title: string; calendarName: string; calendarScope: string; groupId?: string | null; signupGroupId?: string | null };
 type Group = { id: string; name: string; status?: string; importedFrom?: string };
 type Attendee = { groupId: string; contactId: string; firstName: string; lastName: string; role: string | null; status: GroupAttendanceStatus };
+type PrintPerson = Pick<Attendee, "firstName" | "lastName"> & { groups: string[] };
 type Roster = { groups: Group[]; meetings: { id: string; groupId: string; completedAt: string | null }[]; attendees: Attendee[] };
 
 const occurrenceValue = (appointment: Appointment) =>
   checkInOccurrenceKey({ appointmentId: appointment.appointmentId, originalStartAt: appointment.originalOccurrenceStartAt });
 
-export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, parentByGroup, realtime, initialTarget, onBack }: {
-  departmentId: string; csrfToken: string; timeZone: string; parentByGroup: ReadonlyMap<string, string>; realtime?: ModuleRealtime; initialTarget?: CalendarAppointmentTarget; onBack: () => void;
+export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, parentByGroup, realtime, initialTarget, printOptions = readCheckInPrintOptions(""), onBack }: {
+  departmentId: string; csrfToken: string; timeZone: string; parentByGroup: ReadonlyMap<string, string>; realtime?: ModuleRealtime; initialTarget?: CalendarAppointmentTarget; printOptions?: CheckInPrintOptions; onBack: () => void;
 }) {
+  const labelTemplates = useCheckInLabelTemplates(departmentId, realtime);
   const [date, setDate] = useState(() => initialTarget?.date ?? checkInLocationDate(timeZone));
   const [linkedTarget, setLinkedTarget] = useState(initialTarget);
   const [groupDirectory, setGroups] = useState<Group[]>();
@@ -107,6 +111,11 @@ export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, par
   const tooManyGroups = selectedGroups.size > 25;
   const groupKey = tooManyGroups ? "" : [...selectedGroups].sort().join(",");
   const rosterKey = JSON.stringify([path, groupKey]);
+  const activePrintScope = useRef<string | null>(null);
+  useEffect(() => {
+    activePrintScope.current = rosterKey;
+    return () => { activePrintScope.current = null; };
+  }, [rosterKey]);
   const roster = loaded?.key === rosterKey ? loaded.roster : undefined;
   const refreshing = loaded?.revision !== revision;
   const refresh = () => setRevision(value => value + 1);
@@ -127,17 +136,56 @@ export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, par
     });
   }, [departmentId, realtime, groupKey, path]);
 
-  async function mark(row: Attendee) {
-    if (!path || busy || refreshing) return;
+  function openPrintWindow() {
+    const windowForLabels = window.open("", "_blank");
+    if (!windowForLabels) {
+      setError("Allow pop-ups to open the Check-in print view.");
+      return null;
+    }
+    windowForLabels.opener = null;
+    windowForLabels.document.body.textContent = "Preparing Check-in labels…";
+    return windowForLabels;
+  }
+
+  function finishLabels(windowForLabels: Window, people: PrintPerson[]) {
+    if (!appointment || windowForLabels.closed) return;
+    try {
+      const items = people.flatMap(person => checkInPrintItems(person, appointment.title, "", "labels", printOptions,
+        { templates: labelTemplates.data?.templates, date }));
+      writeCheckInPrintDocument(windowForLabels.document, "Calendar check-in name labels", items, printOptions);
+      windowForLabels.focus();
+      windowForLabels.print();
+    } catch {
+      windowForLabels.close();
+      setError("The print preview could not open. Try printing the label again.");
+    }
+  }
+
+  function printLabels(people: PrintPerson[]) {
+    if (!appointment || busy || refreshing || !people.length) return;
+    const windowForLabels = openPrintWindow();
+    if (windowForLabels) finishLabels(windowForLabels, people);
+  }
+
+  async function mark(row: Attendee, print = false) {
+    if (!path || busy || refreshing || meetingsByGroup.get(row.groupId)?.completedAt) return;
     const present = row.status !== "present";
+    const windowForLabels = print && present ? openPrintWindow() : null;
+    if (print && !windowForLabels) return;
     setBusy(true);
     setError("");
     setNotice("");
     try {
-      await request(path + "/groups/" + row.groupId + "/attendees/" + row.contactId, undefined, { present, expectedStatus: row.status });
+      const saved = await request<{ status: GroupAttendanceStatus }>(path + "/groups/" + row.groupId + "/attendees/" + row.contactId,
+        undefined, { present, expectedStatus: row.status });
+      if (windowForLabels) {
+        if (activePrintScope.current === rosterKey && saved.status === "present") finishLabels(windowForLabels, [labelPerson(row)]);
+        else windowForLabels.close();
+      }
       setNotice(present ? "Attendance recorded." : "Attendance reset.");
       refresh();
     } catch (reason) {
+      windowForLabels?.close();
       setError(reason instanceof Error ? reason.message : "Could not record attendance.");
       refresh();
     } finally { setBusy(false); }
@@ -168,12 +216,27 @@ export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, par
     memberships.push(row);
     attendeesByPerson.set(row.contactId, memberships);
   }
+  function labelPerson(row: Attendee, memberships = [row]): PrintPerson {
+    return { firstName: row.firstName, lastName: row.lastName,
+      groups: [...new Set(memberships.map(item => groupNames.get(item.groupId) ?? "").filter(Boolean))] };
+  }
+  const presentLabels = Array.from(attendeesByPerson.values()).flatMap(memberships => {
+    const present = memberships.filter(row => row.status === "present");
+    return present.length ? [labelPerson(present[0], present)] : [];
+  });
   function attendanceControl(row: Attendee, groupName: string) {
+    const completed = Boolean(meetingsByGroup.get(row.groupId)?.completedAt);
     return <>
       <span>{row.status === "present" ? "Present" : row.status === "excused" ? "Excused" : "Absent"}</span>
-      <button type="button" className="checkin-print" disabled={busy || refreshing || Boolean(meetingsByGroup.get(row.groupId)?.completedAt)}
+      <button type="button" className="checkin-print" disabled={busy || refreshing || completed}
         aria-label={(row.status === "present" ? "Reset " : "Mark present: ") + row.firstName + " " + row.lastName + " · " + groupName}
         onClick={() => void mark(row)}>{row.status === "present" ? "Reset" : "Mark present"}</button>
+      {row.status === "present" ? <button type="button" className="checkin-print" disabled={busy || refreshing}
+        aria-label={"Print label for " + row.firstName + " " + row.lastName + " · " + groupName}
+        onClick={() => printLabels([labelPerson(row)])}>Print label</button> :
+        <button type="button" className="checkin-print" disabled={busy || refreshing || completed}
+          aria-label={"Check in and print label for " + row.firstName + " " + row.lastName + " · " + groupName}
+          onClick={() => void mark(row, true)}>Check in &amp; print</button>}
     </>;
   }
   return <main className="checkin-module">
@@ -214,6 +277,8 @@ export function CalendarGroupAttendance({ departmentId, csrfToken, timeZone, par
         </select></label>
         <label>Find attendee<input type="search" value={search} onChange={event => setSearch(event.target.value)} /></label>
         <label><input type="checkbox" checked={hidePresent} onChange={event => setHidePresent(event.target.checked)} /> Hide present attendees</label>
+        <button type="button" className="checkin-print" disabled={busy || refreshing || !presentLabels.length}
+          onClick={() => printLabels(presentLabels)}>Print visible present labels</button>
         <button type="button" className="checkin-print" disabled={busy} onClick={refresh}>Refresh attendance</button>
       </div>
       {roster.groups.map(group => {
