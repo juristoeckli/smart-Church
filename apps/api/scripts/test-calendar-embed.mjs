@@ -8,7 +8,7 @@ const hook = registerHooks({ resolve(specifier, context, next) {
     throw error;
   }
 } });
-const { publicEmbedCalendarWindow, renderCalendarEmbed } = await import("../src/modules/church-calendar/calendar-embed.ts");
+const { publicEmbedCalendarWindow, publicEmbedDateRange, publicEmbedCalendarSelection, renderCalendarEmbed } = await import("../src/modules/church-calendar/calendar-embed.ts");
 hook.deregister();
 
 function appointment(id, day, title, subtitle = "", place = "") {
@@ -51,5 +51,20 @@ assert.match(grid, /aria-current="page">Week/);
 assert.match(grid, /Open workshop/);
 assert.doesNotMatch(grid, /Earlier unrelated event|Collection/);
 assert.match(grid, /searchEntry=cafe/);
+
+const today = "2026-11-21";
+const fixed = { viewname: "calView", period: "week", startdate: "2026-11-23", enddate: "2026-11-26" };
+assert.deepEqual(publicEmbedDateRange(today, fixed), { from: "2026-11-23", to: "2026-11-26" });
+assert.equal(publicEmbedCalendarWindow(today, { ...fixed, date: "2026-11-27" }), null);
+const fixedWeek = publicEmbedCalendarWindow(today, fixed);
+assert.deepEqual([fixedWeek.from, fixedWeek.to, fixedWeek.previous, fixedWeek.next], ["2026-11-23", "2026-11-26", null, null]);
+const fixedGrid = renderCalendarEmbed("Community Calendar", [...appointments], "Europe/Zurich", fixed, fixedWeek);
+assert.match(fixedGrid, /startdate=2026-11-23/);
+assert.match(fixedGrid, /enddate=2026-11-26/);
+const choices = [{ id: "a", name: "First" }, { id: "b", name: "Second" }];
+assert.deepEqual(publicEmbedCalendarSelection(choices, { category_id: "a,revoked", category_select: "a,b" }), {
+  choices: [choices[0]], selectedIds: ["a"],
+});
+assert.deepEqual(publicEmbedCalendarSelection(choices, { category_select: "" }).selectedIds, []);
 
 console.log("Calendar embed regressions passed.");
