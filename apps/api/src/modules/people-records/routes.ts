@@ -318,6 +318,69 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position,visibility,category,text_max_length) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0),$8,$9,$10)", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false,b.visibility ?? "private_people",b.category?.trim() || null,b.textMaxLength??null]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
       changed(d); return reply.code(201).send({ id });
     });
+    type ChoiceOptionChange = { add: string } | { from: number; direction: "up" | "down" };
+    const optionChangeSchema = {
+      type: "object", additionalProperties: false,
+      properties: {
+        add: { type: "string", minLength: 1, maxLength: 120 },
+        from: { type: "integer", minimum: 0, maximum: 99 },
+        direction: { type: "string", enum: ["up", "down"] },
+      },
+      oneOf: [{ required: ["add"], not: { anyOf: [{ required: ["from"] }, { required: ["direction"] }] } },
+        { required: ["from", "direction"], not: { required: ["add"] } }],
+    } as const;
+    routes.patch<{ Params: { id: string }; Body: { expected: string[]; change: ChoiceOptionChange } }>("/api/people-records/fields/:id/options", {
+      schema: {
+        params: { type: "object", required: ["id"], properties: { id: uuid } },
+        body: { type: "object", additionalProperties: false, required: ["expected", "change"],
+          properties: { expected: { type: "array", maxItems: 100, items: { type: "string" } }, change: optionChangeSchema } },
+      },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId || !validateMutation(request, reply)) return reply;
+      const { expected, change } = request.body;
+      const fieldId = request.params.id;
+      const client = await pool!.connect();
+      let committed = false;
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          return reply.code(409).send({ error: "This location cannot be changed on this installation." });
+        }
+        const { rows: [field] } = await client.query<{ options: unknown }>(
+          "SELECT options FROM people_record_fields WHERE department_id=$1 AND id=$2 AND field_type='select' FOR UPDATE",
+          [departmentId, fieldId],
+        );
+        if (!field) return reply.code(404).send({ error: "Choice field not found at this location." });
+        if (!Array.isArray(field.options) || field.options.length !== expected.length ||
+            field.options.some((option, index) => option !== expected[index])) {
+          return reply.code(409).send({ error: "These options changed. Refresh before editing them again." });
+        }
+        const next = [...expected];
+        if ("add" in change) {
+          const option = change.add.trim();
+          if (!option || next.includes(option) || next.length >= 100) {
+            return reply.code(400).send({ error: "Enter a new non-empty option. A field can have up to 100 choices." });
+          }
+          next.push(option);
+        } else {
+          const to = change.from + (change.direction === "up" ? -1 : 1);
+          if (change.from >= next.length || to < 0 || to >= next.length) {
+            return reply.code(400).send({ error: "That option cannot move in this direction." });
+          }
+          [next[change.from], next[to]] = [next[to], next[change.from]];
+        }
+        await client.query("UPDATE people_record_fields SET options=$3::jsonb,updated_at=now() WHERE department_id=$1 AND id=$2",
+          [departmentId, fieldId, JSON.stringify(next)]);
+        await client.query("COMMIT");
+        committed = true;
+        changed(departmentId);
+        return { options: next };
+      } finally {
+        try { if (!committed) await client.query("ROLLBACK"); }
+        finally { client.release(); }
+      }
+    });
     const tagColorSchema = { anyOf: [{ type: "string", pattern: "^#[0-9a-f]{6}$" }, { type: "null" }] } as const;
     const tagLabelSchema = { type: "string", minLength: 1, maxLength: 100 } as const;
     const tagPresentationSchema = { type: "object", additionalProperties: false, required: ["label", "color"], properties: {
