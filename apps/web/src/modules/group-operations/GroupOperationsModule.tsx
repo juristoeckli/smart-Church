@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Award, Check, Download, ClipboardCheck, Play, Plus, RotateCcw } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import "./group-operations.css";
@@ -177,19 +177,51 @@ function GroupOperationsWorkspace({ departmentId, csrfToken }: ModuleContext) {
 
   async function mutate(path: string, method: string, body: object, done: string) {
     setBusy(true); setError(""); setMessage("");
-    try { await request(path, { method, body: JSON.stringify(body) }); setMessage(done); await load(); }
+    try { await request(path, { method, body: JSON.stringify(body) }); setMessage(done); await load(); return true; }
     catch (reason) { setError(reason instanceof Error ? reason.message : "The action could not be completed."); }
     finally { setBusy(false); }
   }
   async function createRoutine(event: FormEvent) { event.preventDefault(); if (!groupId) return; await mutate("/api/modules/group-operations/routines", "POST", { groupId, ...routineDraft }, "Routine created."); setRoutineDraft({ name: "", description: "", cadence: "manual" }); }
   async function createRun(event: FormEvent) { event.preventDefault(); await mutate("/api/modules/group-operations/routine-runs", "POST", { ...runDraft, assignedContactId: runDraft.assignedContactId || null }, "Routine run scheduled."); setRunDraft((value) => ({ ...value, notes: "" })); }
-  async function createCertificate(event: FormEvent) { event.preventDefault(); if (!groupId) return; await mutate("/api/modules/group-operations/certificates", "POST", { groupId, ...certDraft }, "Certificate definition created."); setCertDraft({ name: "", description: "", documentText: "" }); }
+  async function createCertificate(event: FormEvent) { event.preventDefault(); if (!groupId) return; if (await mutate("/api/modules/group-operations/certificates", "POST", { groupId, ...certDraft }, "Certificate definition created.")) setCertDraft({ name: "", description: "", documentText: "" }); }
   async function issueCertificate(event: FormEvent) { event.preventDefault(); const cert = certificates.find((item) => item.id === issueDraft.certificateId); if (!cert) return; if (cert.groupId !== groupId) { setError("Choose a certificate for the selected group."); return; } await mutate("/api/modules/group-operations/certificates/issue", "POST", { ...issueDraft, validUntil: issueDraft.validUntil || null }, "Certificate issued."); }
   async function createRule(event: FormEvent) { event.preventDefault(); if (!groupId) return; await mutate("/api/modules/group-operations/membership-rules", "POST", { groupId, ...ruleDraft }, "Membership rule saved. Preview it before applying."); setRuleDraft({ name: "", contactStatus: "member" }); setPreview(null); }
   async function createFollowUp(event: FormEvent) { event.preventDefault(); if (!groupId) return; await mutate("/api/modules/group-operations/follow-ups", "POST", { groupId, ...followUpDraft, assignedContactId: followUpDraft.assignedContactId || null }, "Follow-up task created."); setFollowUpDraft((current) => ({ ...current, contactId: "", assignedContactId: "", subject: "", note: "" })); }
   async function loadPreview(rule: Rule) { setError(""); setPreview(null); try { setPreview(await request<Preview>(`/api/modules/group-operations/membership-rules/${rule.id}/preview`)); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview the rule."); } }
   async function applyRule(rule: Rule) { if (!preview?.applyEnabled || preview.rule.id !== rule.id) return; if (!window.confirm(`Add up to 500 matching people to ${rule.groupName}? This only adds members; it never removes anyone.`)) return; await mutate(`/api/modules/group-operations/membership-rules/${rule.id}/apply`, "POST", {}, "Membership rule applied. No existing memberships were removed."); setPreview(null); }
   async function updateRun(run: Run) { await mutate(`/api/modules/group-operations/routine-runs/${run.id}`, "PATCH", { status: run.status === "open" ? "completed" : "open", notes: run.notes }, run.status === "open" ? "Routine marked complete." : "Routine reopened."); }
+  async function importCertificateTemplate(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file || busy) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      if (file.size > 16 * 1024) throw new Error("The certificate JSON must be 16 KiB or smaller.");
+      let parsed: unknown;
+      try { parsed = JSON.parse(await file.text()); }
+      catch { throw new Error("The certificate template is not valid JSON."); }
+      const template = await request<typeof certDraft>("/api/modules/group-operations/certificates/templates/preview",
+        { method: "POST", body: JSON.stringify(parsed) });
+      setCertDraft(template);
+      setMessage("Template loaded into the editor. Review it and save it to the selected group.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not read the certificate template."); }
+    finally { setBusy(false); }
+  }
+
+  async function exportCertificateTemplate(certificateId: string) {
+    if (busy) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const template = await request<unknown>(`/api/modules/group-operations/certificates/${certificateId}/template`);
+      const data = new Blob([JSON.stringify(template, null, 2) + "\n"], { type: "application/json" });
+      const url = URL.createObjectURL(data);
+      const link = document.createElement("a");
+      try { link.href = url; link.download = "group-certificate-template.json"; link.click(); }
+      finally { URL.revokeObjectURL(url); }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not export the certificate template."); }
+    finally { setBusy(false); }
+  }
+
   async function downloadCertificate(issue: Issue, format: "pdf" | "print") {
     if (busy || issue.revokedAt) return;
     const preview = format === "print" ? window.open("about:blank", "_blank") : null;
@@ -338,6 +370,9 @@ function GroupOperationsWorkspace({ departmentId, csrfToken }: ModuleContext) {
     {section === "certificates" && <div className="go-layout">
       {canManage && <section className="go-panel">
         <h2>Certificate definitions</h2>
+        <label>Load a Smart-Church certificate template
+          <input type="file" accept=".json,application/json" disabled={busy || !groupId} onChange={event => void importCertificateTemplate(event)} />
+        </label>
         <form onSubmit={(event) => void createCertificate(event)} className="go-form">
           <label>Name<input required maxLength={120} value={certDraft.name} onChange={(event) => setCertDraft({ ...certDraft, name: event.target.value })} /></label>
           <label>Internal description<input maxLength={1000} value={certDraft.description} onChange={(event) => setCertDraft({ ...certDraft, description: event.target.value })} /></label>
@@ -347,7 +382,8 @@ function GroupOperationsWorkspace({ departmentId, csrfToken }: ModuleContext) {
         </form>
         <div className="go-list">{visibleCertificates.map((cert) => <article key={cert.id}><div>
           <strong>{cert.name}</strong><small>{cert.groupName} · {cert.active ? "Active" : "Archived"}</small>{cert.description && <p>{cert.description}</p>}
-        </div></article>)}</div>
+        </div><button type="button" className="button button-secondary" disabled={busy}
+          onClick={() => void exportCertificateTemplate(cert.id)} aria-label={`Export template for ${cert.name}`}>Export JSON</button></article>)}</div>
       </section>}
       <section className="go-panel">
         {canManage && <>

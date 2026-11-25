@@ -570,6 +570,43 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
 
+  const certificateTemplateFormat = "smart-church-group-certificate-template";
+  app.get<{ Params: { id: string } }>("/api/modules/group-operations/certificates/:id/template", {
+    schema: { params: { type: "object", required: ["id"], properties: { id: uuid } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    const { rows: [template] } = await pool!.query<{ name: string; description: string; documentText: string }>(
+      `SELECT cert.name,cert.description,cert.document_text AS "documentText"
+         FROM group_certificate_definitions cert JOIN church_groups g ON g.id=cert.group_id AND g.department_id=cert.department_id
+        WHERE cert.department_id=$1 AND cert.id=$2`, [departmentId, request.params.id]);
+    reply.header("cache-control", "private, no-store").header("x-content-type-options", "nosniff");
+    if (!template) return reply.code(404).send({ error: "Certificate template not found in this location." });
+    return reply.header("content-disposition", 'attachment; filename="group-certificate-template.json"')
+      .send({ format: certificateTemplateFormat, version: 1, ...template });
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/api/modules/group-operations/certificates/templates/preview", {
+    bodyLimit: 16 * 1024,
+    schema: { body: { type: "object" } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true);
+    if (!departmentId || !validateMutation(request, reply)) return reply;
+    const { format, version, name, description, documentText } = request.body;
+    if (format !== certificateTemplateFormat || version !== 1 ||
+        Object.keys(request.body).some(key => !["format", "version", "name", "description", "documentText"].includes(key)) ||
+        typeof name !== "string" || !name.trim() || name.length > 120 ||
+        typeof description !== "string" || description.length > 1000 ||
+        typeof documentText !== "string" || documentText.length > 1000 ||
+        [name, description, documentText].some(value => value.includes("\u0000"))) {
+      return reply.code(400).send({ error: "Choose a valid Smart-Church group certificate template JSON file." });
+    }
+    if (!validCertificateTemplate(documentText)) {
+      return reply.code(400).send({ error: "The template uses a placeholder that Smart-Church does not support." });
+    }
+    return reply.header("cache-control", "private, no-store")
+      .send({ name: name.trim(), description: description.trim(), documentText: documentText.trim() });
+  });
+
   app.post<{ Body: { groupId: string; name: string; description?: string; documentText?: string } }>("/api/modules/group-operations/certificates", {
     schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "name"], properties: { groupId: uuid, name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 }, documentText: { type: "string", maxLength: 1000 } } } },
   }, async (request, reply) => {
