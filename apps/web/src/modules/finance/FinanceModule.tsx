@@ -91,7 +91,8 @@ type Tab = "transactions" | "accounts" | "donors" | "budgets" | "accounting-year
 type ReceiptSettings = { organizationName: string; templateText: string; numberingPrefix: string };
 type ReceiptPreview = { donorId: string; donorName: string; donorEmail: string; amountCents: number; donationCount: number };
 type IssuedReceipt = { id: string; batchId: string; receiptNumber: string; donorName: string; amountCents: number; currency: string; periodStart: string; periodEnd: string; printUrl: string; batchPrintUrl: string; createdAt?: string };
-type BankImport = { id: string; fileName: string; importedAt: string; rowCount: number; accountCode: string; accountName: string; matched: number; suggested: number; unmatched: number; ignored: number };
+type BankImportAccount = { id: string; code: string; name: string; statementCount: number; archivedCount: number; rowCount: number; matched: number };
+type BankImport = { id: string; accountId: string; fileName: string; importedAt: string; rowCount: number; accountCode: string; accountName: string; matched: number; suggested: number; unmatched: number; ignored: number };
 type PaypalBookingMode = "payment" | "transfer";
 type BankRow = { paypal: { grossCents: number; feeCents: number; currency: string } | null; id: string; accountId: string; lineNumber: number; bookingDate: string; description: string; reference: string; amountCents: number; status: "unmatched" | "suggested" | "matched" | "ignored"; suggestedTransactionId: string | null; matchedTransactionId: string | null; transactionReceipt: string | null; transactionText: string | null };
 type StatementCounterLine = { key: string; accountId: string; costCenterId: string; amount: string };
@@ -100,7 +101,7 @@ type StatementReviewDraft = { posting: BankPosting; receiptNumber: string; booki
 const newCounterLine = (): StatementCounterLine => ({ key: crypto.randomUUID(), accountId: "", costCenterId: "", amount: "" });
 type BankSuggestionRule = { id: string; accountId: string; accountCode: string; accountName: string; name: string; statementContains: string; transactionContains: string; priority: number; active: boolean };
 type BankPreview = { format?: "mt940" | "camt053" | "paypal" | "zip"; profile?: "stuzza";
-  archiveFormat?: "mt940" | "camt053" | "paypal"; accountingYear?: number; files?: { fileName: string; rowCount: number; alreadyImported: boolean; overlapCount?: number }[]; overlapCount?: number; ignoredCount?: number; accountEnding?: string; currency?: string; rememberedAccountId?: string | null; headers: string[]; rowCount: number; duplicate: boolean; sample: string[][] };
+  archiveFormat?: "mt940" | "camt053" | "paypal"; accountingYear?: number; files?: { fileName: string; rowCount: number; alreadyImported: boolean; overlapCount?: number }[]; overlapCount?: number; ignoredCount?: number; accountEnding?: string; currency?: string; rememberedAccountId?: string | null; headers: string[]; rowCount: number; archivedDuplicate?: boolean; duplicate: boolean; sample: string[][] };
 
 const money = (cents: number | string, currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(cents || 0) / 100);
 const today = () => new Date().toISOString().slice(0, 10);
@@ -219,6 +220,11 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
   const [receiptFrom, setReceiptFrom] = useState(`${new Date().getFullYear()}-01-01`);
   const [receiptTo, setReceiptTo] = useState(`${new Date().getFullYear()}-12-31`);
   const [receiptCollective, setReceiptCollective] = useState(true);
+  const [bankImportAccounts, setBankImportAccounts] = useState<BankImportAccount[]>([]);
+  const [bankBrowseAccountId, setBankBrowseAccountId] = useState("");
+  const [showArchivedBankStatements, setShowArchivedBankStatements] = useState(false);
+  const bankBrowseVersion = useRef(0);
+  const bankRowsVersion = useRef(0);
   const [bankImports, setBankImports] = useState<BankImport[]>([]);
   const [bankRules, setBankRules] = useState<BankSuggestionRule[]>([]);
   const [bankRuleDraft, setBankRuleDraft] = useState({ name: "", accountId: "", statementContains: "", transactionContains: "", priority: "100" });
@@ -235,6 +241,10 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
   bankDepartment.current = departmentId;
   useEffect(() => {
     bankFileRead.current++;
+    ++bankBrowseVersion.current;
+    ++bankRowsVersion.current;
+    setBankImports([]); setBankImportAccounts([]); setBankBrowseAccountId(""); setShowArchivedBankStatements(false);
+    setSelectedBankImportId(""); setBankRows([]); setBankMatchChoice({}); setBankRules([]);
     statementReviewDrafts.current.clear();
     setBankPosting(null);
     setShowPosting(false);
@@ -466,7 +476,7 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
     await action(async () => { await send("/api/modules/finance/transactions", "POST", {
       bookingDate,bookingText,lines:payload,...(bankPosting ? { bankStatementRowId: bankPosting.row.id, ...(bankPosting.purposeId ? { bookingPurposeId: bankPosting.purposeId } : {}), ...(paypal ? { paypalBookingMode: bankPosting.paypalMode } : {}) } : {}),...(automaticReceipt ? {submissionId:journalSubmissionId.current} : {receiptNumber}),
     }); closePosting(); setReceiptNumber(""); setBookingText(""); setLines([initialLine(), initialLine()]);
-      if (bankPosting) await openBankImport(selectedBankImportId);
+      if (bankPosting) await openBankStatements();
     }, bankPosting ? "Transaction posted and matched to the statement row." : "Transaction posted and recorded in the audit trail.");
   }
 
@@ -562,23 +572,47 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
     }, "Donation receipt(s) issued and recorded.");
   }
 
-  async function openBankStatements() {
+  async function openBankStatements(accountId = bankBrowseAccountId, archived = showArchivedBankStatements, preferredId = selectedBankImportId) {
     setTab("bank-statements"); setError(""); setFeedback("");
+    const version = ++bankBrowseVersion.current;
+    const params = new URLSearchParams({ archived: String(archived) });
+    if (accountId) params.set("accountId", accountId);
     try {
-      const [imports, rules] = await Promise.all([send<BankImport[]>("/api/modules/finance/bank-statements"), send<BankSuggestionRule[]>("/api/modules/finance/bank-suggestion-rules")]);
+      const [imports, rules, accounts] = await Promise.all([
+        send<BankImport[]>(`/api/modules/finance/bank-statements?${params}`),
+        send<BankSuggestionRule[]>("/api/modules/finance/bank-suggestion-rules"),
+        send<BankImportAccount[]>("/api/modules/finance/bank-statements/accounts"),
+      ]);
+      if (version !== bankBrowseVersion.current || bankDepartment.current !== departmentId) return;
       setBankImports(imports);
       setBankRules(rules);
-      if (selectedBankImportId) await openBankImport(selectedBankImportId);
-      else if (imports[0]) await openBankImport(imports[0].id);
-      else { setSelectedBankImportId(""); setBankRows([]); }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load bank statements."); }
+      setBankImportAccounts(accounts);
+      setBankBrowseAccountId(accountId);
+      setShowArchivedBankStatements(archived);
+      const selected = imports.find(item => item.id === preferredId) ?? imports[0];
+      if (selected) await openBankImport(selected.id);
+      else { ++bankRowsVersion.current; setSelectedBankImportId(""); setBankRows([]); }
+    } catch (reason) {
+      if (version === bankBrowseVersion.current && bankDepartment.current === departmentId) {
+        setError(reason instanceof Error ? reason.message : "Could not load bank statements.");
+      }
+    }
   }
 
   async function openBankImport(id: string) {
+    const version = ++bankRowsVersion.current;
     setSelectedBankImportId(id);
-    const rows = await send<BankRow[]>(`/api/modules/finance/bank-statements/${id}`);
-    setBankRows(rows);
-    setBankMatchChoice(Object.fromEntries(rows.filter((row) => row.suggestedTransactionId || row.matchedTransactionId).map((row) => [row.id, row.matchedTransactionId ?? row.suggestedTransactionId ?? ""])));
+    setBankRows([]);
+    try {
+      const rows = await send<BankRow[]>(`/api/modules/finance/bank-statements/${id}`);
+      if (version !== bankRowsVersion.current || bankDepartment.current !== departmentId) return;
+      setBankRows(rows);
+      setBankMatchChoice(Object.fromEntries(rows.filter((row) => row.suggestedTransactionId || row.matchedTransactionId).map((row) => [row.id, row.matchedTransactionId ?? row.suggestedTransactionId ?? ""])));
+    } catch (reason) {
+      if (version === bankRowsVersion.current && bankDepartment.current === departmentId) {
+        setError(reason instanceof Error ? reason.message : "Could not load statement rows.");
+      }
+    }
   }
 
   async function readBankStatement(file: File | undefined) {
@@ -663,14 +697,26 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
             description: bankMapping.description === "" ? null : Number(bankMapping.description),
             reference: bankMapping.reference === "" ? null : Number(bankMapping.reference) } }) });
       setBankText(""); setBankFileName(""); setBankPreview(null); setBankSourceConfirmed(false); setBankRememberSource(false);
-      await openBankStatements();
-      await openBankImport(result.id);
+      await openBankStatements(bankAccountId, false, result.id);
       if (bankDepartment.current === departmentId) {
         setFeedback(`Imported ${result.rowCount} statement rows${result.fileCount ? ` from ${result.fileCount} ZIP members` : ""}. ${result.suggestedCount} possible ledger matches need review.`
           + (result.overlapCount ? ` Duplicate PayPal transactions skipped (${result.overlapCount}).` : ""));
       }
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import this statement."); }
     finally { setSaving(false); }
+  }
+
+  async function changeBankArchive(statement: BankImport, archived: boolean) {
+    if (archived && !window.confirm(`Archive "${statement.fileName}"? Its imported rows will be kept and can be restored.`)) return;
+    setSaving(true); setError(""); setFeedback("");
+    try {
+      await send(`/api/modules/finance/bank-statements/${statement.id}/archive`, "PUT", { archived });
+      if (bankDepartment.current !== departmentId) return;
+      await openBankStatements(bankBrowseAccountId, archived, statement.id);
+      setFeedback(archived ? "Statement moved to Archived statements." : "Statement restored to Imported statements.");
+    } catch (reason) {
+      if (bankDepartment.current === departmentId) setError(reason instanceof Error ? reason.message : "Could not change the statement archive.");
+    } finally { setSaving(false); }
   }
 
   async function recalculateBankSuggestions() {
@@ -694,9 +740,8 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
     setSaving(true); setError(""); setFeedback("");
     try {
       await send(`/api/modules/finance/bank-statement-rows/${row.id}/reconcile`, "PUT", { action, ...(action === "match" ? { transactionId: bankMatchChoice[row.id] ?? row.suggestedTransactionId } : {}) });
+      await openBankStatements();
       setFeedback(action === "match" ? "Statement row matched to the existing ledger posting." : "Statement row marked as ignored.");
-      await openBankImport(selectedBankImportId);
-      setBankImports(await send<BankImport[]>("/api/modules/finance/bank-statements"));
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not reconcile this statement row."); }
     finally { setSaving(false); }
   }
@@ -982,7 +1027,7 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
     </label>{bankText && (bankFormat === "paypal" || bankFormat === "zip") && <label>PayPal dates with slashes
       <select value={paypalDateOrder} disabled={saving} onChange={event => { setPaypalDateOrder(event.target.value); setBankPreview(null); setBankSourceConfirmed(false); }}>
         <option value="">Report dates have no slashes</option><option value="day-first">Day / month / year</option><option value="month-first">Month / day / year</option>
-      </select></label>}</div>{bankText && <div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => void previewBankStatement()} disabled={saving || !bankAccountId}>Preview file</button><span>{bankFileName}</span></div>}{bankPreview && <><p>{bankPreview.rowCount} statement rows found.{bankPreview.duplicate ? bankPreview.format === "zip" ? " All statements are already imported for this account." : " This exact file was already imported for this account." : ""}</p>{bankPreview.format === "paypal" && <p>PayPal Activity Report · {bankPreview.currency}. Skip duplicates ({bankPreview.overlapCount ?? 0}) and entries with no balance impact ({bankPreview.ignoredCount ?? 0}).</p>}{bankPreview.format === "zip" && <div><p>{bankPreview.archiveFormat === "paypal" ? "PayPal report archive" : `${bankStatementFormatName(bankPreview.archiveFormat, bankPreview.profile)} archive · Account ending in ${bankPreview.accountEnding}`} · {bankPreview.currency} · Accounting year {bankPreview.accountingYear}</p>
+      </select></label>}</div>{bankText && <div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => void previewBankStatement()} disabled={saving || !bankAccountId}>Preview file</button><span>{bankFileName}</span></div>}{bankPreview && <><p>{bankPreview.rowCount} statement rows found.{bankPreview.duplicate ? bankPreview.archivedDuplicate ? " This statement is archived. Restore it from Archived statements to review or post its rows." : bankPreview.format === "zip" ? " All statements are already imported for this account. Check Archived statements if you cannot find them." : " This exact file was already imported for this account." : ""}</p>{bankPreview.format === "paypal" && <p>PayPal Activity Report · {bankPreview.currency}. Skip duplicates ({bankPreview.overlapCount ?? 0}) and entries with no balance impact ({bankPreview.ignoredCount ?? 0}).</p>}{bankPreview.format === "zip" && <div><p>{bankPreview.archiveFormat === "paypal" ? "PayPal report archive" : `${bankStatementFormatName(bankPreview.archiveFormat, bankPreview.profile)} archive · Account ending in ${bankPreview.accountEnding}`} · {bankPreview.currency} · Accounting year {bankPreview.accountingYear}</p>
       {bankPreview.archiveFormat === "paypal" && <p>Skip duplicates ({bankPreview.overlapCount ?? 0}) and entries with no balance impact ({bankPreview.ignoredCount ?? 0}).</p>}
       <ul>{bankPreview.files?.map((member, index) => <li key={index}>{member.fileName} · {member.rowCount} {bankPreview.archiveFormat === "paypal" ? "new " : ""}{member.rowCount === 1 ? "row" : "rows"}{member.alreadyImported ? " · Already imported" : member.overlapCount ? ` · Duplicates skipped (${member.overlapCount})` : ""}</li>)}</ul>
     </div>}{bankPreview.format && bankPreview.format !== "paypal" && bankPreview.format !== "zip" && <p>{bankStatementFormatName(bankPreview.format, bankPreview.profile)} source account ending in {bankPreview.accountEnding} · {bankPreview.currency}</p>}
@@ -996,11 +1041,26 @@ function FullFinanceModule({ department, departmentId, csrfToken, canManageSite,
         onChange={event => setBankRememberSource(event.target.checked)} />
       {bankPreview.rememberedAccountId ? "Replace the remembered ledger account for this source after import" : "Remember this source account for future statements"}
     </label>}<div className="finance-action-row"><button className="button button-primary" type="button" onClick={() => void importBankStatement()} disabled={saving || bankPreview.duplicate || (bankPreview.format === "paypal" && !bankPreview.rowCount) || (bankPreview.format ? !bankSourceConfirmed : !bankMapping.date || !bankMapping.amount)}>Import and suggest matches</button></div></>}</div>}
-      <h3>Imported statements</h3>{bankImports.length ? <div className="finance-bank-import-list">{bankImports.map((item) => <button type="button" key={item.id} className={selectedBankImportId === item.id ? "is-selected" : ""} disabled={saving} onClick={() => void openBankImport(item.id)}><strong>{item.fileName}</strong><small>{item.accountCode} · {item.accountName} · {new Date(item.importedAt).toLocaleString()}</small><small>{item.rowCount} rows · {item.matched} matched · {item.suggested} suggested · {item.unmatched} unmatched · {item.ignored} ignored</small></button>)}</div> : <p className="finance-empty">No statement imports yet.</p>}
+      <div className="finance-section-heading"><h3>{showArchivedBankStatements ? "Archived statements" : "Imported statements"}</h3>
+        <label>Statement account<select value={bankBrowseAccountId} disabled={saving}
+          onChange={event => void openBankStatements(event.target.value, showArchivedBankStatements, "")}>
+          <option value="">All statement accounts</option>
+          {bankImportAccounts.map(account => <option key={account.id} value={account.id}>{account.code} · {account.name} ({account.matched}/{account.rowCount} matched, {account.statementCount} imported, {account.archivedCount} archived)</option>)}
+        </select></label>
+        <label><input type="checkbox" checked={showArchivedBankStatements} disabled={saving}
+          onChange={event => void openBankStatements(bankBrowseAccountId, event.target.checked, "")} /> Show archived statements</label>
+      </div>{bankImports.length ? <div className="finance-bank-import-list">{bankImports.map((item) => <button type="button" key={item.id} className={selectedBankImportId === item.id ? "is-selected" : ""} disabled={saving} onClick={() => void openBankImport(item.id)}><strong>{item.fileName}</strong><small>{item.accountCode} · {item.accountName} · {new Date(item.importedAt).toLocaleString()}</small><small>{item.rowCount} rows · {item.matched} matched · {item.suggested} suggested · {item.unmatched} unmatched · {item.ignored} ignored</small></button>)}</div> : <p className="finance-empty">{showArchivedBankStatements ? "No archived statements for this selection." : "No imported statements for this selection."}</p>}
       {selectedBankImportId && <><div className="finance-section-heading"><h3>Statement rows</h3>
-        {canManage && <button type="button" className="button button-secondary" disabled={saving}
-          onClick={() => void recalculateBankSuggestions()}><RefreshCw size={15} />Recalculate suggestions</button>}
-      </div>{bankRows.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>Date</th><th>Description / reference</th><th>Amount</th><th>Status</th><th>Ledger match</th>{canManage && <th>Action</th>}</tr></thead><tbody>{bankRows.map((row) => <tr key={row.id}><td>{new Date(`${row.bookingDate.slice(0, 10)}T00:00:00`).toLocaleDateString()}</td><td>{row.description}{row.reference && <small>{row.reference}</small>}</td><td>{money(row.amountCents, bootstrap.currency)}</td><td>{row.status}</td><td>{row.status === "matched" ? `${row.transactionReceipt ?? row.matchedTransactionId ?? "Matched"} · ${row.transactionText ?? ""}` : canManage && row.status !== "ignored" ? <select aria-label={`Ledger match for statement row ${row.lineNumber}`} value={bankMatchChoice[row.id] ?? ""} onChange={(event) => setBankMatchChoice({ ...bankMatchChoice, [row.id]: event.target.value })}><option value="">Choose a posting</option>{row.suggestedTransactionId && <option value={row.suggestedTransactionId}>Suggested: {row.transactionReceipt} · {row.transactionText}</option>}{transactions.map((transaction) => <option key={transaction.id} value={transaction.id}>{transaction.bookingDate} · {transaction.receiptNumber} · {transaction.bookingText}</option>)}</select> : row.status === "ignored" ? "Ignored" : row.transactionText ?? "No unique suggestion"}</td>{canManage && <td>{row.status !== "matched" && row.status !== "ignored" && <div className="finance-action-row"><button className="finance-text-button" type="button" disabled={saving || !(bankMatchChoice[row.id] ?? row.suggestedTransactionId)} onClick={() => void reconcileBankRow(row, "match")}>Match</button><button className="finance-text-button" type="button" disabled={saving} onClick={() => void reconcileBankRow(row, "ignore")}>Ignore</button>{row.status === "unmatched" && row.amountCents !== 0 &&
+        {canManage && <div className="finance-action-row">
+          {!showArchivedBankStatements && <button type="button" className="button button-secondary" disabled={saving}
+            onClick={() => void recalculateBankSuggestions()}><RefreshCw size={15} />Recalculate suggestions</button>}
+          {bankImports.filter(item => item.id === selectedBankImportId && (showArchivedBankStatements || item.matched === 0)).map(item =>
+            <button key={item.id} type="button" className="button button-secondary" disabled={saving}
+              onClick={() => void changeBankArchive(item, !showArchivedBankStatements)}>
+              {showArchivedBankStatements ? "Restore statement" : "Archive statement"}
+            </button>)}
+        </div>}
+      </div>{bankRows.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>Date</th><th>Description / reference</th><th>Amount</th><th>Status</th><th>Ledger match</th>{canManage && !showArchivedBankStatements && <th>Action</th>}</tr></thead><tbody>{bankRows.map((row) => <tr key={row.id}><td>{new Date(`${row.bookingDate.slice(0, 10)}T00:00:00`).toLocaleDateString()}</td><td>{row.description}{row.reference && <small>{row.reference}</small>}</td><td>{money(row.amountCents, bootstrap.currency)}</td><td>{row.status}</td><td>{row.status === "matched" ? `${row.transactionReceipt ?? row.matchedTransactionId ?? "Matched"} · ${row.transactionText ?? ""}` : canManage && !showArchivedBankStatements && row.status !== "ignored" ? <select aria-label={`Ledger match for statement row ${row.lineNumber}`} value={bankMatchChoice[row.id] ?? ""} onChange={(event) => setBankMatchChoice({ ...bankMatchChoice, [row.id]: event.target.value })}><option value="">Choose a posting</option>{row.suggestedTransactionId && <option value={row.suggestedTransactionId}>Suggested: {row.transactionReceipt} · {row.transactionText}</option>}{transactions.map((transaction) => <option key={transaction.id} value={transaction.id}>{transaction.bookingDate} · {transaction.receiptNumber} · {transaction.bookingText}</option>)}</select> : row.status === "ignored" ? "Ignored" : row.transactionText ?? "No unique suggestion"}</td>{canManage && !showArchivedBankStatements && <td>{row.status !== "matched" && row.status !== "ignored" && <div className="finance-action-row"><button className="finance-text-button" type="button" disabled={saving || !(bankMatchChoice[row.id] ?? row.suggestedTransactionId)} onClick={() => void reconcileBankRow(row, "match")}>Match</button><button className="finance-text-button" type="button" disabled={saving} onClick={() => void reconcileBankRow(row, "ignore")}>Ignore</button>{row.status === "unmatched" && row.amountCents !== 0 &&
       transitAccounts.some(account => account.id === row.accountId) &&
       <button className="finance-text-button" type="button" disabled={saving} onClick={() => openBankPosting(row)}>Post and match</button>}</div>}</td>}</tr>)}</tbody></table></div> : <p className="finance-empty">No statement rows in this import.</p>}</>}
     </section>}

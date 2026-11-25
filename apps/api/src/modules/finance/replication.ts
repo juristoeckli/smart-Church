@@ -20,6 +20,7 @@ const tables = {
   receiptBatches: { name: "finance_receipt_batches", key: "id", columns: "id accounting_year period_start period_end collective created_by created_at" },
   receipts: { name: "finance_donation_receipts", key: "id", columns: "id batch_id donor_id receipt_number donor_name_snapshot donor_email_snapshot amount_cents currency_code period_start period_end rendered_text transaction_ids created_at" },
   bankImports: { name: "finance_bank_statement_imports", key: "id", columns: "id account_id file_name content_sha256 imported_by imported_at row_count" },
+  bankArchive: { name: "finance_bank_statement_archive", key: "import_id", columns: "import_id archived updated_at" },
   bankRows: { name: "finance_bank_statement_rows", key: "id", columns: "id import_id line_number booking_date description reference amount_cents status suggested_transaction_id matched_transaction_id reconciled_by reconciled_at" },
   paypalKeys: { name: "finance_paypal_statement_keys", key: "fingerprint", columns: "fingerprint row_id gross_cents fee_cents currency_code" },
   bankSuggestions: { name: "finance_bank_statement_suggestions", key: "row_id", columns: "row_id transaction_id updated_at" },
@@ -31,7 +32,7 @@ const tables = {
 } as const;
 type Table = keyof typeof tables;
 type Row = Record<string, unknown>;
-type Snapshot = { version: 8 } & Record<Table, Row[]>;
+type Snapshot = { version: 9 } & Record<Table, Row[]>;
 const keys = Object.keys(tables) as Table[];
 const userColumns = new Set(["created_by", "updated_by", "actor_user_id", "imported_by", "reconciled_by", "uploaded_by"]);
 const textualColumns = new Set([
@@ -41,11 +42,11 @@ const textualColumns = new Set([
 ]);
 const mutable = new Set<Table>([
   "settings", "accounts", "centers", "simpleBookingGrants", "purposes", "donors", "years", "taxes", "budgets",
-  "journalNumbers", "receiptSettings", "bankSuggestions", "bankRules", "mappings",
+  "journalNumbers", "receiptSettings", "bankSuggestions", "bankRules", "mappings", "bankArchive",
 ]);
 const maximumBytes = 64 * 1024 * 1024;
 const maximumRows = 200_000;
-const envelopeContext = Buffer.from("smart-church/finance-standby/v8");
+const envelopeContext = Buffer.from("smart-church/finance-standby/v9");
 const tooLarge = "Finance exceeds the standby snapshot size or record limit.";
 
 function record(value: unknown): value is Row {
@@ -57,7 +58,7 @@ function recordKey(row: Row, table: Table) {
 }
 
 function readSnapshot(value: unknown): Snapshot {
-  if (!record(value) || value.version !== 8) throw new Error("The Finance snapshot is invalid.");
+  if (!record(value) || value.version !== 9) throw new Error("The Finance snapshot is invalid.");
   let count = 0;
   for (const key of keys) {
     const columns = tables[key].columns.split(" ");
@@ -197,9 +198,19 @@ function assertLedger(snapshot: Snapshot) {
     }
   }
   const imports = new Map(snapshot.bankImports.map(row => [row.id, row]));
+  const archivedImports = new Set();
+  for (const archive of snapshot.bankArchive) {
+    if (!imports.has(archive.import_id) || typeof archive.archived !== "boolean") {
+      throw new Error("A Finance statement archive state is invalid.");
+    }
+    if (archive.archived) archivedImports.add(archive.import_id);
+  }
   const observedRows = new Map<unknown, number>();
   for (const row of snapshot.bankRows) {
     if (!imports.has(row.import_id)) throw new Error("A Finance statement row refers to a missing import.");
+    if (row.status === "matched" && archivedImports.has(row.import_id)) {
+      throw new Error("A Finance statement with matched rows cannot be archived.");
+    }
     observedRows.set(row.import_id, (observedRows.get(row.import_id) ?? 0) + 1);
   }
   if (snapshot.bankImports.some(row => (observedRows.get(row.id) ?? 0) !== row.row_count)) {
@@ -273,7 +284,7 @@ async function readiness(client: Pick<PoolClient, "query">, departmentId: string
 }
 
 async function collect(client: Pick<PoolClient, "query">, departmentId: string): Promise<Snapshot> {
-  const snapshot = { version: 8 } as Snapshot;
+  const snapshot = { version: 9 } as Snapshot;
   for (const key of keys) {
     const table = tables[key];
     const columns = table.columns.split(" ").map(column => {
@@ -401,11 +412,11 @@ export function registerFinanceReplication(context: ModuleServerContext) {
       const cipher=createCipheriv("aes-256-gcm",key,iv);
       cipher.setAAD(envelopeContext);
       const ciphertext=Buffer.concat([cipher.update(plain),cipher.final()]);
-      return { version:8, sealedKey:seal(key.toString("base64")), iv:iv.toString("base64"),
+      return { version:9, sealedKey:seal(key.toString("base64")), iv:iv.toString("base64"),
         tag:cipher.getAuthTag().toString("base64"), ciphertext:ciphertext.toString("base64") };
     },
     async restoreSnapshotFromPeer(input, open) {
-      if (!record(input) || input.version!==8 || typeof input.sealedKey!=="string" || input.sealedKey.length>65536 ||
+      if (!record(input) || input.version!==9 || typeof input.sealedKey!=="string" || input.sealedKey.length>65536 ||
         typeof input.iv!=="string" || input.iv.length!==16 || typeof input.tag!=="string" || input.tag.length!==24 ||
         typeof input.ciphertext!=="string" || input.ciphertext.length>Math.ceil(maximumBytes/3)*4) {
         throw new Error("The Finance snapshot must be encrypted for this standby.");
@@ -438,7 +449,7 @@ export function registerFinanceReplication(context: ModuleServerContext) {
     async restoreSnapshot(client,departmentId,input,restoreContext) {
       const source=readSnapshot(input);
       const target=await collect(client,departmentId);
-      const mapped=Object.fromEntries([["version",8],...keys.map(key=>[key,source[key].map(row=>mappedRow(row,restoreContext))])]) as Snapshot;
+      const mapped=Object.fromEntries([["version",9],...keys.map(key=>[key,source[key].map(row=>mappedRow(row,restoreContext))])]) as Snapshot;
       assertTarget(target,mapped);
       const updatesAfterLines: Row[]=[];
       for (const key of keys) {

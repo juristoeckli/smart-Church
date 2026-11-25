@@ -421,7 +421,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
            JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id
           WHERE t.department_id=$1 AND t.accounting_year=$2 AND t.booking_date BETWEEN $3::date AND $4::date AND t.status='posted'`, [departmentId, year, period.startDate, period.endDate]),
-      pool!.query<{ rowCount: string; amountCents: string }>("SELECT count(*)::text AS \"rowCount\",COALESCE(sum(abs(amount_cents)),0)::text AS \"amountCents\" FROM finance_bank_statement_rows WHERE department_id=$1 AND booking_date BETWEEN $2::date AND $3::date AND status IN ('unmatched','suggested')", [departmentId, period.startDate, period.endDate]),
+      pool!.query<{ rowCount: string; amountCents: string }>("SELECT count(*)::text AS \"rowCount\",COALESCE(sum(abs(amount_cents)),0)::text AS \"amountCents\" FROM finance_bank_statement_rows row WHERE department_id=$1 AND booking_date BETWEEN $2::date AND $3::date AND status IN ('unmatched','suggested') AND NOT EXISTS (SELECT 1 FROM finance_bank_statement_archive archive WHERE archive.department_id=row.department_id AND archive.import_id=row.import_id AND archive.archived)", [departmentId, period.startDate, period.endDate]),
       pool!.query<{ id: string; accountCode: string | null; accountName: string | null; accountType: string | null; costCenterCode: string | null; costCenterName: string | null; budgetCents: string; actualCents: string }>(
         `SELECT b.id,a.code AS \"accountCode\",a.name AS \"accountName\",a.account_type AS \"accountType\",c.code AS \"costCenterCode\",c.name AS \"costCenterName\",
                 b.amount_cents::text AS \"budgetCents\",COALESCE(sum(CASE WHEN t.id IS NULL THEN 0 WHEN actual_account.account_type='income' THEN l.credit_cents-l.debit_cents ELSE l.debit_cents-l.credit_cents END),0)::text AS \"actualCents\"
@@ -964,6 +964,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       let purposeAudit: { bookingPurposeId: string; bookingPurposeName: string } | undefined;
       let paypalAudit: { paypalBookingMode: "payment" | "transfer"; paypalGrossCents: number; paypalFeeCents: number; paypalCurrency: string } | undefined;
       if (bankRowId) {
+        await lockStatementImport(client, departmentId, bankRowId, true);
         const { rows: [row] } = await client.query<{
           import_id: string; account_id: string; amount_cents: string; booking_date: string; status: string;
         }>(`SELECT r.import_id, i.account_id, r.amount_cents::text, r.booking_date::text, r.status
@@ -971,6 +972,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             ON i.department_id=r.department_id AND i.id=r.import_id
           JOIN finance_accounts a ON a.department_id=i.department_id AND a.id=i.account_id
           WHERE r.department_id=$1 AND r.id=$2 AND a.active AND a.account_type='asset'
+            AND NOT EXISTS (SELECT 1 FROM finance_bank_statement_archive archive WHERE archive.department_id=i.department_id AND archive.import_id=i.id AND archive.archived)
           FOR UPDATE OF r`, [departmentId, bankRowId]);
         if (!row) {
           await client.query("ROLLBACK");
@@ -1499,8 +1501,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       `SELECT currency_code FROM finance_settings WHERE department_id=$1 ${lock === "update" ? "FOR UPDATE" : lock === "share" ? "FOR SHARE" : ""}`, [departmentId]);
     return settings?.currency_code ?? "CHF";
   }
+  async function lockStatementImport(client: PoolClient, departmentId: string, id: string, byRow = false) {
+    // Lock the immutable parent before reading the reversible archive state.
+    // A later SQL statement takes a fresh snapshot after a concurrent archive.
+    await client.query(`SELECT imported.id FROM finance_bank_statement_imports imported
+      WHERE imported.department_id=$1 AND imported.id=${byRow
+        ? "(SELECT import_id FROM finance_bank_statement_rows WHERE department_id=$1 AND id=$2)"
+        : "$2"} FOR NO KEY UPDATE`, [departmentId, id]);
+  }
   async function findStatementImport(departmentId: string, accountId: string, contentHash: string) {
-    return pool!.query("SELECT id FROM finance_bank_statement_imports WHERE department_id=$1 AND account_id=$2 AND content_sha256=$3",
+    return pool!.query<{ archived: boolean }>(`SELECT COALESCE(archive.archived,false) AS archived
+      FROM finance_bank_statement_imports imported
+      LEFT JOIN finance_bank_statement_archive archive ON archive.department_id=imported.department_id AND archive.import_id=imported.id
+      WHERE imported.department_id=$1 AND imported.account_id=$2 AND imported.content_sha256=$3`,
       [departmentId, accountId, contentHash]);
   }
   function parsePaypalReport(content: string, dateOrder?: PaypalDateOrder) {
@@ -1642,14 +1655,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const account = await validateStatementAccount(departmentId, request.body.accountId);
     if (!account) return reply.code(400).send({ error: "Choose an active asset account for this statement." });
     const contentHash = createHash("sha256").update(upload.content, "utf8").digest("hex");
-    const duplicate = Boolean((await findStatementImport(departmentId, request.body.accountId, contentHash)).rowCount);
+    const { rows: [existing] } = await findStatementImport(departmentId, request.body.accountId, contentHash);
+    const duplicate = Boolean(existing);
+    const archivedDuplicate = existing?.archived || undefined;
     if (upload.format === "paypal") {
       const report = await readPaypalReport(request.body, upload.content, pool!, departmentId);
       if (typeof report === "string") return reply.code(400).send({ error: report });
       const rows = await reviewPaypalRows(pool!, departmentId, request.body.accountId, report.entries, report.currency);
       if (typeof rows === "string") return reply.code(409).send({ error: rows });
       return reply.header("Cache-Control", "private, no-store").send({
-        format: "paypal", currency: report.currency, duplicate, rowCount: rows.length, ignoredCount: report.ignoredCount,
+        format: "paypal", currency: report.currency, duplicate, archivedDuplicate, rowCount: rows.length, ignoredCount: report.ignoredCount,
         overlapCount: report.duplicateCount + report.entries.length - rows.length,
         headers: ["Booking date", "Gross", "Fee", "Net", "Description"],
         sample: rows.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.gross), statementPreviewAmount(row.fee), statementPreviewAmount(row.amount), row.description]),
@@ -1662,7 +1677,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(400).send({ error: "The statement currency does not match this ledger." });
       }
       return reply.header("Cache-Control", "private, no-store").send({
-        format: upload.format, rowCount: parsed.entries.length, duplicate,
+        format: upload.format, rowCount: parsed.entries.length, duplicate, archivedDuplicate,
         accountEnding: parsed.accountEnding, currency: parsed.currency, ...(parsed.profile ? { profile: parsed.profile } : {}),
         rememberedAccountId: (await recognizedStatementAccount(departmentId, parsed.digest))?.accountId ?? null,
         headers: ["Booking date", "Amount", "Description", "Reference"],
@@ -1673,7 +1688,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
     if (isPaypalActivityHeader(parsed[0]!)) return reply.code(400).send({ error: "Import this file as a PayPal Activity Report." });
     const headers = parsed[0]!.map((value, index) => (index === 0 ? value.replace(/^\uFEFF/, "") : value).trim().slice(0, 120));
-    return { headers, rowCount: parsed.length - 1, duplicate, sample: parsed.slice(1, 6).map((row) => row.map((value) => value.slice(0, 200))) };
+    return { headers, rowCount: parsed.length - 1, duplicate, archivedDuplicate, sample: parsed.slice(1, 6).map((row) => row.map((value) => value.slice(0, 200))) };
   });
 
   app.post<{ Body: StatementUpload & { mapping?: StatementMapping; confirmSourceAccount?: boolean; rememberSource?: { expectedAccountId: string | null } } }>("/api/modules/finance/bank-statements/import", {
@@ -1757,7 +1772,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const contentHash = createHash("sha256").update(upload.content, "utf8").digest("hex");
     const fileName = cleanText(request.body.fileName).replace(/[\\/]/g, "_").slice(0, 180) || `statement.${upload.format}`;
     const duplicate = await findStatementImport(departmentId, request.body.accountId, contentHash);
-    if (duplicate.rowCount) return reply.code(409).send({ error: "This exact statement file has already been imported for the selected account." });
+    if (duplicate.rowCount) return reply.code(409).send({ error: duplicate.rows[0]?.archived
+      ? "This statement is archived for the selected account. Restore it from Archived statements to review or post its rows."
+      : "This exact statement file has already been imported for the selected account." });
     const batchId = randomUUID(); const client = await pool!.connect();
     try {
       await client.query("BEGIN");
@@ -2065,13 +2082,34 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     });
   });
 
-  app.get("/api/modules/finance/bank-statements", async (request, reply) => {
+  app.get("/api/modules/finance/bank-statements/accounts", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
-    return (await pool!.query(`SELECT imported.id,imported.file_name AS "fileName",imported.imported_at AS "importedAt",imported.row_count AS "rowCount",account.code AS "accountCode",account.name AS "accountName",
+    return (await pool!.query(`SELECT account.id,account.code,account.name,
+      count(DISTINCT imported.id) FILTER(WHERE NOT COALESCE(archive.archived,false))::int AS "statementCount",
+      count(DISTINCT imported.id) FILTER(WHERE archive.archived)::int AS "archivedCount",
+      count(row.id) FILTER(WHERE NOT COALESCE(archive.archived,false))::int AS "rowCount",
+      count(row.id) FILTER(WHERE NOT COALESCE(archive.archived,false) AND row.status='matched')::int AS matched
+      FROM finance_bank_statement_imports imported
+      JOIN finance_accounts account ON account.department_id=imported.department_id AND account.id=imported.account_id
+      LEFT JOIN finance_bank_statement_archive archive ON archive.department_id=imported.department_id AND archive.import_id=imported.id
+      LEFT JOIN finance_bank_statement_rows row ON row.department_id=imported.department_id AND row.import_id=imported.id
+      WHERE imported.department_id=$1 GROUP BY account.id,account.code,account.name ORDER BY account.code,account.name,account.id`, [departmentId])).rows;
+  });
+
+  app.get<{ Querystring: { accountId?: string; archived?: "true" | "false" } }>("/api/modules/finance/bank-statements", {
+    schema: { querystring: { type: "object", additionalProperties: false, properties: {
+      accountId: uuid, archived: { type: "string", enum: ["true", "false"] },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    return (await pool!.query(`SELECT imported.id,imported.file_name AS "fileName",imported.imported_at AS "importedAt",imported.row_count AS "rowCount",account.id AS "accountId",account.code AS "accountCode",account.name AS "accountName",
       count(row.id) FILTER(WHERE row.status='matched')::int AS matched,count(row.id) FILTER(WHERE (${currentBankStatus("row", "suggestion")})='suggested')::int AS suggested,count(row.id) FILTER(WHERE (${currentBankStatus("row", "suggestion")})='unmatched')::int AS unmatched,count(row.id) FILTER(WHERE row.status='ignored')::int AS ignored
       FROM finance_bank_statement_imports imported JOIN finance_accounts account ON account.department_id=imported.department_id AND account.id=imported.account_id LEFT JOIN finance_bank_statement_rows row ON row.department_id=imported.department_id AND row.import_id=imported.id
       LEFT JOIN finance_bank_statement_suggestions suggestion ON suggestion.department_id=row.department_id AND suggestion.row_id=row.id
-      WHERE imported.department_id=$1 GROUP BY imported.id,account.code,account.name ORDER BY imported.imported_at DESC LIMIT 100`, [departmentId])).rows;
+      LEFT JOIN finance_bank_statement_archive archive ON archive.department_id=imported.department_id AND archive.import_id=imported.id
+      WHERE imported.department_id=$1 AND ($2::uuid IS NULL OR imported.account_id=$2) AND COALESCE(archive.archived,false)=$3
+      GROUP BY imported.id,account.id,account.code,account.name ORDER BY imported.imported_at DESC,imported.id LIMIT 100`,
+      [departmentId, request.query.accountId ?? null, request.query.archived === "true"])).rows;
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/finance/bank-statements/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
@@ -2088,6 +2126,49 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return result.rows.map((row) => ({ ...row, amountCents: asMoney(row.amountCents) }));
   });
 
+  app.put<{ Params: { id: string }; Body: { archived: boolean } }>("/api/modules/finance/bank-statements/:id/archive", {
+    schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } },
+      body: { type: "object", additionalProperties: false, required: ["archived"], properties: { archived: { type: "boolean" } } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    const importId = request.params.id;
+    const { archived } = request.body;
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      await lockStatementImport(client, departmentId, importId);
+      const { rows: [statement] } = await client.query<{ archived: boolean; matched: boolean }>(
+        `SELECT COALESCE(archive.archived,false) AS archived,
+          EXISTS (SELECT 1 FROM finance_bank_statement_rows row
+                  WHERE row.department_id=imported.department_id AND row.import_id=imported.id AND row.status='matched') AS matched
+        FROM finance_bank_statement_imports imported
+        LEFT JOIN finance_bank_statement_archive archive ON archive.department_id=imported.department_id AND archive.import_id=imported.id
+        WHERE imported.department_id=$1 AND imported.id=$2`, [departmentId, importId]);
+      if (!statement || (archived && statement.matched)) {
+        await client.query("ROLLBACK");
+        return statement ? reply.code(409).send({ error: "A statement with matched ledger entries cannot be archived." })
+          : reply.code(404).send({ error: "Bank statement not found." });
+      }
+      if (statement.archived !== archived) {
+        await client.query(`INSERT INTO finance_bank_statement_archive(department_id,import_id,archived) VALUES($1,$2,$3)
+          ON CONFLICT(department_id,import_id) DO UPDATE SET archived=EXCLUDED.archived,updated_at=now()`,
+          [departmentId, importId, archived]);
+        await audit(client, departmentId, request, archived ? "bank_statement_archived" : "bank_statement_restored", "bank_statement_import", importId);
+      }
+      await client.query("COMMIT");
+      if (statement.archived !== archived) publish(departmentId, "bank-statement-archive-changed", importId);
+      return reply.send({ archived });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+  });
+
   app.post<{ Params: { id: string } }>("/api/modules/finance/bank-statements/:id/recalculate-suggestions", {
     schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } },
   }, async (request, reply) => {
@@ -2101,8 +2182,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(423).send({ error: "This location is read-only." });
       }
+      await lockStatementImport(client, departmentId, importId);
       const { rows: [statement] } = await client.query<{ account_id: string }>(
-        "SELECT account_id FROM finance_bank_statement_imports WHERE department_id=$1 AND id=$2", [departmentId, importId]);
+        `SELECT account_id FROM finance_bank_statement_imports imported WHERE department_id=$1 AND id=$2
+         AND NOT EXISTS (SELECT 1 FROM finance_bank_statement_archive archive WHERE archive.department_id=imported.department_id AND archive.import_id=imported.id AND archive.archived)`, [departmentId, importId]);
       if (!statement) {
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Bank statement not found." });
@@ -2151,7 +2234,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
-      const row = await client.query<{ id: string; import_id: string; account_id: string; amount_cents: string; booking_date: string; status: string }>("SELECT row.id,row.import_id,imported.account_id,row.amount_cents::text,row.booking_date::text,row.status FROM finance_bank_statement_rows row JOIN finance_bank_statement_imports imported ON imported.department_id=row.department_id AND imported.id=row.import_id WHERE row.department_id=$1 AND row.id=$2 FOR UPDATE OF row", [departmentId, request.params.id]);
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      await lockStatementImport(client, departmentId, request.params.id, true);
+      const row = await client.query<{ id: string; import_id: string; account_id: string; amount_cents: string; booking_date: string; status: string }>("SELECT row.id,row.import_id,imported.account_id,row.amount_cents::text,row.booking_date::text,row.status FROM finance_bank_statement_rows row JOIN finance_bank_statement_imports imported ON imported.department_id=row.department_id AND imported.id=row.import_id WHERE row.department_id=$1 AND row.id=$2 AND NOT EXISTS (SELECT 1 FROM finance_bank_statement_archive archive WHERE archive.department_id=imported.department_id AND archive.import_id=imported.id AND archive.archived) FOR UPDATE OF row", [departmentId, request.params.id]);
       if (!row.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Statement row not found." }); }
       if (!["unmatched", "suggested"].includes(row.rows[0]!.status)) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This row has already been reconciled or ignored." }); }
       let transactionId: string | null = null;
