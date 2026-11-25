@@ -1,3 +1,4 @@
+import { registerCalendarRemoval } from "./remove-appointment.js";
 import { registerCalendarBookingDecisions } from "./booking-decisions.js";
 import { addResourcesToNewCalendarAppointment, type CalendarCreatedBooking } from "./new-appointment-resources.js";
 import { resourceSelectionListSchema, type ResourceSelection } from "../../resource-booking-series-write.js";
@@ -21,7 +22,7 @@ import { calendarReminderOccurrence, calendarReminderWindow, type CalendarRemind
 import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "../../calendar-time.js";
 import { addDays, calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, occurrenceStarts, startOfDay, wallDate, type Recurrence } from "../../calendar-occurrences.js";
 
-import { planCalendarSeriesSplit, truncateCalendarSeries, type ExplicitDate } from "../../calendar-series-split.js";
+import { planCalendarSeriesSplit, type ExplicitDate } from "../../calendar-series-split.js";
 
 type CalendarScope = "community" | "group" | "personal";
 type AppointmentInput = {
@@ -277,6 +278,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   registerCalendarMeetingRequests(app, context, canManageCalendar);
   registerCalendarBookingDescriptions(app, context, canManageCalendar);
   registerCalendarBookingDecisions(app, context, canManageCalendar);
+  registerCalendarRemoval(app, context, canManageCalendar);
   registerCalendarAgendaPublications(app, context, (request) => canManageCalendar(request, "community", null), hashFeedToken);
   const unavailable = (reply: Parameters<typeof responseError>[0]) => responseError(reply, 503, "The calendar is unavailable.");
   const userId = (request: FastifyRequest) => request.authenticatedUser!.id;
@@ -1944,61 +1946,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { updated: true, ...(futureAppointmentId ? { futureAppointmentId } : {}), ...(request.body.notifyCreator ? { creatorNotificationQueued } : {}) };
   });
 
-  app.delete<{ Params: { id: string }; Querystring: { scope?: "occurrence" | "future" | "series"; occurrenceStartAt?: string } }>("/api/modules/church-calendar/appointments/:id", { schema: {
-    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["occurrence", "future", "series"] }, occurrenceStartAt: { type: "string", maxLength: 25 } } },
-  } }, async (request, reply) => {
-    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
-    if (!context.validateMutation(request, reply)) return reply;
-    const departmentId = await context.resolveDepartmentId(request, reply);
-    if (!departmentId) return reply;
-    const found = await context.pool.query<{ id: string; recurrence: Recurrence | null; calendar_scope: CalendarScope; owner_user_id: string | null }>(
-      `SELECT appointment.id,appointment.recurrence,calendar.scope AS calendar_scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
-    const row = found.rows[0];
-    if (!row) return responseError(reply, 404, "The appointment was not found.");
-    if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) return responseError(reply, 403, "You do not have permission to delete this appointment.");
-    const scope = request.query.scope ?? "series";
-    const occurrence = cleanLocalDateTime(request.query.occurrenceStartAt);
-    if (scope !== "series" && !occurrence) return responseError(reply, 400, "Choose which occurrence to remove.");
-    if (scope === "occurrence" && row.recurrence) {
-      await context.pool.query(
-        `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
-         SELECT id,$2::timestamp,true,'{}',$3 FROM church_calendar_appointments
-          WHERE id=$1 AND department_id=$4 AND archived_at IS NULL FOR UPDATE
-         ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=true,overrides='{}',updated_by=EXCLUDED.updated_by,updated_at=now()`, [row.id, occurrence, userId(request), departmentId],
-      );
-    } else if (scope === "future" && row.recurrence) {
-      const boundary = occurrence!;
-      const client = await context.pool.connect();
-      try {
-        await client.query("BEGIN");
-        if (!await context.lockDepartmentForWrite(client, departmentId)) {
-          await client.query("ROLLBACK");
-          return responseError(reply, 423, "This location is read-only.");
-        }
-        const locked = await lockCalendarSeries(client, row.id, departmentId);
-        const boundaryExtra = await client.query("SELECT 1 FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at=$2::timestamp", [row.id, boundary]);
-        if (!locked || !(boundaryExtra.rowCount || calendarOccurrenceExists(locked, boundary))) {
-          await client.query("ROLLBACK");
-          return responseError(reply, 409, "Choose an existing occurrence to end the series.");
-        }
-        const previousRule = truncateCalendarSeries(locked, boundary);
-        await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(previousRule)]);
-        await client.query("DELETE FROM church_calendar_meeting_requests WHERE appointment_id=$1 AND original_start >= $2::timestamp", [row.id, boundary]);
-        await client.query("DELETE FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at >= $2::timestamp", [row.id, boundary]);
-        await client.query("DELETE FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start >= $2::timestamp", [row.id, boundary]);
-        await client.query("DELETE FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start >= $2::timestamp", [row.id, boundary]);
-        await client.query("DELETE FROM church_calendar_reminders WHERE appointment_id=$1 AND original_start >= $2::timestamp AND delivered_at IS NULL", [row.id, boundary]);
-        await client.query("COMMIT");
-      } catch (error) { await client.query("ROLLBACK"); throw error; }
-      finally { client.release(); }
-    } else {
-      await context.pool.query("UPDATE church_calendar_appointments SET archived_at=now(),updated_at=now() WHERE id=$1 AND department_id=$2", [row.id, departmentId]);
-    }
-    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-removed", appointmentId: row.id, scope });
-    return { deleted: true };
-  });
-
   app.get<{ Params: { id: string } }>("/api/modules/church-calendar/appointments/:id/extra-dates", { schema: {
     params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
   } }, async (request, reply) => {
@@ -2064,6 +2011,30 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await context.pool.connect();
     try {
       await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 423, "This location is read-only.");
+      }
+      const { rows: [locked] } = await client.query<{ starts_at: string; recurrence: Recurrence | null }>(
+        `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,recurrence
+           FROM church_calendar_appointments WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR UPDATE`,
+        [request.params.id, departmentId],
+      );
+      if (!locked) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 404, "The appointment was not found.");
+      }
+      const activeReservation = await client.query(
+        `SELECT 1 FROM church_calendar_resource_links link JOIN resource_bookings booking
+            ON booking.id=link.resource_booking_id AND booking.department_id=$3
+          WHERE link.appointment_id=$1 AND link.occurrence_start=$2::timestamp
+            AND booking.status IN ('requested','approved') AND booking.ends_at>now() LIMIT 1`,
+        [request.params.id, startsAt, departmentId],
+      );
+      if (activeReservation.rowCount) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 409, "Open this extra occurrence in Calendar to review its reservations before removal.");
+      }
       const deleted = await client.query(
         `WITH appointment AS (
            SELECT id FROM church_calendar_appointments WHERE id=$1 AND department_id=$3 AND archived_at IS NULL FOR UPDATE
@@ -2074,7 +2045,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return responseError(reply, 404, "The extra date was not found.");
       }
-      await client.query("DELETE FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp", [request.params.id, startsAt]);
+      await client.query(
+        `DELETE FROM church_calendar_appointment_exceptions exception WHERE appointment_id=$1 AND original_start=$2::timestamp
+          AND NOT (exception.cancelled AND EXISTS (SELECT 1 FROM church_calendar_resource_links link
+            WHERE link.appointment_id=exception.appointment_id AND link.occurrence_start=exception.original_start))`,
+        [request.params.id, startsAt],
+      );
+      if (!calendarOccurrenceExists(locked, startsAt)) await client.query(
+        `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
+         SELECT $1,$2::timestamp,true,'{}',$3 WHERE EXISTS (SELECT 1 FROM church_calendar_resource_links
+           WHERE appointment_id=$1 AND occurrence_start=$2::timestamp)
+         ON CONFLICT(appointment_id,original_start) DO NOTHING`,
+        [request.params.id, startsAt, userId(request)],
+      );
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
