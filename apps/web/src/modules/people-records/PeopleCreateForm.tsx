@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { postalAddressFields, type PostalAddress } from "./postal-address";
 
-export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select" | "number"; required: boolean; options: string[]; textMaxLength?: number | null };
+export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select" | "number" | "multiline"; required: boolean; options: string[]; textMaxLength?: number | null };
 export type CreatePersonInput = {
   firstName: string; lastName: string; email?: string; phone?: string; status: "member" | "visitor";
   postalAddress: PostalAddress; fields: Record<string, string | boolean | number>;
@@ -75,7 +75,8 @@ export function PeopleCreateForm({ fields, onCreate, onClose }: {
               <option value="">Choose a value</option>
               {field.type === "boolean" ? <><option value="true">Yes</option><option value="false">No</option></> :
                 field.options.map((option, index) => <option key={index} value={option}>{option}</option>)}
-            </select> :
+            </select> : field.type === "multiline" ?
+            <textarea name={"field:" + field.id} required={field.required} maxLength={field.textMaxLength ?? 2000} rows={4} /> :
             <input name={"field:" + field.id} type={field.type} step={field.type === "number" ? "any" : undefined} required={field.required}
               maxLength={field.type === "text" ? field.textMaxLength ?? 2000 : undefined} />}
         </label>)}
