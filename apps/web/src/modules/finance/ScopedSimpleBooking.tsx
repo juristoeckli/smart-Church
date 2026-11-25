@@ -9,6 +9,15 @@ type Group = { id: string; name: string; roles: string[] };
 type Capabilities = { canPost: boolean; canViewBudget: boolean; canViewJournal: boolean; canViewDonors: boolean };
 type Grant = Capabilities & { id: string; groupId: string; groupName: string | null; costCenterId: string; role: string; active: boolean };
 const path = "/api/modules/finance/simple-booking";
+const maxReceiptBytes = 10 * 1024 * 1024;
+const maxReceiptFiles = 10;
+
+async function encodeReceipt(file: File) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 32_768) binary += String.fromCharCode(...bytes.subarray(i, i + 32_768));
+  return { filename:file.name, base64:btoa(binary) };
+}
 const emptyForm = { purposeId: "", bookingDate: "", amount: "", bookingText: "", receiptNumber: "" };
 const rights = {
   none: { label: "No booking or budget access", canPost: false, canViewBudget: false, canViewJournal: false },
@@ -39,10 +48,11 @@ export function ScopedSimpleBooking({ context }: { context: ModuleContext }) {
   const { departmentId, csrfToken } = context;
   const [data, setData] = useState<BookingContext>();
   const [draft, setDraft] = useState(emptyForm);
+  const [receipts, setReceipts] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
-  const submission = useRef<{ key: string; id: string } | undefined>(undefined);
+  const submission = useRef<{ key: string; id: string; receipts: File[] } | undefined>(undefined);
   const send = useCallback(async <T,>(method: string, body?: unknown) => {
     const response = await fetch(path, {
       method, headers: { "x-department-id": departmentId, ...(body ? { "content-type": "application/json", "x-csrf-token": csrfToken } : {}) },
@@ -67,21 +77,37 @@ export function ScopedSimpleBooking({ context }: { context: ModuleContext }) {
     const receiptNumber = draft.receiptNumber.trim();
     const payload = { purposeId, bookingDate, bookingText, amountCents: amountCents(draft.amount), currency: data.currency };
     const key = JSON.stringify(payload);
-    if (!receiptNumber && submission.current?.key !== key) submission.current = { key, id: crypto.randomUUID() };
+    if (!receiptNumber && (submission.current?.key !== key || submission.current?.receipts !== receipts)) {
+      submission.current = { key, id: crypto.randomUUID(), receipts };
+    }
     setBusy(true);
     setError("");
     setFeedback("");
     try {
-      const posted = await send<{ receiptNumber: string }>("POST", {
-        ...payload, ...(receiptNumber ? { receiptNumber } : { submissionId: submission.current!.id }),
+      const attachments = await Promise.all(receipts.map(encodeReceipt));
+      const posted = await send<{ receiptNumber: string; receiptCount?: number }>("POST", {
+        ...payload, ...(attachments.length ? { receipts:attachments } : {}), ...(receiptNumber ? { receiptNumber } : { submissionId: submission.current!.id }),
       });
       submission.current = undefined;
-      setFeedback(`Booking posted with receipt ${posted.receiptNumber}.`);
+      setFeedback(`Booking posted with receipt ${posted.receiptNumber}.`
+        + (posted.receiptCount ? ` Supporting files saved (${posted.receiptCount}).` : ""));
+      setReceipts([]);
       setDraft({ ...emptyForm, bookingDate });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not post the booking.");
       try { setData(await send<BookingContext>("GET")); } catch { setData(undefined); }
     } finally { setBusy(false); }
+  }
+
+  function addReceipts(files: File[]) {
+    if (!files.length) return;
+    const next = [...receipts,...files];
+    if (next.length > maxReceiptFiles || next.some(file => file.size === 0) || next.reduce((total,file) => total + file.size,0) > maxReceiptBytes) {
+      setError("Choose up to 10 non-empty receipts, totaling no more than 10 MiB.");
+      return;
+    }
+    setError("");
+    setReceipts(next);
   }
 
   return <main className="finance-page">
@@ -100,6 +126,16 @@ export function ScopedSimpleBooking({ context }: { context: ModuleContext }) {
           <small>Leave blank if automatic receipts are enabled for the booking date.</small>
         </label>
         <label className="finance-form-wide">Booking text<input maxLength={500} required disabled={busy} value={draft.bookingText} onChange={event => setDraft({ ...draft, bookingText: event.target.value })} /></label>
+        <label className="finance-form-wide">Supporting receipts
+          <input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" disabled={busy}
+            onChange={event => { addReceipts([...event.currentTarget.files ?? []]); event.currentTarget.value = ""; }} />
+        </label>
+        {receipts.length > 0 && <ul className="finance-form-wide">
+          {receipts.map((file,index) => <li key={index}>{file.name}{" "}
+            <button type="button" className="finance-text-button" disabled={busy} aria-label={`Remove ${file.name}`}
+              onClick={() => setReceipts(current => current.filter((_,position) => position !== index))}>Remove</button>
+          </li>)}
+        </ul>}
         <div className="finance-form-actions"><button className="button button-primary" type="submit" disabled={busy || !draft.purposeId || !amountCents(draft.amount)}>Post booking</button></div>
       </form> : <p>There are no active booking purposes for your group roles.</p>)}
     </section>

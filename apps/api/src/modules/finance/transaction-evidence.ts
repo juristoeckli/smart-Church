@@ -8,6 +8,20 @@ const uploadType = "application/vnd.smart-church.finance-evidence";
 const path = "/api/modules/finance/transactions/:transactionId/evidence";
 const maxBytes = 10 * 1024 * 1024;
 const maxFiles = 10;
+const maxBase64 = Math.ceil(maxBytes / 3) * 4;
+export const simpleEvidenceBodyLimit = maxBase64 + 32 * 1024;
+export const simpleEvidenceSchema = {
+  type: "array", maxItems: maxFiles, items: {
+    type: "object", additionalProperties: false, required: ["filename", "base64"],
+    properties: {
+      filename: { type: "string", minLength: 1, maxLength: 255 },
+      base64: { type: "string", minLength: 4, maxLength: maxBase64 },
+    },
+  },
+} as const;
+export type SimpleEvidenceInput = { filename: string; base64: string };
+export type TransactionEvidence = { fileName: string; payload: Buffer; contentHash: string };
+type EvidenceError = { status: number; error: string };
 const uuid = { type:"string",format:"uuid" } as const;
 const transactionParams = { type:"object",additionalProperties:false,required:["transactionId"],properties:{ transactionId:uuid } } as const;
 const fileParams = { type:"object",additionalProperties:false,required:["transactionId","fileId"],properties:{ transactionId:uuid,fileId:uuid } } as const;
@@ -22,6 +36,41 @@ function supportedExtension(file: Buffer) {
   if (file.length >= 4 && file[0]===255 && file[1]===216 && file[2]===255) return "jpg";
   if (file.length >= 8 && /^%PDF-[12][.][0-9]/.test(file.toString("ascii",0,8))) return "pdf";
   return null;
+}
+
+function prepareEvidence(filename: string, payload: Buffer): TransactionEvidence | EvidenceError {
+  if (!Buffer.isBuffer(payload) || !payload.length) return { status: 400, error: "Choose a non-empty receipt." };
+  if (payload.length > maxBytes) return { status: 413, error: "Receipts must be 10 MiB or smaller." };
+  const extension = supportedExtension(payload);
+  if (!extension) return { status: 415, error: "Upload a PDF, PNG or JPEG receipt." };
+  const base = filenameForUpload(filename).replace(/\.[^.]+$/, "");
+  const fileName = Array.from(base.trim() || "receipt").slice(0,176).join("") + "." + extension;
+  return { fileName, payload, contentHash: createHash("sha256").update(payload).digest("hex") };
+}
+
+export function prepareSimpleEvidence(inputs: SimpleEvidenceInput[]): TransactionEvidence[] | EvidenceError {
+  const unique = new Map<string,TransactionEvidence>();
+  let total = 0;
+  for (const input of inputs) {
+    const payload = Buffer.from(input.base64,"base64");
+    if (payload.toString("base64") !== input.base64) return { status: 400, error: "One receipt could not be decoded." };
+    total += payload.length;
+    if (total > maxBytes) return { status: 413, error: "Simple booking receipts can total up to 10 MiB." };
+    const file = prepareEvidence(input.filename,payload);
+    if ("error" in file) return file;
+    if (!unique.has(file.contentHash)) unique.set(file.contentHash,file);
+  }
+  return [...unique.values()].sort((a,b) => a.contentHash.localeCompare(b.contentHash));
+}
+
+export async function storeTransactionEvidence(client: PoolClient, departmentId: string, transactionId: string, actorId: string, file: TransactionEvidence) {
+  const fileId = randomUUID();
+  await client.query(`
+    INSERT INTO finance_transaction_evidence(id,department_id,transaction_id,file_name,file_size,file_data,content_hash,uploaded_by)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [fileId,departmentId,transactionId,file.fileName,file.payload.length,file.payload,file.contentHash,actorId],
+  );
+  return fileId;
 }
 
 export function registerTransactionEvidence(routes: FastifyInstance, context: ModuleServerContext, { department,audit }: Hooks) {
@@ -51,14 +100,8 @@ export function registerTransactionEvidence(routes: FastifyInstance, context: Mo
   },async (request,reply) => {
     const id = await department(request,reply,true);
     if (!id || !validateMutation(request,reply)) return reply;
-    const payload = request.body;
-    if (!Buffer.isBuffer(payload) || !payload.length) return reply.code(400).send({error:"Choose a non-empty receipt."});
-    if (payload.length>maxBytes) return reply.code(413).send({error:"Receipts must be 10 MiB or smaller."});
-    const extension = supportedExtension(payload);
-    if (!extension) return reply.code(415).send({error:"Upload a PDF, PNG or JPEG receipt."});
-    const base = filenameForUpload(request.query.filename).replace(/\.[^.]+$/,"");
-    const fileName = Array.from(base.trim() || "receipt").slice(0,176).join("") + "." + extension;
-    const contentHash = createHash("sha256").update(payload).digest("hex");
+    const evidence = prepareEvidence(request.query.filename, request.body);
+    if ("error" in evidence) return reply.code(evidence.status).send({ error: evidence.error });
     const { transactionId } = request.params;
     const client = await pool!.connect();
     const rollback = async (status: number,error: string) => {
@@ -73,7 +116,7 @@ export function registerTransactionEvidence(routes: FastifyInstance, context: Mo
       if (!posted.rows[0]) return await rollback(404,"Posted transaction not found.");
       const { rows:[existing] } = await client.query<{ id:string }>(
         "SELECT id FROM finance_transaction_evidence WHERE department_id=$1 AND transaction_id=$2 AND content_hash=$3",
-        [id,transactionId,contentHash],
+        [id,transactionId,evidence.contentHash],
       );
       if (existing) {
         await client.query("COMMIT");
@@ -83,13 +126,8 @@ export function registerTransactionEvidence(routes: FastifyInstance, context: Mo
         "SELECT count(*)::int AS count FROM finance_transaction_evidence WHERE department_id=$1 AND transaction_id=$2",[id,transactionId],
       );
       if (limit.count>=maxFiles) return await rollback(409,"A transaction can have up to 10 supporting receipts.");
-      const fileId = randomUUID();
-      await client.query(`
-        INSERT INTO finance_transaction_evidence(id,department_id,transaction_id,file_name,file_size,file_data,content_hash,uploaded_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [fileId,id,transactionId,fileName,payload.length,payload,contentHash,request.authenticatedUser!.id],
-      );
-      await audit(client,id,request,"receipt_evidence_added","transaction",transactionId,{ fileId,fileSize:payload.length });
+      const fileId = await storeTransactionEvidence(client,id,transactionId,request.authenticatedUser!.id,evidence);
+      await audit(client,id,request,"receipt_evidence_added","transaction",transactionId,{ fileId,fileSize:evidence.payload.length });
       await client.query("COMMIT");
       return reply.code(201).send({id:fileId});
     } catch (error) {

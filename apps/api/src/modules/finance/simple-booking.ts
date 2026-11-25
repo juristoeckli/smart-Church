@@ -1,3 +1,4 @@
+import { simpleEvidenceSchema, type SimpleEvidenceInput } from "./transaction-evidence.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
@@ -19,11 +20,12 @@ export const simpleBookingInput = {
     bookingDate: { type: "string", format: "date" }, bookingText: { type: "string", minLength: 1, maxLength: 500 },
     amountCents: { type: "integer", minimum: 1, maximum: 9000000000000000 },
     receiptNumber: { type: "string", minLength: 1, maxLength: 80 },
+    receipts: simpleEvidenceSchema,
   },
 } as const;
 
 export type SimpleBookingBody = {
-  purposeId: string; submissionId?: string; bookingDate: string; bookingText: string; receiptNumber?: string; amountCents: number; currency: string;
+  purposeId: string; submissionId?: string; bookingDate: string; bookingText: string; receiptNumber?: string; amountCents: number; currency: string; receipts?: SimpleEvidenceInput[];
 };
 type SimplePurpose = {
   id: string; name: string; direction: "income" | "expense"; groupId: string; grantId: string; groupRole: string;

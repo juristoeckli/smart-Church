@@ -9,7 +9,7 @@ import { registerFinanceReplication } from "./replication.js";
 import { parseCamt053 } from "./camt053.js";
 import { parseMt940, statementPreviewAmount, type ImportedBankStatementEntry } from "./mt940.js";
 import { allocateJournalNumber, isJournalReceiptConflict, journalReceiptConflictMessage, registerJournalNumbering } from "./journal-numbering.js";
-import { registerTransactionEvidence } from "./transaction-evidence.js";
+import { prepareSimpleEvidence, registerTransactionEvidence, simpleEvidenceBodyLimit, storeTransactionEvidence, type TransactionEvidence } from "./transaction-evidence.js";
 import { registerCostCenterTransfers } from "./cost-center-transfer.js";
 import { accountStatementSql, type AccountStatementLine, type StatementLabel } from "./account-statement.js";
 import { costCenterBudgetSql, costCenterEntriesSql, costCenterScopeSql, type StatementBudget, type StatementEntry, type StatementScope } from "./cost-center-detail.js";
@@ -896,7 +896,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   async function postJournal(request: FastifyRequest, reply: FastifyReply, departmentId: string, input: FinanceTransactionBody,
-    simpleScope?: { userId: string; purposeId: string; currency: string }) {
+    simpleScope?: { userId: string; purposeId: string; currency: string; evidence: TransactionEvidence[] }) {
     const automatic = input.receiptNumber === undefined && Boolean(input.submissionId);
     let receiptNumber = cleanText(input.receiptNumber ?? "");
     const bookingText = cleanText(input.bookingText);
@@ -916,7 +916,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (paypalMode && !bankRowId) return reply.code(400).send({ error: "Choose a PayPal statement row to post." });
     const submissionHash = automatic ? createHash("sha256").update(JSON.stringify([bookingDate,bookingText,
       lines.map(line => [line.accountId.toLowerCase(),line.costCenterId?.toLowerCase() ?? null,line.donorId?.toLowerCase() ?? null,
-        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : []), ...(paypalMode ? [paypalMode] : []), ...(purposeId ? [purposeId] : []), ...(simpleScope ? ["simple-booking", simpleScope.purposeId, simpleScope.currency] : [])])).digest("hex") : null;
+        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : []), ...(paypalMode ? [paypalMode] : []), ...(purposeId ? [purposeId] : []), ...(simpleScope ? ["simple-booking", simpleScope.purposeId, simpleScope.currency] : []),
+        ...(simpleScope?.evidence.length ? [simpleScope.evidence.map(file => [file.contentHash,file.fileName])] : [])])).digest("hex") : null;
     const client = await pool!.connect();
     let accountingYear = 0;
     try {
@@ -956,7 +957,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           }
           await client.query("COMMIT");
           return reply.send({id,bookingDate,accountingYear:previous.accounting_year,receiptNumber:previous.receipt_number,
-            bookingText,status:"posted",debitCents:debitTotal,creditCents:creditTotal});
+            bookingText,status:"posted",debitCents:debitTotal,creditCents:creditTotal, ...(simpleScope ? { receiptCount:simpleScope.evidence.length } : {}) });
         }
       }
       let bankImportId: string | undefined;
@@ -1074,6 +1075,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const line = lines[index]!;
         await client.query("INSERT INTO finance_transaction_lines(id,department_id,transaction_id,line_number,account_id,cost_center_id,donor_id,debit_cents,credit_cents,line_text) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, id, index + 1, line.accountId, line.costCenterId ?? null, line.donorId ?? null, line.debitCents, line.creditCents, line.text ?? ""]);
       }
+      if (simpleScope) {
+        for (const file of simpleScope.evidence) {
+          const fileId = await storeTransactionEvidence(client,departmentId,id,simpleScope.userId,file);
+          await audit(client,departmentId,request,"receipt_evidence_added","transaction",id,{ fileId,fileSize:file.payload.length });
+        }
+      }
       if (bankRowId && bankImportId) {
         await client.query(`UPDATE finance_bank_statement_rows SET status='matched', matched_transaction_id=$3,
           reconciled_by=$4, reconciled_at=now() WHERE department_id=$1 AND id=$2`, [departmentId,bankRowId,id,actorId]);
@@ -1091,7 +1098,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } finally { client.release(); }
     if (bankRowId) publish(departmentId, "bank-statement-row-reconciled", bankRowId);
     if (!simpleScope) publish(departmentId, "transaction-posted", id);
-    return reply.code(201).send({ id, bookingDate, accountingYear, receiptNumber, bookingText, status: "posted", debitCents: debitTotal, creditCents: creditTotal });
+    return reply.code(201).send({ id, bookingDate, accountingYear, receiptNumber, bookingText, status: "posted", debitCents: debitTotal, creditCents: creditTotal, ...(simpleScope ? { receiptCount:simpleScope.evidence.length } : {}) });
   }
 
   async function simpleBookingContext(request: FastifyRequest, reply: FastifyReply) {
@@ -1118,15 +1125,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.header("Cache-Control", "private, no-store").send({ currency, purposes: [...purposes.values()] });
   });
 
-  app.post<{ Body: SimpleBookingBody }>("/api/modules/finance/simple-booking", { schema: { body: simpleBookingInput } }, async (request, reply) => {
+  app.post<{ Body: SimpleBookingBody }>("/api/modules/finance/simple-booking", { bodyLimit: simpleEvidenceBodyLimit, schema: { body: simpleBookingInput } }, async (request, reply) => {
     const scope = await simpleBookingContext(request, reply); if (!scope) return reply;
     if (!validateMutation(request, reply)) return reply;
-    const { purposeId, amountCents, bookingDate, bookingText, receiptNumber, submissionId, currency } = request.body;
+    const { purposeId, amountCents, bookingDate, bookingText, receiptNumber, submissionId, currency, receipts = [] } = request.body;
     if (Boolean(receiptNumber) === Boolean(submissionId)) {
       return reply.code(400).send({ error: "Enter a receipt number or request automatic numbering." });
     }
     const [purpose] = await scopedSimplePurposes(pool!, scope.departmentId, scope.userId, purposeId);
     if (!purpose) return reply.code(404).send({ error: "Booking purpose not found for your group." });
+    const evidence = prepareSimpleEvidence(receipts);
+    if ("error" in evidence) return reply.code(evidence.status).send({ error: evidence.error });
     const income = purpose.direction === "income";
     return postJournal(request, reply, scope.departmentId, {
       bookingDate, bookingText, receiptNumber, submissionId,
@@ -1135,7 +1144,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         { accountId: purpose.counterAccountId, costCenterId: purpose.costCenterId,
           debitCents: income ? 0 : amountCents, creditCents: income ? amountCents : 0 },
       ],
-    }, { userId: scope.userId, purposeId: purpose.id, currency });
+    }, { userId: scope.userId, purposeId: purpose.id, currency, evidence });
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/finance/transactions/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
