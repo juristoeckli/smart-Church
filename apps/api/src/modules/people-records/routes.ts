@@ -3,6 +3,7 @@ import { registerGrowthTrajectory } from "./growth-trajectory.js";
 import { personTagMatch } from "./tag-search.js";
 import { registerGroupMembershipImport } from "./group-membership-import.js";
 import { presentMeetingFilter, registerPeopleMeetingFilter } from "./directory-meeting-filter.js";
+import { registerPeopleRecordsReplication } from "./replication.js";
 import { registerPrivatePersonNotes } from "./private-person-notes.js";
 import { registerPersonServiceWorkload } from "./person-service-workload.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -84,6 +85,7 @@ function normalizeFieldFilter(fieldType: string, options: unknown, value: string
 }
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
+  registerPeopleRecordsReplication(context);
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, write = false) {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "People Records are unavailable because the database is not ready." }); return null; }
