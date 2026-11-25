@@ -1,3 +1,4 @@
+import { registerGroupMeetingPins } from "./group-meeting-pins.js";
 import { canReadPrivateContactDetails, hasLocationPermission } from "../../location-grants.js";
 import { registerBulkGroupLifecycle } from "./group-bulk-lifecycle.js";
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
@@ -59,24 +60,30 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT g.id, g.name, g.description, g.group_type, g.status, g.starts_on, g.ends_on, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token,
+        `SELECT g.id, g.name, g.description, g.group_type, g.status, g.starts_on, g.ends_on, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token, pin.latitude, pin.longitude,
                 EXISTS (SELECT 1 FROM department_memberships membership
                   JOIN group_members own_member ON own_member.contact_id=membership.contact_id AND own_member.group_id=g.id
                  WHERE membership.department_id=g.department_id AND membership.user_id=$2 AND own_member.status='active') AS is_my_group,
                 count(gm.contact_id)::int AS member_count,
                 COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids,
                 COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on) ORDER BY lower(c.last_name),lower(c.first_name)) FILTER (WHERE gm.contact_id IS NOT NULL), '[]'::json) AS member_details
-           FROM church_groups g LEFT JOIN group_members gm ON gm.group_id = g.id LEFT JOIN contacts c ON c.id=gm.contact_id
-          WHERE g.department_id = $1 GROUP BY g.id ORDER BY lower(g.name), g.created_at`,
+           FROM church_groups g LEFT JOIN group_meeting_pins pin ON pin.group_id=g.id AND pin.department_id=g.department_id
+           LEFT JOIN group_members gm ON gm.group_id = g.id LEFT JOIN contacts c ON c.id=gm.contact_id
+          WHERE g.department_id = $1 GROUP BY g.id,pin.latitude,pin.longitude ORDER BY lower(g.name), g.created_at`,
         [departmentId, request.authenticatedUser!.id],
       );
       const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
       reply.header('cache-control', 'private, no-store');
       return result.rows.map((row) => {
-        const group = { ...mapGroup(row), isMyGroup: row.is_my_group === true };
+        const pinVisible = row.status === "active" || (canManageGroups && row.status !== "archived");
+        const group = { ...mapGroup(row), isMyGroup: row.is_my_group === true,
+          ...(pinVisible && typeof row.latitude === "number" && typeof row.longitude === "number"
+            ? { meetingPin: { latitude: row.latitude, longitude: row.longitude } } : {}) };
         return canManageGroups ? group : (({ publicSignupToken: _token, ...safeGroup }) => safeGroup)(group);
       });
     });
+
+    registerGroupMeetingPins(routes, dependencies, (request, reply) => department(request, reply, "groups_manage"));
 
     routes.get("/api/groups/views", async (request, reply) => {
       const departmentId = await department(request, reply);
@@ -88,8 +95,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       )).rows;
     });
 
-    routes.post<{ Body: { name: string; searchText?: string; statusFilter?: "all" | GroupLifecycleStatus; groupTypeFilter?: string; sourceFilter?: "all" | "local" | "churchtools" | "elvanto"; myGroupsOnly?: boolean; sortOrder?: "name_asc" | "name_desc" | "members_desc" | "start_desc"; displayMode?: "list" | "table"; visibleColumns?: string[] } }>("/api/groups/views", { schema: {
-      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] }, groupTypeFilter: { type: "string", maxLength: 80 }, sourceFilter: { type: "string", enum: ["all", "local", "churchtools", "elvanto"] }, myGroupsOnly: { type: "boolean" }, sortOrder: { type: "string", enum: ["name_asc", "name_desc", "members_desc", "start_desc"] }, displayMode: { type: "string", enum: ["list", "table"] }, visibleColumns: { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["type", "status", "members", "start", "end"] } } } },
+    routes.post<{ Body: { name: string; searchText?: string; statusFilter?: "all" | GroupLifecycleStatus; groupTypeFilter?: string; sourceFilter?: "all" | "local" | "churchtools" | "elvanto"; myGroupsOnly?: boolean; sortOrder?: "name_asc" | "name_desc" | "members_desc" | "start_desc"; displayMode?: "list" | "table" | "map"; visibleColumns?: string[] } }>("/api/groups/views", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] }, groupTypeFilter: { type: "string", maxLength: 80 }, sourceFilter: { type: "string", enum: ["all", "local", "churchtools", "elvanto"] }, myGroupsOnly: { type: "boolean" }, sortOrder: { type: "string", enum: ["name_asc", "name_desc", "members_desc", "start_desc"] }, displayMode: { type: "string", enum: ["list", "table", "map"] }, visibleColumns: { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["type", "status", "members", "start", "end"] } } } },
     } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply);
@@ -112,7 +119,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
     routes.patch<{ Params: { id: string }; Body: { name: string; searchText?: string; statusFilter?: "all" | GroupLifecycleStatus; groupTypeFilter?: string; sourceFilter?: "all" | "local" | "churchtools" | "elvanto"; myGroupsOnly?: boolean; sortOrder?: string; displayMode?: string; visibleColumns?: string[] } }>("/api/groups/views/:id", { schema: {
       params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] }, groupTypeFilter: { type: "string", maxLength: 80 }, sourceFilter: { type: "string", enum: ["all", "local", "churchtools", "elvanto"] }, myGroupsOnly: { type: "boolean" }, sortOrder: { type: "string", enum: ["name_asc", "name_desc", "members_desc", "start_desc"] }, displayMode: { type: "string", enum: ["list", "table"] }, visibleColumns: { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["type", "status", "members", "start", "end"] } } } },
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] }, groupTypeFilter: { type: "string", maxLength: 80 }, sourceFilter: { type: "string", enum: ["all", "local", "churchtools", "elvanto"] }, myGroupsOnly: { type: "boolean" }, sortOrder: { type: "string", enum: ["name_asc", "name_desc", "members_desc", "start_desc"] }, displayMode: { type: "string", enum: ["list", "table", "map"] }, visibleColumns: { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["type", "status", "members", "start", "end"] } } } },
     } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply);

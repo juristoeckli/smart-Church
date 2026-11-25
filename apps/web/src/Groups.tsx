@@ -1,3 +1,4 @@
+import { GroupDirectoryMap, GroupMeetingPinEditor } from "./GroupDirectoryMap";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Check, ContactRound, Download, Link2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { ChurchGroup, Contact, GroupLifecycleStatus } from "@smart-church/contracts";
@@ -28,7 +29,7 @@ const groupColumns = [
 type GroupColumn = (typeof groupColumns)[number]["key"];
 const defaultGroupColumns: GroupColumn[] = groupColumns.map(({ key }) => key);
 
-type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sourceFilter?: GroupSourceFilter; myGroupsOnly?: boolean; sortOrder?: GroupSortOrder; displayMode?: "list" | "table"; visibleColumns?: GroupColumn[]; createdAt: string; updatedAt: string };
+type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sourceFilter?: GroupSourceFilter; myGroupsOnly?: boolean; sortOrder?: GroupSortOrder; displayMode?: "list" | "table" | "map"; visibleColumns?: GroupColumn[]; createdAt: string; updatedAt: string };
 
 function csvCell(value: string | number) {
   const text = String(value);
@@ -105,7 +106,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const [sourceFilter, setSourceFilter] = useState<GroupSourceFilter>("all");
   const [sortOrder, setSortOrder] = useState<GroupSortOrder>("name_asc");
   const [directorySelection, setDirectorySelection] = useState<Set<string>>(() => new Set());
-  const [displayMode, setDisplayMode] = useState<"list" | "table">("list");
+  const [displayMode, setDisplayMode] = useState<"list" | "table" | "map">("list");
   const [visibleColumns, setVisibleColumns] = useState<GroupColumn[]>(defaultGroupColumns);
   const displayedColumns = groupColumns.filter(({ key }) => visibleColumns.includes(key));
   const [savedViews, setSavedViews] = useState<SavedGroupView[]>([]);
@@ -653,8 +654,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
             </form>}
             {statusNotice && <p role="status">{statusNotice}</p>}
           <label className="community-group-status-filter">Layout
-            <select value={displayMode} onChange={(event) => { setDisplayMode(event.target.value === "table" ? "table" : "list"); }}>
-              <option value="list">List</option><option value="table">Table</option>
+            <select value={displayMode} onChange={(event) => { setDisplayMode(event.target.value === "map" ? "map" : event.target.value === "table" ? "table" : "list"); }}>
+              <option value="list">List</option><option value="table">Table</option><option value="map">Map</option>
             </select>
           </label>
           {displayMode === "table" && <details>
@@ -684,6 +685,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
             </button>
           </form>
         </details>}
+        {displayMode === "map" && !loading && loadedDepartmentId === departmentId && <GroupDirectoryMap key={departmentId}
+          groups={visibleGroups} onGroup={(group) => { setSelectedId(group.id); setDetailsGroup(group); }} />}
         {loading ? <p className="community-empty">{translate("groups.loading")}</p> : visibleGroups.length ? displayMode === "table" ? (
           <div className="table-scroll">
             <table className="people-table" aria-label="Groups directory">
@@ -714,6 +717,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       <section className="directory-card community-group-detail">
         {selected ? <>
           <div className="directory-heading"><div><h2>{selected.name}</h2><p>{selected.importedFrom ? translate("groups.importedReadOnly") : selected.description || translate("groups.descriptionFallback")}</p><small className="community-group-lifecycle">{selected.groupType ? `${selected.groupType} · ` : ""}{selected.status}{selected.startsOn ? ` · starts ${formatUserDate(selected.startsOn)}` : ""}{selected.endsOn ? ` · ends ${formatUserDate(selected.endsOn)}` : ""}</small></div>{canManage && !selected.importedFrom && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => setEditing((current) => !current)}><Pencil size={14} />{editing ? translate("groups.cancelEdit") : translate("groups.edit")}</button><button className="button button-danger" type="button" onClick={() => void deleteGroup(selected)}><Trash2 size={14} />{translate("groups.delete")}</button></div>}</div>
+          {canManage && !selected.importedFrom && selected.status !== "archived" && loadedDepartmentId === departmentId && <GroupMeetingPinEditor
+            key={departmentId + ":" + selected.id} group={selected} departmentId={departmentId} csrfToken={csrfToken} onSaved={loadGroups} />}
           {canManage && !selected.importedFrom && loadedDepartmentId === departmentId && <GroupDuplicateForm
             key={departmentId + ":" + selected.id} groupId={selected.id} groupName={selected.name} departmentId={departmentId} csrfToken={csrfToken}
             onCreated={async id => {

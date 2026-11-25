@@ -238,6 +238,7 @@ export interface ChurchGroup {
   createdAt: string;
   publicSignupEnabled?: boolean;
   publicSignupToken?: string;
+  meetingPin?: { latitude: number; longitude: number };
   importedFrom?: "churchtools" | "elvanto";
 }
 
