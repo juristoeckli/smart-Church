@@ -630,6 +630,93 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     publish(departmentId, "account-created", id); return reply.code(201).send({ id, code, name, accountType: request.body.accountType, active: true });
   });
 
+  app.post<{ Params: { stage: "preview" | "apply" }; Body: { csv: string; review?: string } }>(
+    "/api/modules/finance/accounts/import/:stage",
+    { bodyLimit: 1_600_000, schema: {
+      params: { type: "object", required: ["stage"], properties: { stage: { type: "string", enum: ["preview", "apply"] } } },
+      body: { type: "object", additionalProperties: false, required: ["csv"],
+        properties: { csv: { type: "string", minLength: 1, maxLength: 256_000 }, review: { type: "string", pattern: "^[a-f0-9]{64}$" } } },
+    } },
+    async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId || !validateMutation(request, reply)) return reply;
+      const { csv, review } = request.body;
+      const applying = request.params.stage === "apply";
+      if (applying && !review) return reply.code(400).send({ error: "Review the CSV before importing." });
+      const parsed = parseCsvRows(csv.replace(/^\uFEFF/, ""));
+      if (typeof parsed === "string" || parsed.length > 501) {
+        return reply.code(400).send({ error: "Use a well-formed CSV with a header and 1 to 500 account rows." });
+      }
+      const headers = parsed[0].map(value => value.trim().toLowerCase());
+      const indexes = ["code", "name", "type", "active"].map(name => headers.indexOf(name));
+      if (headers.length !== indexes.length || indexes.includes(-1)) {
+        return reply.code(400).send({ error: "The CSV must have Code, Name, Type, and Active columns." });
+      }
+      const seen = new Set<string>();
+      const candidates = parsed.slice(1).map((columns, index) => {
+        const [rawCode, rawName, rawType, rawActive] = indexes.map(column => columns[column]);
+        const code = cleanText(rawCode);
+        const name = cleanText(rawName);
+        const accountType = rawType.trim().toLowerCase();
+        const activeValue = rawActive.trim().toLowerCase();
+        let error: string | undefined;
+        if (!code || code.length > 32 || !name || name.length > 160) error = "Enter a code up to 32 and a name up to 160 characters.";
+        else if (!["asset", "liability", "equity", "income", "expense"].includes(accountType)) error = "Choose a supported account type.";
+        else if (!["true", "false"].includes(activeValue)) error = "Active must be true or false.";
+        else if (seen.has(code)) error = "Duplicate account code in this file.";
+        seen.add(code);
+        return { rowNumber: index + 2, code, name, accountType, active: activeValue === "true", error };
+      });
+      const client = await pool!.connect();
+      try {
+        if (applying) {
+          await client.query("BEGIN");
+          if (!await context.lockDepartmentForWrite(client, departmentId)) {
+            await client.query("ROLLBACK");
+            return reply.code(423).send({ error: "This location is read-only." });
+          }
+        }
+        const { rows: existing } = await client.query<{ code: string }>(
+          "SELECT code FROM finance_accounts WHERE department_id=$1 AND code=ANY($2::text[])",
+          [departmentId, candidates.map(candidate => candidate.code)],
+        );
+        const existingCodes = new Set(existing.map(account => account.code));
+        const rows = candidates.map(candidate => ({ ...candidate,
+          status: candidate.error ? "invalid" : existingCodes.has(candidate.code) ? "skip" : "create" }));
+        const creates = rows.filter(row => row.status === "create");
+        const skips = rows.filter(row => row.status === "skip").length;
+        const errors = rows.filter(row => row.status === "invalid").length;
+        const fingerprint = createHash("sha256").update(JSON.stringify([departmentId, csv, rows.map(row => row.status)])).digest("hex");
+        if (!applying) return { rows, creates: creates.length, skips, errors, review: fingerprint };
+        if (review !== fingerprint || errors || !creates.length) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The import is no longer ready. Review the CSV again." });
+        }
+        const inserted = await client.query(
+          `INSERT INTO finance_accounts(id,department_id,code,name,account_type,active)
+            SELECT id,$1,code,name,account_type,active
+            FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[]) AS source(id,code,name,account_type,active)
+            ORDER BY code ON CONFLICT (department_id,code) DO NOTHING RETURNING id`,
+          [departmentId, creates.map(() => randomUUID()), creates.map(row => row.code), creates.map(row => row.name),
+            creates.map(row => row.accountType), creates.map(row => row.active)],
+        );
+        if (inserted.rowCount !== creates.length) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "An account code was added during import. Review the CSV again." });
+        }
+        const importId = randomUUID();
+        await audit(client, departmentId, request, "accounts_imported", "account_import", importId,
+          { imported: creates.length, skipped: skips, sha256: createHash("sha256").update(csv).digest("hex") });
+        await client.query("COMMIT");
+        publish(departmentId, "accounts-imported", importId);
+        return reply.code(201).send({ imported: creates.length, skipped: skips });
+      } catch (error) {
+        if (applying) await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    },
+  );
+
   app.patch<{ Params: { id: string }; Body: { active: boolean } }>("/api/modules/finance/accounts/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["active"], properties: { active: { type: "boolean" } } } } }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
     const result = await pool!.query("UPDATE finance_accounts SET active=$3,updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id", [departmentId, request.params.id, request.body.active]);
