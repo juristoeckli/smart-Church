@@ -1,5 +1,5 @@
 export type ImportedBankStatementEntry = { line: number; date: string; amount: number; description: string; reference: string };
-type Mt940Statement = { entries: ImportedBankStatementEntry[]; currency: string; accountEnding: string };
+type Mt940Statement = { entries: ImportedBankStatementEntry[]; currency: string; accountEnding: string; sourceAccount: string };
 const maxCents = 9_000_000_000_000_000n;
 
 function isoDate(year: number, monthAndDay: string) {
@@ -127,7 +127,7 @@ export function parseMt940(input: string): Mt940Statement | string {
   }
   if (!message?.closed) return "An MT940 statement must have a final or intermediate closing balance.";
   if (!entries.length) return "The MT940 statement contains no booked entries.";
-  return { entries, currency: expectedCurrency, accountEnding: expectedAccount.slice(-4) };
+  return { entries, currency: expectedCurrency, accountEnding: expectedAccount.slice(-4), sourceAccount: expectedAccount };
 }
 
 export function statementPreviewAmount(cents: number) {

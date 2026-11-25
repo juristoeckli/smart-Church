@@ -7,7 +7,7 @@ type Element = {
   currency?: string;
   children: Element[];
 };
-type Statement = { entries: ImportedBankStatementEntry[]; accountEnding: string; currency: string };
+type Statement = { entries: ImportedBankStatementEntry[]; accountEnding: string; currency: string; sourceAccount: string; sourceAccountIsIban: boolean };
 
 const camtNamespace = /^urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.\d{2}$/;
 const maxCents = 9_000_000_000_000_000n;
@@ -118,6 +118,7 @@ export function parseCamt053(input: string): Statement | string {
     const entries: ImportedBankStatementEntry[] = [];
     const ids = new Set<string>();
     let account = "";
+    let isIban = false;
     let currency = "";
     let previousClosing: bigint | undefined;
     for (const statement of statements) {
@@ -129,10 +130,11 @@ export function parseCamt053(input: string): Statement | string {
       const iban = value(accountId, "IBAN").replace(/\s/g, "").toUpperCase();
       const other = value(child(accountId, "Othr"), "Id");
       const identifier = iban || other;
-      if (!identifier || identifier.length > 100 || (iban && other) || (account && account !== identifier)) {
+      if (!identifier || identifier.length > 100 || (iban && other) || (account && (account !== identifier || isIban !== Boolean(iban)))) {
         return "The CAMT.053 file must identify one source account.";
       }
       account = identifier;
+      isIban = Boolean(iban);
       const statementCurrency = value(accountNode, "Ccy")
         || children(statement, "Bal").find(item => child(item, "Amt")?.currency)?.children.find(item => item.name === "Amt")?.currency
         || child(children(statement, "Ntry")[0], "Amt")?.currency || "";
@@ -165,7 +167,7 @@ export function parseCamt053(input: string): Statement | string {
       previousClosing = closing;
     }
     if (!entries.length) return "The CAMT.053 file contains no booked entries.";
-    return { entries, currency, accountEnding: account.length > 4 ? account.slice(-4) : "••••" };
+    return { entries, currency, accountEnding: account.length > 4 ? account.slice(-4) : "••••", sourceAccount: account, sourceAccountIsIban: isIban };
   } catch (error) {
     return error instanceof Error ? error.message : "The CAMT.053 file could not be read.";
   }

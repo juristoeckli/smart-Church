@@ -1306,15 +1306,38 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply, "finance-transactions", header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.donor_name, row.debit_cents, row.credit_cents, row.line_text]));
   });
 
-  type StatementUpload = { accountId: string; fileName: string; csv?: string; mt940?: string; camt053?: string };
+  type NativeStatementUpload = { mt940?: string; camt053?: string };
+  type StatementUpload = NativeStatementUpload & { accountId: string; fileName: string; csv?: string };
   type StatementMapping = { date: number; amount: number; description?: number | null; reference?: number | null };
   const statementText = { type: "string", minLength: 1, maxLength: 2_000_000 } as const;
-  function statementUpload(body: StatementUpload) {
+  function statementUpload(body: NativeStatementUpload & { csv?: string }) {
     const formats = (["csv", "mt940", "camt053"] as const).filter(format => body[format] !== undefined);
     if (formats.length !== 1) return null;
     const format = formats[0]!;
     const content = body[format]!;
     return { format, content: format === "csv" ? content : content.replace(/^\uFEFF/, "").replace(/\r\n|\r/g, "\n") };
+  }
+  function readNativeStatement(departmentId: string, format: "mt940" | "camt053", content: string) {
+    const parsed = format === "mt940" ? parseMt940(content) : parseCamt053(content);
+    if (typeof parsed === "string") return parsed;
+    // Parsers already trim identifiers. Identical, syntactically IBAN-shaped identifiers can
+    // be recognized across formats; other identifiers remain exact and format-specific.
+    const normalized = parsed.sourceAccount.toUpperCase();
+    const isIban = /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(normalized)
+      && (!("sourceAccountIsIban" in parsed) || parsed.sourceAccountIsIban);
+    const digest = createHash("sha256")
+      .update(JSON.stringify(["smart-church.bank-statement-source.v1", departmentId, parsed.currency,
+        isIban ? "iban" : format, isIban ? normalized : parsed.sourceAccount]))
+      .digest("hex");
+    return { entries: parsed.entries, currency: parsed.currency, accountEnding: parsed.accountEnding, digest };
+  }
+  async function recognizedStatementAccount(departmentId: string, digest: string) {
+    const { rows: [mapping] } = await pool!.query<{ accountId: string; available: boolean }>(
+      `SELECT mapping.account_id AS "accountId", (account.active AND account.account_type='asset') AS available
+         FROM finance_bank_statement_account_mappings mapping
+         JOIN finance_accounts account ON account.department_id=mapping.department_id AND account.id=mapping.account_id
+        WHERE mapping.department_id=$1 AND mapping.source_digest=$2`, [departmentId, digest]);
+    return mapping ?? null;
   }
   async function statementCurrency(departmentId: string, db: Pool | PoolClient = pool!, lock = false) {
     const { rows: [settings] } = await db.query<{ currency_code: string }>(
@@ -1333,6 +1356,22 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await db.query<{ id: string; account_type: string; active: boolean }>(`SELECT id,account_type,active FROM finance_accounts WHERE department_id=$1 AND id=$2 ${lock ? "FOR SHARE" : ""}`, [departmentId, accountId]);
     return result.rows[0]?.account_type === "asset" && result.rows[0]?.active ? result.rows[0] : null;
   }
+
+  app.post<{ Body: NativeStatementUpload }>("/api/modules/finance/bank-statements/recognize", {
+    bodyLimit: 2_200_000,
+    schema: { body: { type: "object", additionalProperties: false, properties: { mt940: statementText, camt053: statementText } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    const upload = statementUpload(request.body);
+    if (!upload || upload.format === "csv") return reply.code(400).send({ error: "Choose one MT940 or CAMT.053 statement." });
+    const parsed = readNativeStatement(departmentId, upload.format, upload.content);
+    if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+    if (parsed.currency !== await statementCurrency(departmentId)) {
+      return reply.code(400).send({ error: "The statement currency does not match this ledger." });
+    }
+    const mapping = await recognizedStatementAccount(departmentId, parsed.digest);
+    return reply.header("Cache-Control", "private, no-store").send({ accountId: mapping?.available ? mapping.accountId : null });
+  });
 
   app.get("/api/modules/finance/bank-suggestion-rules", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
@@ -1414,7 +1453,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const contentHash = createHash("sha256").update(upload.content, "utf8").digest("hex");
     const duplicate = Boolean((await findStatementImport(departmentId, request.body.accountId, contentHash)).rowCount);
     if (upload.format !== "csv") {
-      const parsed = upload.format === "mt940" ? parseMt940(upload.content) : parseCamt053(upload.content);
+      const parsed = readNativeStatement(departmentId, upload.format, upload.content);
       if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
       if (parsed.currency !== await statementCurrency(departmentId)) {
         return reply.code(400).send({ error: "The statement currency does not match this ledger." });
@@ -1422,6 +1461,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.header("Cache-Control", "private, no-store").send({
         format: upload.format, rowCount: parsed.entries.length, duplicate,
         accountEnding: parsed.accountEnding, currency: parsed.currency,
+        rememberedAccountId: (await recognizedStatementAccount(departmentId, parsed.digest))?.accountId ?? null,
         headers: ["Booking date", "Amount", "Description", "Reference"],
         sample: parsed.entries.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.amount), row.description, row.reference]),
       });
@@ -1432,10 +1472,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { headers, rowCount: parsed.length - 1, duplicate, sample: parsed.slice(1, 6).map((row) => row.map((value) => value.slice(0, 200))) };
   });
 
-  app.post<{ Body: StatementUpload & { mapping?: StatementMapping; confirmSourceAccount?: boolean } }>("/api/modules/finance/bank-statements/import", {
+  app.post<{ Body: StatementUpload & { mapping?: StatementMapping; confirmSourceAccount?: boolean; rememberSource?: { expectedAccountId: string | null } } }>("/api/modules/finance/bank-statements/import", {
     bodyLimit: 2_200_000,
     schema: { body: { ...statementUploadSchema, properties: { ...statementUploadSchema.properties,
       confirmSourceAccount: { type: "boolean" },
+      rememberSource: { type: "object", additionalProperties: false, required: ["expectedAccountId"], properties: {
+        expectedAccountId: { anyOf: [uuid, { type: "null" }] },
+      } },
       mapping: { type: "object", additionalProperties: false, required: ["date", "amount"], properties: {
         date: { type: "integer", minimum: 0, maximum: 49 }, amount: { type: "integer", minimum: 0, maximum: 49 },
         description: { anyOf: [{ type: "integer", minimum: 0, maximum: 49 }, { type: "null" }] },
@@ -1449,14 +1492,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const upload = statementUpload(request.body);
     if (!upload) return reply.code(400).send({ error: "Choose one CSV, MT940, or CAMT.053 statement." });
     let nativeStatementCurrency: string | undefined;
+    let nativeSourceDigest: string | undefined;
+    const rememberSource = request.body.rememberSource;
+    if (rememberSource && upload.format === "csv") {
+      return reply.code(400).send({ error: "Only MT940 and CAMT.053 source accounts can be remembered." });
+    }
     let rows: ImportedBankStatementEntry[];
     if (upload.format !== "csv") {
       if (request.body.confirmSourceAccount !== true) {
         return reply.code(400).send({ error: "Confirm the source account matches the chosen ledger account." });
       }
-      const parsed = upload.format === "mt940" ? parseMt940(upload.content) : parseCamt053(upload.content);
+      const parsed = readNativeStatement(departmentId, upload.format, upload.content);
       if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
       nativeStatementCurrency = parsed.currency;
+      nativeSourceDigest = parsed.digest;
       if (nativeStatementCurrency !== await statementCurrency(departmentId)) {
         return reply.code(400).send({ error: "The statement currency does not match this ledger." });
       }
@@ -1530,12 +1579,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(409).send({ error: "The ledger account or currency has changed. Review this statement again." });
         }
       }
+      if (rememberSource && nativeSourceDigest) {
+        const expected = rememberSource.expectedAccountId;
+        const saved = expected === null
+          ? await client.query(`INSERT INTO finance_bank_statement_account_mappings(department_id,source_digest,account_id)
+                                 VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, [departmentId, nativeSourceDigest, request.body.accountId])
+          : await client.query(`UPDATE finance_bank_statement_account_mappings SET account_id=$3,updated_at=now()
+                                  WHERE department_id=$1 AND source_digest=$2 AND account_id=$4`,
+            [departmentId, nativeSourceDigest, request.body.accountId, expected]);
+        if (saved.rowCount !== 1) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The remembered account changed. Preview the file again before replacing the mapping." });
+        }
+      }
       await client.query("INSERT INTO finance_bank_statement_imports(id,department_id,account_id,file_name,content_sha256,imported_by,row_count) VALUES($1,$2,$3,$4,$5,$6,$7)", [batchId, departmentId, request.body.accountId, fileName, contentHash, request.authenticatedUser?.id ?? null, rows.length]);
       for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index]!; const suggestedTransactionId = suggested[index];
         await client.query("INSERT INTO finance_bank_statement_rows(id,department_id,import_id,line_number,booking_date,description,reference,amount_cents,status,suggested_transaction_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, batchId, row.line, row.date, row.description, row.reference, row.amount, suggestedTransactionId ? "suggested" : "unmatched", suggestedTransactionId]);
       }
-      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: rules.length, ruleAppliedRows, ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency } : {}) });
+      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: rules.length, ruleAppliedRows, ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency, ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}) });
       await client.query("COMMIT");
       publish(departmentId, "bank-statement-imported", batchId);
       return reply.code(201).send({ id: batchId, rowCount: rows.length, suggestedCount: suggested.filter(Boolean).length });
