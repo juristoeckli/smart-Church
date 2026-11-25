@@ -1,3 +1,4 @@
+import { maximumArchiveUploadLength, readStatementArchive } from "./bank-statement-archive.js";
 import { parsePaypalActivity, type PaypalDateOrder, type PaypalEntry, isPaypalActivityHeader } from "./paypal-activity.js";
 import { bankStatementSuggestions, currentBankStatus, currentBankSuggestion } from "./bank-suggestions.js";
 import { registerFinanceReplication } from "./replication.js";
@@ -1366,7 +1367,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const content = body[format]!;
     return { format, content: format === "csv" ? content : content.replace(/^\uFEFF/, "").replace(/\r\n|\r/g, "\n") };
   }
-  async function readNativeStatement(departmentId: string, format: "mt940" | "camt053", content: string) {
+  async function readNativeStatement(departmentId: string, format: "mt940" | "camt053", content: string, archiveScope?: string) {
     const parsed = format === "mt940" ? parseMt940(content) : parseCamt053(content);
     if (typeof parsed === "string") return parsed;
     // Parsers already trim identifiers. Identical, syntactically IBAN-shaped identifiers can
@@ -1374,7 +1375,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const normalized = parsed.sourceAccount.toUpperCase();
     const isIban = /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(normalized)
       && (!("sourceAccountIsIban" in parsed) || parsed.sourceAccountIsIban);
-    const scope = await statementMappingScope(departmentId);
+    const scope = archiveScope ?? await statementMappingScope(departmentId);
     const digest = createHash("sha256")
       .update(JSON.stringify(["smart-church.bank-statement-source.v1", scope, parsed.currency,
         isIban ? "iban" : format, isIban ? normalized : parsed.sourceAccount]))
@@ -1674,7 +1675,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         overlapCount = paypalReport.duplicateCount + paypalReport.entries.length - selected.length;
         paypalByLine = new Map(selected.map(row => [row.line, row]));
       }
-      const { suggestions: suggested, ruleCount, ruleAppliedRows } = await bankStatementSuggestions(client, departmentId, request.body.accountId, rows);
       if (rememberSource && nativeSourceDigest && nativeSourceScope) {
         await client.query(`INSERT INTO finance_settings(department_id,statement_mapping_scope)
           VALUES($1,$2) ON CONFLICT(department_id) DO UPDATE SET statement_mapping_scope=EXCLUDED.statement_mapping_scope
@@ -1695,21 +1695,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(409).send({ error: "The remembered account changed. Preview the file again before replacing the mapping." });
         }
       }
-      await client.query("INSERT INTO finance_bank_statement_imports(id,department_id,account_id,file_name,content_sha256,imported_by,row_count) VALUES($1,$2,$3,$4,$5,$6,$7)", [batchId, departmentId, request.body.accountId, fileName, contentHash, request.authenticatedUser?.id ?? null, rows.length]);
-      for (let index = 0; index < rows.length; index += 1) {
-        const row = rows[index]!; const suggestedTransactionId = suggested[index];
-        const rowId = randomUUID();
-        await client.query("INSERT INTO finance_bank_statement_rows(id,department_id,import_id,line_number,booking_date,description,reference,amount_cents,status,suggested_transaction_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [rowId, departmentId, batchId, row.line, row.date, row.description, row.reference, row.amount, suggestedTransactionId ? "suggested" : "unmatched", suggestedTransactionId]);
-        const paypal = paypalByLine.get(row.line);
-        if (paypal) await client.query(
-          "INSERT INTO finance_paypal_statement_keys(department_id,fingerprint,row_id,gross_cents,fee_cents,currency_code) VALUES($1,$2,$3,$4,$5,$6)",
-          [departmentId, paypal.fingerprint, rowId, paypal.gross, paypal.fee, nativeStatementCurrency],
-        );
-      }
-      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: ruleCount, ruleAppliedRows, ...(paypalReport ? { overlapCount, ignoredCount: paypalReport.ignoredCount } : {}), ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency, ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}) });
+      const result = await writeStatementImport(client, departmentId, request, {
+        batchId, accountId: request.body.accountId, fileName, contentHash, rows, paypalByLine,
+        nativeCurrency: nativeStatementCurrency,
+        details: {
+          ...(paypalReport ? { overlapCount, ignoredCount: paypalReport.ignoredCount } : {}),
+          ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency,
+            ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}),
+        },
+      });
       await client.query("COMMIT");
       publish(departmentId, "bank-statement-imported", batchId);
-      return reply.code(201).send({ id: batchId, rowCount: rows.length, suggestedCount: suggested.filter(Boolean).length, ...(paypalReport ? { overlapCount, ignoredCount: paypalReport.ignoredCount } : {}) });
+      return reply.code(201).send({ ...result, ...(paypalReport ? { overlapCount, ignoredCount: paypalReport.ignoredCount } : {}) });
     } catch (error) {
       await client.query("ROLLBACK");
       if ((error as { code?: string }).code === "23505") return reply.code(409).send({
@@ -1717,6 +1714,169 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       });
       throw error;
     } finally { client.release(); }
+  });
+
+  async function writeStatementImport(client: PoolClient, departmentId: string, request: FastifyRequest, options: {
+    batchId: string; accountId: string; fileName: string; contentHash: string; rows: ImportedBankStatementEntry[];
+    paypalByLine?: Map<number, PaypalEntry>; nativeCurrency?: string; details: Record<string, unknown>;
+  }) {
+    const { batchId, accountId, fileName, contentHash, rows, paypalByLine, nativeCurrency, details } = options;
+    const { suggestions: suggested, ruleCount, ruleAppliedRows } = await bankStatementSuggestions(client, departmentId, accountId, rows);
+    await client.query("INSERT INTO finance_bank_statement_imports(id,department_id,account_id,file_name,content_sha256,imported_by,row_count) VALUES($1,$2,$3,$4,$5,$6,$7)", [batchId, departmentId, accountId, fileName, contentHash, request.authenticatedUser?.id ?? null, rows.length]);
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]!; const suggestedTransactionId = suggested[index];
+      const rowId = randomUUID();
+      await client.query("INSERT INTO finance_bank_statement_rows(id,department_id,import_id,line_number,booking_date,description,reference,amount_cents,status,suggested_transaction_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [rowId, departmentId, batchId, row.line, row.date, row.description, row.reference, row.amount, suggestedTransactionId ? "suggested" : "unmatched", suggestedTransactionId]);
+      const paypal = paypalByLine?.get(row.line);
+      if (paypal) await client.query(
+        "INSERT INTO finance_paypal_statement_keys(department_id,fingerprint,row_id,gross_cents,fee_cents,currency_code) VALUES($1,$2,$3,$4,$5,$6)",
+        [departmentId, paypal.fingerprint, rowId, paypal.gross, paypal.fee, nativeCurrency],
+      );
+    }
+    const suggestedCount = suggested.filter(Boolean).length;
+    await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId,
+      { fileName, rowCount: rows.length, accountId, suggestedCount, activeRuleCount: ruleCount, ruleAppliedRows, ...details });
+    return { id: batchId, rowCount: rows.length, suggestedCount };
+  }
+
+  type StatementArchiveUpload = { accountId: string; fileName: string; zip: string; confirmSourceAccount?: boolean };
+  const statementArchiveSchema = {
+    type: "object", additionalProperties: false, required: ["accountId", "fileName", "zip"],
+    properties: {
+      accountId: uuid, fileName: { type: "string", minLength: 1, maxLength: 180 },
+      zip: { type: "string", minLength: 4, maxLength: maximumArchiveUploadLength },
+      confirmSourceAccount: { type: "boolean" },
+    },
+  } as const;
+
+  async function readNativeArchive(departmentId: string, encoded: string) {
+    const sources = await readStatementArchive(encoded);
+    if (typeof sources === "string") return sources;
+    const format = sources[0]!.format;
+    if (sources.some(source => source.format !== format)) return "All statements in a ZIP must use the same format.";
+    const scope = await statementMappingScope(departmentId);
+    const files: { fileName: string; contentHash: string; rows: ImportedBankStatementEntry[] }[] = [];
+    const hashes = new Set<string>();
+    let account: { digest: string; currency: string; accountEnding: string } | undefined;
+    let rowCount = 0;
+    let firstDate = "9999-12-31", lastDate = "0000-01-01";
+    for (const source of sources) {
+      const fileName = cleanText(source.filename).slice(0, 180) || `statement.${format}`;
+      const content = source.content.replace(/^\uFEFF/, "").replace(/\r\n|\r/g, "\n");
+      const parsed = await readNativeStatement(departmentId, format, content, scope);
+      if (typeof parsed === "string") return `${fileName}: ${parsed}`;
+      if (account && (account.digest !== parsed.digest || account.currency !== parsed.currency)) {
+        return "All statements in a ZIP must belong to the same source account and currency.";
+      }
+      account ??= parsed;
+      const contentHash = createHash("sha256").update(content, "utf8").digest("hex");
+      if (hashes.has(contentHash)) return "The ZIP contains multiple copies of the same statement file.";
+      hashes.add(contentHash);
+      rowCount += parsed.entries.length;
+      if (rowCount > 20_000) return "A ZIP can contain at most 20,000 statement rows in total.";
+      for (const row of parsed.entries) {
+        if (row.date < firstDate) firstDate = row.date;
+        if (row.date > lastDate) lastDate = row.date;
+      }
+      files.push({ fileName, contentHash, rows: parsed.entries });
+    }
+    if (!account || !rowCount) return "The ZIP has no statement rows.";
+    return { format, account, files, firstDate, lastDate };
+  }
+
+  async function verifyArchivePeriod(client: Pool | PoolClient, departmentId: string, archive: { firstDate: string; lastDate: string }, lock = false) {
+    const result = await client.query<{ accounting_year: number }>(
+      `SELECT accounting_year FROM finance_accounting_years
+        WHERE department_id=$1 AND start_date<=$2::date AND end_date>=$3::date ${lock ? "FOR SHARE" : ""}`,
+      [departmentId, archive.firstDate, archive.lastDate],
+    );
+    return result.rows.length === 1 ? result.rows[0]!.accounting_year : null;
+  }
+
+  async function existingArchiveStatements(client: Pool | PoolClient, departmentId: string, accountId: string, hashes: string[]) {
+    const result = await client.query<{ content_sha256: string }>(
+      "SELECT content_sha256 FROM finance_bank_statement_imports WHERE department_id=$1 AND account_id=$2 AND content_sha256=ANY($3::text[])",
+      [departmentId, accountId, hashes],
+    );
+    return new Set(result.rows.map(row => row.content_sha256));
+  }
+
+  app.post<{ Body: StatementArchiveUpload }>("/api/modules/finance/bank-statements/archive/preview", {
+    bodyLimit: 2_800_000, schema: { body: statementArchiveSchema },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    const { accountId, zip } = request.body;
+    if (!await validateStatementAccount(departmentId, accountId)) return reply.code(400).send({ error: "Choose an active asset account for the archive." });
+    const archive = await readNativeArchive(departmentId, zip);
+    if (typeof archive === "string") return reply.code(400).send({ error: archive });
+    if (archive.account.currency !== await statementCurrency(departmentId)) return reply.code(400).send({ error: "The ZIP statement currency does not match this ledger." });
+    const accountingYear = await verifyArchivePeriod(pool!, departmentId, archive);
+    if (accountingYear === null) return reply.code(400).send({ error: "Every ZIP statement row must fall in the same configured accounting year." });
+    const old = await existingArchiveStatements(pool!, departmentId, accountId, archive.files.map(file => file.contentHash));
+    const available = archive.files.filter(file => !old.has(file.contentHash)).flatMap(file => file.rows);
+    return reply.header("Cache-Control", "private, no-store").send({
+      format: "zip", archiveFormat: archive.format, accountingYear, currency: archive.account.currency,
+      accountEnding: archive.account.accountEnding, duplicate: !available.length, rowCount: available.length,
+      files: archive.files.map(file => ({ fileName: file.fileName, rowCount: file.rows.length, alreadyImported: old.has(file.contentHash) })),
+      headers: ["Booking date", "Amount", "Description", "Reference"],
+      sample: available.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.amount), row.description, row.reference]),
+    });
+  });
+
+  app.post<{ Body: StatementArchiveUpload }>("/api/modules/finance/bank-statements/archive/import", {
+    bodyLimit: 2_800_000, schema: { body: statementArchiveSchema },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    const { accountId, zip, confirmSourceAccount } = request.body;
+    if (!confirmSourceAccount) return reply.code(400).send({ error: "Confirm the ZIP source account matches the selected ledger account." });
+    const archive = await readNativeArchive(departmentId, zip);
+    if (typeof archive === "string") return reply.code(400).send({ error: archive });
+    const archiveName = cleanText(request.body.fileName).replace(/[\\/]/g, "_").slice(0, 180) || "statements.zip";
+    const client = await pool!.connect();
+    const imports: { id: string; rowCount: number; suggestedCount: number }[] = [];
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      if (!await validateStatementAccount(departmentId, accountId, client, true)
+        || archive.account.currency !== await statementCurrency(departmentId, client, "share")) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The ZIP statement account or currency does not match this ledger." });
+      }
+      const accountingYear = await verifyArchivePeriod(client, departmentId, archive, true);
+      if (accountingYear === null) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Every ZIP statement row must fall in the same configured accounting year." });
+      }
+      const old = await existingArchiveStatements(client, departmentId, accountId, archive.files.map(file => file.contentHash));
+      const available = archive.files.filter(file => !old.has(file.contentHash));
+      if (!available.length) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "All statements in the ZIP are already imported for the selected account." });
+      }
+      // Use the same insert order across overlapping archives to avoid locking hashes in opposite order.
+      for (const file of available.sort((left, right) => left.contentHash.localeCompare(right.contentHash))) {
+        imports.push(await writeStatementImport(client, departmentId, request, {
+          ...file, batchId: randomUUID(), accountId,
+          details: { format: archive.format, currency: archive.account.currency, archiveName, accountingYear },
+        }));
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An overlapping statement was just imported. Preview this ZIP again." });
+      throw error;
+    } finally { client.release(); }
+    for (const item of imports) publish(departmentId, "bank-statement-imported", item.id);
+    return reply.code(201).send({
+      id: imports[0]!.id,
+      fileCount: imports.length,
+      rowCount: imports.reduce((sum, item) => sum + item.rowCount, 0),
+      suggestedCount: imports.reduce((sum, item) => sum + item.suggestedCount, 0),
+    });
   });
 
   app.get("/api/modules/finance/bank-statements", async (request, reply) => {
