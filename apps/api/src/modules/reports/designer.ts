@@ -99,7 +99,10 @@ function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
     if (["gt", "gte", "lt", "lte"].includes(String(operator)) && field.type === "text") return "Numeric or date comparisons need a number or date field.";
     let filterValue: string | number;
     if (field.type === "number") {
-      if (typeof f.value !== "number" || !Number.isFinite(f.value) || !Number.isSafeInteger(f.value)) return "Enter a whole numeric value within the supported safe range.";
+      if (typeof f.value !== "number" || !Number.isFinite(f.value) ||
+          (field.key.startsWith("custom_") ? Math.abs(f.value) > Number.MAX_SAFE_INTEGER : !Number.isSafeInteger(f.value))) {
+        return "Enter a numeric value within the supported range for this field.";
+      }
       filterValue = f.value;
     } else {
       if (typeof f.value !== "string" || f.value.length > 200 || !f.value.trim()) return "Enter a filter value.";
@@ -222,6 +225,7 @@ function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: 
   const filtered = inputRows.filter((row) => definition.filters.every((filter) => {
     const field = byKey.get(filter.field)!;
     const raw = row[field.key];
+    if (field.type === "number" && field.key.startsWith("custom_") && raw == null) return false;
     if (filter.operator === "equals") return field.type === "text" ? String(raw ?? "").toLocaleLowerCase() === String(filter.value).toLocaleLowerCase() : compare(raw, filter.value, field.type) === 0;
     if (filter.operator === "contains") return String(raw ?? "").toLocaleLowerCase().includes(String(filter.value).toLocaleLowerCase());
     const order = compare(raw, filter.value, field.type);
@@ -284,10 +288,10 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       }
       if (item.key !== "people" || !customFields.rows.length) return item;
       const fields = customFields.rows.filter((field) => /^[0-9a-f-]{36}$/i.test(field.id));
-      const additions = fields.map((field) => ({ key: `custom_${field.id.replace(/-/g, "")}`, label: `Custom: ${field.label}`, type: field.field_type === "date" ? "date" as const : "text" as const }));
+      const additions = fields.map((field) => ({ key: `custom_${field.id.replace(/-/g, "")}`, label: `Custom: ${field.label}`, type: field.field_type === "date" ? "date" as const : field.field_type === "number" ? "number" as const : "text" as const }));
       if (!additions.length) return item;
       const fieldVisibility = canManageFields ? "TRUE" : "COALESCE(to_jsonb(field)->>'visibility','private_people')='private_people'";
-      const expressions = fields.map((field) => `(SELECT record.value #>> '{}' FROM people_record_values record
+      const expressions = fields.map((field) => `(SELECT ${field.field_type === "number" ? "(record.value #>> '{}')::double precision" : "record.value #>> '{}'"} FROM people_record_values record
         JOIN people_record_fields field ON field.id=record.field_id AND field.department_id=record.department_id
         WHERE record.department_id=c.department_id AND record.contact_id=c.id AND record.field_id='${field.id}'::uuid AND field.active AND ${fieldVisibility}) AS "custom_${field.id.replace(/-/g, "")}"`);
       return { ...item, fields: [...item.fields, ...additions], sql: item.sql.replace(" FROM contacts", `,${expressions.join(",")} FROM contacts`) };

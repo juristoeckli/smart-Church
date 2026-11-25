@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { postalAddressFields, type PostalAddress } from "./postal-address";
 
-export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select"; required: boolean; options: string[]; textMaxLength?: number | null };
+export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select" | "number"; required: boolean; options: string[]; textMaxLength?: number | null };
 export type CreatePersonInput = {
   firstName: string; lastName: string; email?: string; phone?: string; status: "member" | "visitor";
-  postalAddress: PostalAddress; fields: Record<string, string | boolean>;
+  postalAddress: PostalAddress; fields: Record<string, string | boolean | number>;
 };
 
 export function PeopleCreateForm({ fields, onCreate, onClose }: {
@@ -22,10 +22,12 @@ export function PeopleCreateForm({ fields, onCreate, onClose }: {
     if (pending.current) return;
     const data = new FormData(event.currentTarget);
     const string = (name: string) => String(data.get(name) ?? "");
-    const values: Record<string, string | boolean> = {};
+    const values: Record<string, string | boolean | number> = {};
     for (const field of fields) {
       const raw = string("field:" + field.id);
-      if (raw !== "") values[field.id] = field.type === "boolean" ? raw === "true" : raw;
+      if (raw === "") continue;
+      if (field.type === "number") values[field.id] = Number(raw);
+      else values[field.id] = field.type === "boolean" ? raw === "true" : raw;
     }
     const postalAddress = Object.fromEntries(postalAddressFields.flatMap(({ key }) => {
       const value = string("address:" + key).trim();
@@ -74,7 +76,7 @@ export function PeopleCreateForm({ fields, onCreate, onClose }: {
               {field.type === "boolean" ? <><option value="true">Yes</option><option value="false">No</option></> :
                 field.options.map((option, index) => <option key={index} value={option}>{option}</option>)}
             </select> :
-            <input name={"field:" + field.id} type={field.type} required={field.required}
+            <input name={"field:" + field.id} type={field.type} step={field.type === "number" ? "any" : undefined} required={field.required}
               maxLength={field.type === "text" ? field.textMaxLength ?? 2000 : undefined} />}
         </label>)}
       </fieldset>}
