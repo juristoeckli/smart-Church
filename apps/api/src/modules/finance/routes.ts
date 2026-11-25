@@ -1,3 +1,4 @@
+import { registerScopedGroupDonors } from "./scoped-group-donors.js";
 import { registerScopedGroupFinance } from "./scoped-group-finance.js";
 import { registerSimpleBookingGrants, scopedSimplePurposes, simpleBookingInput, type SimpleBookingBody } from "./simple-booking.js";
 import { readBookingPurpose, registerBookingPurposes } from "./booking-purposes.js";
@@ -884,6 +885,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   registerBookingPurposes(app, context, { department, cleanText, audit, publish });
   registerSimpleBookingGrants(app, context, { department, audit });
   registerScopedGroupFinance(app, context);
+  registerScopedGroupDonors(app, context);
   registerCostCenterTransfers(app,context,{ department,audit,publish,periodForDate,cleanText,validDateOnly });
   registerTransactionEvidence(app,context,{department,audit});
   registerJournalNumbering(app,context,department,audit);

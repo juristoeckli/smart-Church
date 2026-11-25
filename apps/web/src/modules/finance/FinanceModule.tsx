@@ -1,3 +1,4 @@
+import { ScopedGroupDonors } from "./ScopedGroupDonors";
 import { ScopedGroupFinance } from "./ScopedGroupFinance";
 import { ScopedSimpleBooking, SimpleBookingGrantsPanel } from "./ScopedSimpleBooking";
 import { BookingPurposesPanel, type BookingPurpose } from "./BookingPurposesPanel";
@@ -123,10 +124,12 @@ export function FinanceModule(context: ModuleContext) {
   const full = context.canManageSite || context.department.role === "site_admin" || grants.includes("view") || grants.includes("manage");
   const canBook = grants.includes("simple-booking");
   const canRead = grants.includes("group-finance-view");
-  const [chosen, setChosen] = useState<"full" | "booking" | "read">();
+  const canViewDonors = grants.includes("group-donors-view");
+  const [chosen, setChosen] = useState<"full" | "booking" | "read" | "donors">();
   const pages = [
     ...(full ? [{ value: "full" as const, label: "Finance overview" }] : []),
     ...(canRead ? [{ value: "read" as const, label: "Group finance" }] : []),
+    ...(canViewDonors ? [{ value: "donors" as const, label: "Group donors" }] : []),
     ...(canBook ? [{ value: "booking" as const, label: "Simple group booking" }] : []),
   ];
   const page = pages.find(item => item.value === chosen)?.value ?? pages[0]?.value;
@@ -137,6 +140,7 @@ export function FinanceModule(context: ModuleContext) {
     </nav>}
     {page === "full" && <FullFinanceModule {...context} />}
     {page === "read" && <ScopedGroupFinance key={context.departmentId} departmentId={context.departmentId} />}
+    {page === "donors" && <ScopedGroupDonors key={context.departmentId} departmentId={context.departmentId} />}
     {page === "booking" && <ScopedSimpleBooking key={context.departmentId} context={context} />}
   </>;
 }

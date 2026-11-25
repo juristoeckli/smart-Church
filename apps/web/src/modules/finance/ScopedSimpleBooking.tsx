@@ -6,11 +6,12 @@ type BookingContext = { currency: string; purposes: Choice[] };
 type Send = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Center = { id: string; name: string; code: string; active: boolean };
 type Group = { id: string; name: string; roles: string[] };
-type Capabilities = { canPost: boolean; canViewBudget: boolean; canViewJournal: boolean };
+type Capabilities = { canPost: boolean; canViewBudget: boolean; canViewJournal: boolean; canViewDonors: boolean };
 type Grant = Capabilities & { id: string; groupId: string; groupName: string | null; costCenterId: string; role: string; active: boolean };
 const path = "/api/modules/finance/simple-booking";
 const emptyForm = { purposeId: "", bookingDate: "", amount: "", bookingText: "", receiptNumber: "" };
 const rights = {
+  none: { label: "No booking or budget access", canPost: false, canViewBudget: false, canViewJournal: false },
   booking: { label: "Post bookings", canPost: true, canViewBudget: false, canViewJournal: false },
   budget: { label: "View budgets", canPost: false, canViewBudget: true, canViewJournal: false },
   journal: { label: "View journal and budgets", canPost: false, canViewBudget: true, canViewJournal: true },
@@ -20,12 +21,12 @@ const rights = {
 type Right = keyof typeof rights;
 const capabilityKey = (grant: Capabilities): Right =>
   grant.canPost ? grant.canViewJournal ? "bookingJournal" : grant.canViewBudget ? "bookingBudget" : "booking"
-    : grant.canViewJournal ? "journal" : "budget";
-const capabilities = (key: Right): Capabilities => {
+    : grant.canViewJournal ? "journal" : grant.canViewBudget ? "budget" : "none";
+const capabilities = (key: Right, canViewDonors: boolean): Capabilities => {
   const { label: _, ...fields } = rights[key];
-  return fields;
+  return { ...fields, canViewDonors };
 };
-const emptyScope = { groupId: "", role: "", costCenterId: "", access: "booking" as Right };
+const emptyScope = { groupId: "", role: "", costCenterId: "", access: "booking" as Right, canViewDonors: false };
 
 function amountCents(amount: string) {
   const valid = /^(\d+)(?:\.(\d{1,2}))?$/.exec(amount);
@@ -119,12 +120,12 @@ export function SimpleBookingGrantsPanel({ send, centers }: { send: Send; center
   }, [send]);
   useEffect(() => { void refresh().catch(reason => setError(reason instanceof Error ? reason.message : "Could not load simple booking access.")); }, [refresh]);
 
-  async function save(grant?: Grant, access?: Right) {
+  async function save(grant?: Grant, changes?: Partial<Capabilities>) {
     setBusy(true);
     setError("");
     try {
-      await send(path + "/grants" + (grant ? `/${grant.id}` : ""), grant ? "PATCH" : "POST", grant ? access ? capabilities(access) : { active: !grant.active }
-        : { groupId: draft.groupId, role: draft.role, costCenterId: draft.costCenterId, ...capabilities(draft.access) });
+      await send(path + "/grants" + (grant ? `/${grant.id}` : ""), grant ? "PATCH" : "POST", grant ? changes ?? { active: !grant.active }
+        : { groupId: draft.groupId, role: draft.role, costCenterId: draft.costCenterId, ...capabilities(draft.access, draft.canViewDonors) });
       if (!grant) setDraft(emptyScope);
       await refresh();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update simple booking access."); }
@@ -141,9 +142,11 @@ export function SimpleBookingGrantsPanel({ send, centers }: { send: Send; center
         <td>{grant.groupName ?? "Removed group"}</td><td>{grant.role}</td>
         <td>{centers.find(center => center.id === grant.costCenterId)?.name ?? "—"}</td>
         <td><select aria-label={`Access for ${grant.groupName ?? "removed group"} ${grant.role}`} value={capabilityKey(grant)} disabled={busy}
-          onChange={event => void save(grant, event.target.value as Right)}>
-          {Object.entries(rights).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}
-        </select></td>
+          onChange={event => void save(grant, capabilities(event.target.value as Right, grant.canViewDonors))}>
+          {Object.entries(rights).map(([key, item]) => <option key={key} value={key} disabled={key === "none" && !grant.canViewDonors}>{item.label}</option>)}
+        </select>
+        <label><input type="checkbox" checked={grant.canViewDonors} disabled={busy || (capabilityKey(grant) === "none" && grant.canViewDonors)}
+          onChange={event => void save(grant, { canViewDonors: event.target.checked })} />View donors</label></td>
         <td>{grant.active ? "Active" : "Revoked"}</td>
         <td><button className="finance-text-button" type="button" disabled={busy} onClick={() => void save(grant)}>{grant.active ? "Revoke" : "Restore"}</button></td>
       </tr>)}</tbody>
@@ -163,7 +166,9 @@ export function SimpleBookingGrantsPanel({ send, centers }: { send: Send; center
       <label>Access<select value={draft.access} disabled={busy} onChange={event => setDraft({ ...draft, access: event.target.value as Right })}>
         {Object.entries(rights).map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}
       </select></label>
-      <div className="finance-form-actions"><button className="button button-secondary" type="submit" disabled={busy}>Grant group finance access</button></div>
+      <label><input type="checkbox" checked={draft.canViewDonors} disabled={busy}
+        onChange={event => setDraft({ ...draft, canViewDonors: event.target.checked })} />View donors</label>
+      <div className="finance-form-actions"><button className="button button-secondary" type="submit" disabled={busy || (draft.access === "none" && !draft.canViewDonors)}>Grant group finance access</button></div>
     </form>
   </section>;
 }

@@ -5,5 +5,5 @@
   "serverEntry": "./routes.ts",
   "required": false,
   "enabledByDefault": false,
-  "accessGrants": ["view", "manage", "simple-booking", "group-finance-view"]
+  "accessGrants": ["view", "manage", "simple-booking", "group-finance-view", "group-donors-view"]
 }

@@ -5,7 +5,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 
 const uuid = { type: "string", format: "uuid" } as const;
 const capabilityProperties = {
-  canPost: { type: "boolean" }, canViewBudget: { type: "boolean" }, canViewJournal: { type: "boolean" },
+  canPost: { type: "boolean" }, canViewBudget: { type: "boolean" }, canViewJournal: { type: "boolean" }, canViewDonors: { type: "boolean" },
 } as const;
 const grantInput = {
   type: "object", additionalProperties: false, required: ["groupId", "role", "costCenterId"],
@@ -29,7 +29,7 @@ type SimplePurpose = {
   id: string; name: string; direction: "income" | "expense"; groupId: string; grantId: string; groupRole: string;
   bankAccountId: string; counterAccountId: string; costCenterId: string;
 };
-type Capabilities = { canPost: boolean; canViewBudget: boolean; canViewJournal: boolean };
+type Capabilities = { canPost: boolean; canViewBudget: boolean; canViewJournal: boolean; canViewDonors: boolean };
 type GrantInput = { groupId: string; role: string; costCenterId: string } & Partial<Capabilities>;
 type GrantChange = { active?: boolean } & Partial<Capabilities>;
 type Grant = GrantInput & Capabilities & { id: string; active: boolean; groupName: string | null };
@@ -79,7 +79,7 @@ export function registerSimpleBookingGrants(app: FastifyInstance, context: Modul
         FROM church_groups parent LEFT JOIN group_members member ON member.group_id=parent.id AND member.status='active'
         WHERE parent.department_id=$1 AND COALESCE(to_jsonb(parent)->>'status','active')='active' GROUP BY parent.id ORDER BY lower(parent.name),parent.id`, [departmentId]),
       pool!.query<Grant>(`SELECT entry.id,entry.group_id AS "groupId",entry.membership_role AS role,entry.cost_center_id AS "costCenterId",
-        entry.active,entry.can_post AS "canPost",entry.can_view_budget AS "canViewBudget",entry.can_view_journal AS "canViewJournal",
+        entry.active,entry.can_post AS "canPost",entry.can_view_budget AS "canViewBudget",entry.can_view_journal AS "canViewJournal",entry.can_view_donors AS "canViewDonors",
         parent.name AS "groupName" FROM finance_simple_booking_grants entry
         LEFT JOIN church_groups parent ON parent.id=entry.group_id AND parent.department_id=entry.department_id
         WHERE entry.department_id=$1 ORDER BY entry.active DESC,lower(parent.name),entry.membership_role,entry.id`, [departmentId]),
@@ -100,7 +100,7 @@ export function registerSimpleBookingGrants(app: FastifyInstance, context: Modul
       }
       const previous = "id" in input ? (await client.query<Grant>(`SELECT id,group_id AS "groupId",membership_role AS role,
         cost_center_id AS "costCenterId",active,
-        can_post AS "canPost",can_view_budget AS "canViewBudget",can_view_journal AS "canViewJournal" FROM finance_simple_booking_grants WHERE department_id=$1 AND id=$2 FOR UPDATE`,
+        can_post AS "canPost",can_view_budget AS "canViewBudget",can_view_journal AS "canViewJournal",can_view_donors AS "canViewDonors" FROM finance_simple_booking_grants WHERE department_id=$1 AND id=$2 FOR UPDATE`,
       [departmentId, id])).rows[0] : undefined;
       if ("id" in input && !previous) {
         await client.query("ROLLBACK"); return reply.code(404).send({ error: "Simple booking grant not found." });
@@ -110,9 +110,10 @@ export function registerSimpleBookingGrants(app: FastifyInstance, context: Modul
       const canPost = input.canPost ?? previous?.canPost ?? true;
       const canViewBudget = input.canViewBudget ?? previous?.canViewBudget ?? false;
       const canViewJournal = input.canViewJournal ?? previous?.canViewJournal ?? false;
-      if ((!canPost && !canViewBudget) || (canViewJournal && !canViewBudget)) {
+      const canViewDonors = input.canViewDonors ?? previous?.canViewDonors ?? false;
+      if ((!canPost && !canViewBudget && !canViewDonors) || (canViewJournal && !canViewBudget)) {
         await client.query("ROLLBACK");
-        return reply.code(400).send({ error: "Choose booking or budget access. Journal access includes budgets." });
+        return reply.code(400).send({ error: "Choose booking, budget, or donor access. Journal access includes budgets." });
       }
 
       if (active) {
@@ -130,14 +131,14 @@ export function registerSimpleBookingGrants(app: FastifyInstance, context: Modul
       }
 
       if (existingId) {
-        await client.query(`UPDATE finance_simple_booking_grants SET active=$3,can_post=$4,can_view_budget=$5,can_view_journal=$6,updated_at=now()
-          WHERE department_id=$1 AND id=$2`, [departmentId,id,active,canPost,canViewBudget,canViewJournal]);
+        await client.query(`UPDATE finance_simple_booking_grants SET active=$3,can_post=$4,can_view_budget=$5,can_view_journal=$6,can_view_donors=$7,updated_at=now()
+          WHERE department_id=$1 AND id=$2`, [departmentId,id,active,canPost,canViewBudget,canViewJournal,canViewDonors]);
       } else {
-        await client.query(`INSERT INTO finance_simple_booking_grants(department_id,id,group_id,membership_role,cost_center_id,can_post,can_view_budget,can_view_journal)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [departmentId,id,scope.groupId,scope.role,scope.costCenterId,canPost,canViewBudget,canViewJournal]);
+        await client.query(`INSERT INTO finance_simple_booking_grants(department_id,id,group_id,membership_role,cost_center_id,can_post,can_view_budget,can_view_journal,can_view_donors)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [departmentId,id,scope.groupId,scope.role,scope.costCenterId,canPost,canViewBudget,canViewJournal,canViewDonors]);
       }
       await audit(client, departmentId, request, existingId ? "simple_booking_grant_updated" : "simple_booking_grant_created", "simple_booking_grant", id,
-        { groupId: scope.groupId, role: scope.role, costCenterId: scope.costCenterId, active, canPost, canViewBudget, canViewJournal });
+        { groupId: scope.groupId, role: scope.role, costCenterId: scope.costCenterId, active, canPost, canViewBudget, canViewJournal, canViewDonors });
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
