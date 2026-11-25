@@ -90,7 +90,7 @@ function PeopleFieldList({ fields, canManage, onSave, onMove, onChoiceOptionChan
           </>}
         </form>}
         {canManage && field.type === "select" && <PeopleChoiceFieldOptions
-          label={field.label} options={field.options}
+          label={field.label} options={field.options} required={field.required}
           onReviewRename={(expected, rename) => onReviewChoiceRename(field.id, expected, rename)}
           onChange={(expected, change) => onChoiceOptionChange(field.id, expected, change)} />}
       </div>;

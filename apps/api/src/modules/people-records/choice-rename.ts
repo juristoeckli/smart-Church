@@ -64,8 +64,7 @@ function updateSavedView(view: SavedView, fieldKey: string, oldName: string, new
   return { criteria: next };
 }
 
-export async function inspectChoiceRename(client: PoolClient, rename: ChoiceRename, lockViews = false): Promise<RenamePlan | Blocked> {
-  const { departmentId, fieldId, fieldKey, oldName, newName, options } = rename;
+async function hasDesignerChoiceFilter(client: PoolClient, departmentId: string, fieldId: string) {
   const tables = await client.query<{ installed: boolean }>("SELECT to_regclass('public.saved_designer_reports') IS NOT NULL AS installed");
   if (tables.rows[0]?.installed) {
     const filter = await client.query(
@@ -74,7 +73,42 @@ export async function inspectChoiceRename(client: PoolClient, rename: ChoiceRena
          THEN report.definition->'filters' ELSE '[]'::jsonb END) item WHERE item->>'field'=$2) LIMIT 1`,
       [departmentId, "custom_" + fieldId.replace(/-/g, "")],
     );
-    if (filter.rowCount) return { error: "A saved Designer report filters this choice field. Remove or update that report filter before renaming because its text matching cannot be safely rewritten." };
+    return Boolean(filter.rowCount);
+  }
+  return false;
+}
+
+function readChoiceViews(client: PoolClient, departmentId: string, fieldKey: string, names: string[], { lockViews = false, limit = null }: { lockViews?: boolean; limit?: number | null } = {}) {
+  return client.query<SavedView>(
+    `SELECT v.id,v.criteria FROM people_record_saved_views v WHERE v.department_id=$1 AND (
+       (v.criteria->>'field'=$2 AND v.criteria->>'value'=ANY($3::text[])) OR EXISTS (
+         SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v.criteria->'filters')='array'
+           THEN v.criteria->'filters' ELSE '[]'::jsonb END) item
+         WHERE item->>'field'=$2 AND item->>'value'=ANY($3::text[])
+       )
+     ) ORDER BY v.id LIMIT $4 ${lockViews ? "FOR UPDATE OF v" : ""}`,
+    [departmentId, fieldKey, names, limit],
+  );
+}
+
+export async function choiceRemovalBlocker(client: PoolClient, departmentId: string, fieldId: string, fieldKey: string, name: string) {
+  const usage = await client.query(
+    "SELECT 1 FROM people_record_values WHERE department_id=$1 AND field_id=$2 AND value=to_jsonb($3::text) LIMIT 1",
+    [departmentId, fieldId, name],
+  );
+  if (usage.rowCount) return "This choice is used by a People profile, including archived profiles.";
+  const views = await readChoiceViews(client, departmentId, fieldKey, [name], { limit: 1 });
+  if (views.rowCount) return "This choice is used by a saved People view.";
+  if (await hasDesignerChoiceFilter(client, departmentId, fieldId)) {
+    return "A saved Designer report filters this choice field. Review that report filter before deleting a choice.";
+  }
+  return null;
+}
+
+export async function inspectChoiceRename(client: PoolClient, rename: ChoiceRename, lockViews = false): Promise<RenamePlan | Blocked> {
+  const { departmentId, fieldId, fieldKey, oldName, newName, options } = rename;
+  if (await hasDesignerChoiceFilter(client, departmentId, fieldId)) {
+    return { error: "A saved Designer report filters this choice field. Remove or update that report filter before renaming because its text matching cannot be safely rewritten." };
   }
   const { rows: profiles } = await client.query<RenameProfile>(
     `SELECT person.id,person.archived_at IS NOT NULL AS archived,value.value=to_jsonb($4::text) AS replacement
@@ -85,16 +119,7 @@ export async function inspectChoiceRename(client: PoolClient, rename: ChoiceRena
   if (profiles.some((row) => row.replacement)) {
     return { error: "Existing profiles already use the proposed name. Choose another name to avoid merging distinct values." };
   }
-  const { rows: views } = await client.query<SavedView>(
-    `SELECT v.id,v.criteria FROM people_record_saved_views v WHERE v.department_id=$1 AND (
-       (v.criteria->>'field'=$2 AND v.criteria->>'value'=ANY($3::text[])) OR EXISTS (
-         SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v.criteria->'filters')='array'
-           THEN v.criteria->'filters' ELSE '[]'::jsonb END) item
-         WHERE item->>'field'=$2 AND item->>'value'=ANY($3::text[])
-       )
-     ) ORDER BY v.id ${lockViews ? "FOR UPDATE OF v" : ""}`,
-    [departmentId, fieldKey, [oldName, newName]],
-  );
+  const { rows: views } = await readChoiceViews(client, departmentId, fieldKey, [oldName, newName], { lockViews });
   const replacements = [];
   for (const view of views) {
     const next = updateSavedView(view, fieldKey, oldName, newName);

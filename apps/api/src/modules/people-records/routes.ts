@@ -1,4 +1,4 @@
-import { applyChoiceRename, inspectChoiceRename, lockChoiceDefinitionWrite, lockChoiceRenameContacts, withChoiceDefinitionWrite } from "./choice-rename.js";
+import { applyChoiceRename, choiceRemovalBlocker, inspectChoiceRename, lockChoiceDefinitionWrite, lockChoiceRenameContacts, withChoiceDefinitionWrite } from "./choice-rename.js";
 import { registerPersonalFollowups } from "./personal-followups.js";
 import { registerGrowthTrajectory } from "./growth-trajectory.js";
 import { personTagMatch } from "./tag-search.js";
@@ -319,19 +319,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position,visibility,category,text_max_length) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0),$8,$9,$10)", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false,b.visibility ?? "private_people",b.category?.trim() || null,b.textMaxLength??null]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
       changed(d); return reply.code(201).send({ id });
     });
-    type ChoiceOptionChange = { add: string } | { from: number; direction: "up" | "down" } | { from: number; rename: string };
+    type ChoiceOptionChange = { add: string } | { from: number; direction: "up" | "down" } | { from: number; rename: string } | { remove: number };
     const optionChangeSchema = {
       type: "object", additionalProperties: false,
       properties: {
         add: { type: "string", minLength: 1, maxLength: 120 },
         rename: { type: "string", minLength: 1, maxLength: 120 },
+        remove: { type: "integer", minimum: 0, maximum: 99 },
         from: { type: "integer", minimum: 0, maximum: 99 },
         direction: { type: "string", enum: ["up", "down"] },
       },
       oneOf: [
-        { required: ["add"], not: { anyOf: [{ required: ["from"] }, { required: ["direction"] }, { required: ["rename"] }] } },
-        { required: ["from", "direction"], not: { anyOf: [{ required: ["add"] }, { required: ["rename"] }] } },
-        { required: ["from", "rename"], not: { anyOf: [{ required: ["add"] }, { required: ["direction"] }] } },
+        { required: ["add"], not: { anyOf: [{ required: ["from"] }, { required: ["direction"] }, { required: ["rename"] }, { required: ["remove"] }] } },
+        { required: ["from", "direction"], not: { anyOf: [{ required: ["add"] }, { required: ["rename"] }, { required: ["remove"] }] } },
+        { required: ["from", "rename"], not: { anyOf: [{ required: ["add"] }, { required: ["direction"] }, { required: ["remove"] }] } },
+        { required: ["remove"], not: { anyOf: [{ required: ["add"] }, { required: ["from"] }, { required: ["direction"] }, { required: ["rename"] }] } },
       ],
     } as const;
     routes.patch<{ Params: { id: string }; Body: { expected: string[]; change: ChoiceOptionChange } }>("/api/people-records/fields/:id/options", {
@@ -353,8 +355,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!await context.lockDepartmentForWrite(client, departmentId)) {
           return reply.code(409).send({ error: "This location cannot be changed on this installation." });
         }
-        const { rows: [field] } = await client.query<{ options: unknown; field_key: string }>(
-          "SELECT options,field_key FROM people_record_fields WHERE department_id=$1 AND id=$2 AND field_type='select' FOR UPDATE",
+        const { rows: [field] } = await client.query<{ options: unknown; field_key: string; required: boolean }>(
+          "SELECT options,field_key,required FROM people_record_fields WHERE department_id=$1 AND id=$2 AND field_type='select' FOR UPDATE",
           [departmentId, fieldId],
         );
         if (!field) return reply.code(404).send({ error: "Choice field not found at this location." });
@@ -369,6 +371,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             return reply.code(400).send({ error: "Enter a new non-empty option. A field can have up to 100 choices." });
           }
           next.push(option);
+        } else if ("remove" in change) {
+          const option = next[change.remove];
+          if (option === undefined) return reply.code(400).send({ error: "Choose an existing option to delete." });
+          if (field.required && next.length === 1) {
+            return reply.code(409).send({ error: "A required field must keep at least one choice." });
+          }
+          const blocker = await choiceRemovalBlocker(client, departmentId, fieldId, field.field_key, option);
+          if (blocker) return reply.code(409).send({ error: blocker });
+          next.splice(change.remove, 1);
         } else if ("rename" in change) {
           const current = next[change.from];
           const option = change.rename.trim();
