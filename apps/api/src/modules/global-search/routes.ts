@@ -118,11 +118,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           : `SELECT page.id,page.title,COALESCE(category.name,'') AS detail FROM wiki_pages page LEFT JOIN wiki_categories category ON category.id=page.category_id AND category.department_id=page.department_id WHERE page.department_id=$1 AND page.title ILIKE $2 AND page.status='active' AND ${wikiAudienceCondition} ORDER BY lower(page.title),page.id LIMIT 6`,
         [...values, wikiManager, request.authenticatedUser!.id],
       ).then((result) => result.rows) : Promise.resolve([]),
-      state.songsReady && (!validIdQuery || localUuidQuery) ? pool.query<{ id: string; title: string; detail: string | null }>(
+      state.songsReady && (!validIdQuery || localUuidQuery || state.migrationLinksReady) ? pool.query<{ id: string; title: string; detail: string | null }>(
         localUuidQuery
           ? `SELECT id,title,authors AS detail FROM worship_songs WHERE department_id=$1 AND id=$2 AND active=true`
-          : `SELECT id,title,authors AS detail FROM worship_songs WHERE department_id=$1 AND title ILIKE $2 AND active=true ORDER BY lower(title),id LIMIT 6`,
-        values,
+          : validIdQuery
+            ? `SELECT song.id,song.title,song.authors AS detail
+                 FROM churchtools_migration_links link
+                 JOIN worship_songs song ON song.id=link.local_record_id AND song.department_id=link.department_id
+                WHERE link.department_id=$1 AND link.area='song' AND split_part(link.source_id,'#',2)=$2 AND song.active=true
+                ORDER BY lower(song.title),song.id LIMIT 6`
+            : `SELECT id,title,authors AS detail FROM worship_songs WHERE department_id=$1 AND title ILIKE $2 AND active=true ORDER BY lower(title),id LIMIT 6`,
+        localUuidQuery || !validIdQuery ? values : [departmentId, id],
       ).then((result) => result.rows) : Promise.resolve([]),
       localUuidQuery || !validIdQuery || state.migrationLinksReady ? pool.query<{ id: string; title: string; detail: string }>(
         localUuidQuery
