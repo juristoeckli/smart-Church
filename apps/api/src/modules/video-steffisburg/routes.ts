@@ -63,6 +63,14 @@ function youtubeMonitorUrl(embedHtml?: string) {
   } catch { return null; }
 }
 
+function assignedSpeakerName(position: { name: string; contactId?: string; sourceAssigneeName?: string }, speakers: Map<string, string>) {
+  const linkedName = position.contactId ? speakers.get(position.contactId) : undefined;
+  if (linkedName) return linkedName;
+  if (position.sourceAssigneeName?.trim()) return position.sourceAssigneeName.trim();
+  const separator = position.name.indexOf(" — ");
+  return separator >= 0 ? position.name.slice(separator + 3).trim() : "";
+}
+
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, getVideoWorker, realtime } = context;
   registerVideoSteffisburgReplication(context);
@@ -266,7 +274,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   async function currentOrNextService(departmentId: string) {
     const result = await pool!.query<{
       id: string; title: string; event_date: string; start_time: string; end_time: string | null;
-      description: string | null; positions: Array<{ name: string; contactId?: string }>;
+      description: string | null; positions: Array<{ name: string; contactId?: string; sourceAssigneeName?: string }>;
       time_plan: Array<{ title: string; notes?: string }>; is_current: boolean;
       starts_at_epoch: string; source_system: string | null;
     }>(
@@ -295,7 +303,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ? await pool!.query<{ id: string; first_name: string; last_name: string }>("SELECT id, first_name, last_name FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, speakerIds])
       : { rows: [] as Array<{ id: string; first_name: string; last_name: string }> };
     const speakers = new Map(contacts.rows.map((contact) => [contact.id, `${contact.first_name} ${contact.last_name}`.trim()]));
-    const speaker = speakerPositions.map((position) => position.contactId ? speakers.get(position.contactId) : "").filter(Boolean).join(", ");
+    const speaker = speakerPositions.map((position) => assignedSpeakerName(position, speakers)).filter(Boolean).join(", ");
     const themeItem = (event.time_plan ?? []).find((item) => /^(theme|thema)\b/i.test(item.title.trim()));
     const theme = themeItem ? (themeItem.notes?.trim() || themeItem.title.replace(/^(theme|thema)\s*:?\s*/i, "")) : (event.description ?? "").slice(0, 300);
     return {
@@ -309,7 +317,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   async function previousAndFollowingServices(departmentId: string) {
     const result = await pool!.query<{
       relation: "previous" | "following"; id: string; title: string; event_date: string; start_time: string; end_time: string | null;
-      description: string | null; positions: Array<{ name: string; contactId?: string }>;
+      description: string | null; positions: Array<{ name: string; contactId?: string; sourceAssigneeName?: string }>;
       time_plan: Array<{ title: string; notes?: string }>; is_current: boolean;
       starts_at_epoch: string; source_system: string | null;
     }>(
@@ -351,7 +359,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const speakers = new Map(contacts.rows.map((contact) => [contact.id, `${contact.first_name} ${contact.last_name}`.trim()]));
     return eventRows.map((event) => {
       const positions = (event.positions ?? []).filter((position) => /speaker|preach|predig|pastor|minister|sermon/i.test(position.name));
-      const speaker = positions.map((position) => position.contactId ? speakers.get(position.contactId) : "").filter(Boolean).join(", ");
+      const speaker = positions.map((position) => assignedSpeakerName(position, speakers)).filter(Boolean).join(", ");
       const themeItem = (event.time_plan ?? []).find((item) => /^(theme|thema)\b/i.test(item.title.trim()));
       const theme = themeItem ? (themeItem.notes?.trim() || themeItem.title.replace(/^(theme|thema)\s*:?\s*/i, "")) : (event.description ?? "").slice(0, 300);
       return {
