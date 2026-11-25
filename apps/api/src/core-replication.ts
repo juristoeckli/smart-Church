@@ -179,26 +179,41 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
   return { version: 36, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
-// The other Calendar tables are children of these site-owned roots.
-const calendarSnapshotRoots = [
-  "church_calendar_calendars",
-  "church_calendar_event_generations",
-  "church_calendar_tag_definitions",
-  "church_calendar_agenda_publications",
+const dependentModuleRecords = [
+  {
+    moduleId: "church-calendar",
+    // The other Calendar tables are children of these site-owned roots.
+    tables: ["church_calendar_calendars", "church_calendar_event_generations", "church_calendar_tag_definitions", "church_calendar_agenda_publications"],
+    message: "This location has Church Calendar records. A matching Calendar snapshot is required to preserve them.",
+  },
+  {
+    moduleId: "people-records",
+    tables: [
+      "people_record_fields", "people_record_values", "people_record_relationships", "people_record_consents",
+      "people_record_history", "people_record_import_audits", "people_record_person_dates", "people_record_merges",
+      "people_record_saved_views", "people_record_relationship_types", "people_record_attachments", "people_record_households",
+      "people_record_household_members", "people_record_private_notes", "people_growth_config", "people_personal_followups",
+    ],
+    message: "This location has People Records data. A matching People Records snapshot is required to preserve it.",
+  },
 ] as const;
-const calendarSnapshotRequired = "This location has Church Calendar records. A matching Calendar snapshot is required to preserve them.";
 
-async function calendarSnapshotBlocker(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
-  if (replication?.moduleIds.has("church-calendar")) return null;
+async function dependentSnapshotBlockers(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
+  const omitted = dependentModuleRecords.filter(({ moduleId }) => !replication?.moduleIds.has(moduleId));
+  if (!omitted.length) return [];
   const relations = (await client.query<{ name: string }>(`SELECT relation.name
-    FROM unnest($1::text[]) AS relation(name) WHERE to_regclass('public.' || relation.name) IS NOT NULL`, [calendarSnapshotRoots])).rows;
+    FROM unnest($1::text[]) AS relation(name) WHERE to_regclass('public.' || relation.name) IS NOT NULL`,
+  [omitted.flatMap((module) => [...module.tables])])).rows;
   const existing = new Set(relations.map((relation) => relation.name));
-  const queries = calendarSnapshotRoots.filter((table) => existing.has(table)).map((table) =>
-    `SELECT 1 FROM ${table} WHERE department_id=$1`);
-  if (queries.length && (await client.query(`SELECT 1 FROM (${queries.join(" UNION ALL ")}) calendar_data LIMIT 1`, [departmentId])).rowCount) {
-    return calendarSnapshotRequired;
+  const blockers: string[] = [];
+  for (const { tables, message } of omitted) {
+    const queries = tables.filter((table) => existing.has(table)).map((table) =>
+      `SELECT 1 FROM ${table} WHERE department_id=$1`);
+    if (queries.length && (await client.query(`SELECT 1 FROM (${queries.join(" UNION ALL ")}) module_data LIMIT 1`, [departmentId])).rowCount) {
+      blockers.push(message);
+    }
   }
-  return null;
+  return blockers;
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -217,18 +232,18 @@ export function registerCoreReplicationAdapter(pool: Pool) {
     moduleId: "core-site",
     schemaVersion: "27",
     inspect: async (departmentId, replication) => {
-      const blocker = await calendarSnapshotBlocker(pool, departmentId, replication);
+      const blockers = await dependentSnapshotBlockers(pool, departmentId, replication);
       const count = await countRecords(pool, departmentId);
-      return { ready: !blocker, blockers: blocker ? [blocker] : [], recordCount: count };
+      return { ready: !blockers.length, blockers, recordCount: count };
     },
     async exportSnapshot(client, departmentId, replication) {
-      const blocker = await calendarSnapshotBlocker(client, departmentId, replication);
-      if (blocker) throw new Error(blocker);
+      const blockers = await dependentSnapshotBlockers(client, departmentId, replication);
+      if (blockers.length) throw new Error(blockers.join(" "));
       return collect(client, departmentId);
     },
-    async prepareRestore(client, departmentId, _snapshot, replication) {
-      const blocker = await calendarSnapshotBlocker(client, departmentId, replication);
-      if (blocker) throw new Error(blocker);
+    async validateRestoreTarget(client, departmentId, _snapshot, replication) {
+      const blockers = await dependentSnapshotBlockers(client, departmentId, replication);
+      if (blockers.length) throw new Error(blockers.join(" "));
     },
     restoreSnapshot: async (client, targetDepartmentId, input, restoreContext: ReplicationRestoreContext) => {
       const snapshot = normalizeSnapshot(input);
