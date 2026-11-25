@@ -703,19 +703,44 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { restored: true };
   });
 
-  app.put<{ Params: { id: string }; Body: { isHomepage: boolean } }>("/api/modules/wiki/pages/:id/homepage", { schema: { body: { type: "object", additionalProperties: false, required: ["isHomepage"], properties: { isHomepage: { type: "boolean" } } } } }, async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: { isHomepage: boolean } }>("/api/modules/wiki/pages/:id/homepage", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["isHomepage"], properties: { isHomepage: { type: "boolean" } } } },
+  }, async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await site(request, reply, true);
     if (!departmentId) return reply;
+    const { isHomepage } = request.body;
+    const pageId = request.params.id;
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
-      if (request.body.isHomepage) await client.query("UPDATE wiki_pages SET is_homepage=false WHERE department_id=$1 AND is_homepage", [departmentId]);
-      const result = await client.query("UPDATE wiki_pages SET is_homepage=$3,updated_by=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='active' RETURNING id", [request.params.id, departmentId, request.body.isHomepage, request.authenticatedUser!.id]);
-      if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Active Wiki page not found." }); }
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`wiki-homepage:${departmentId}`]);
+      const { rows: [page] } = await client.query<{ is_homepage: boolean }>(
+        "SELECT is_homepage FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active' FOR UPDATE",
+        [pageId, departmentId],
+      );
+      if (!page) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Active Wiki page not found." });
+      }
+      if (page.is_homepage === isHomepage) {
+        await client.query("COMMIT");
+        return { isHomepage };
+      }
+      if (isHomepage) {
+        await client.query("UPDATE wiki_pages SET is_homepage=false WHERE department_id=$1 AND is_homepage", [departmentId]);
+      }
+      await client.query(
+        "UPDATE wiki_pages SET is_homepage=$3,updated_by=$4,updated_at=now() WHERE id=$1 AND department_id=$2",
+        [pageId, departmentId, isHomepage, request.authenticatedUser!.id],
+      );
       await client.query("COMMIT");
-      changed(departmentId, { action: "homepage-changed", pageId: request.params.id });
-      return { isHomepage: request.body.isHomepage };
+      changed(departmentId, { action: "homepage-changed", pageId });
+      return { isHomepage };
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
   });
