@@ -103,7 +103,10 @@ export function registerCalendarRemoval(app: FastifyInstance, context: ModuleSer
         const canRelease = appointment.resources_enabled && isServerModuleEnabled("resource-scheduler") && isResourceBookingManager(request);
         const release = request.query.reservationPolicy === "release";
         if (apply && release && !canRelease) return await stop(403, "Resource management access is required to release these reservations.");
-        const impact = canRelease ? await reservationImpact(client, departmentId, id, scope, boundary, apply && release) : null;
+        // Re-read eligibility after locking bookings. Another appointment may
+        // have added a shared link while a booking row was waiting to lock.
+        if (apply && release && canRelease) await reservationImpact(client, departmentId, id, scope, boundary, true);
+        const impact = canRelease ? await reservationImpact(client, departmentId, id, scope, boundary, false) : null;
         const eligible = impact?.rows.filter((booking) => booking.releasable) ?? [];
         if (!apply) {
           await client.query("COMMIT");
