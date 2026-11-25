@@ -98,7 +98,7 @@ function GroupTypeHistory({ departmentId, groupId, groupType }: { departmentId: 
   </details>;
 }
 
-export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, directorySearch: directorySearchNavigation, createRequestId = 0, onNavigationHandled, onOpenGroupPeople, onOpenCalendarAppointment }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; directorySearch?: DirectorySearchNavigation; createRequestId?: number; onNavigationHandled?: (requestId: number) => void; onOpenGroupPeople?: (groupId: string) => void; onOpenCalendarAppointment?: (target: CalendarAppointmentTarget) => void }) {
+export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, directorySearch: directorySearchNavigation, createRequestId = 0, onNavigationHandled, onOpenGroupPeople, onOpenCalendarAppointment, canAssignCalendarSignup = false }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; directorySearch?: DirectorySearchNavigation; createRequestId?: number; onNavigationHandled?: (requestId: number) => void; onOpenGroupPeople?: (groupId: string) => void; onOpenCalendarAppointment?: (target: CalendarAppointmentTarget) => void; canAssignCalendarSignup?: boolean }) {
   const [groups, setGroups] = useState<(ChurchGroup & { isMyGroup?: boolean })[]>([]);
   const [loadedDepartmentId, setLoadedDepartmentId] = useState("");
   const [directorySearch, setDirectorySearch] = useState("");
@@ -720,7 +720,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
         {selected ? <>
           <div className="directory-heading"><div><h2>{selected.name}</h2><p>{selected.importedFrom ? translate("groups.importedReadOnly") : selected.description || translate("groups.descriptionFallback")}</p><small className="community-group-lifecycle">{selected.groupType ? `${selected.groupType} · ` : ""}{selected.status}{selected.startsOn ? ` · starts ${formatUserDate(selected.startsOn)}` : ""}{selected.endsOn ? ` · ends ${formatUserDate(selected.endsOn)}` : ""}</small></div>{canManage && !selected.importedFrom && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => setEditing((current) => !current)}><Pencil size={14} />{editing ? translate("groups.cancelEdit") : translate("groups.edit")}</button><button className="button button-danger" type="button" onClick={() => void deleteGroup(selected)}><Trash2 size={14} />{translate("groups.delete")}</button></div>}</div>
           {loadedDepartmentId === departmentId && !detailsGroup && onOpenCalendarAppointment && <GroupSignupAppointments
-            key={departmentId + ":" + selected.id} departmentId={departmentId} groupId={selected.id} onOpen={onOpenCalendarAppointment} />}
+            key={departmentId + ":" + selected.id} departmentId={departmentId} groupId={selected.id} onOpen={onOpenCalendarAppointment}
+            assignmentCsrfToken={canManage && canAssignCalendarSignup && !selected.importedFrom && ["active", "draft"].includes(selected.status ?? "active") ? csrfToken : undefined} />}
           {loadedDepartmentId === departmentId && selected.meetingPlace && <GroupMeetingPlaceDetails place={selected.meetingPlace} />}
           {canManage && !selected.importedFrom && selected.status !== "archived" && loadedDepartmentId === departmentId && <GroupMeetingPlaceEditor
             key={departmentId + ":" + selected.id} groupId={selected.id} initial={selected.meetingPlace}
