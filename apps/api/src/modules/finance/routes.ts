@@ -1,3 +1,4 @@
+import { bankStatementSuggestions, currentBankStatus, currentBankSuggestion } from "./bank-suggestions.js";
 import { registerFinanceReplication } from "./replication.js";
 import { parseCamt053 } from "./camt053.js";
 import { parseMt940, statementPreviewAmount, type ImportedBankStatementEntry } from "./mt940.js";
@@ -938,7 +939,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           await client.query("ROLLBACK");
           return reply.code(404).send({ error: "Statement row with an active bank account not found." });
         }
-        if (row.status !== "unmatched") {
+        const { rows: [effective] } = await client.query<{ status: string }>(
+          `SELECT ${currentBankStatus("r", "suggestion")} AS status FROM finance_bank_statement_rows r
+            LEFT JOIN finance_bank_statement_suggestions suggestion ON suggestion.department_id=r.department_id AND suggestion.row_id=r.id
+           WHERE r.department_id=$1 AND r.id=$2`, [departmentId, bankRowId]);
+        if (effective?.status !== "unmatched") {
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "Only unmatched statement rows can be posted. Review any existing match or suggestion first." });
         }
@@ -1549,32 +1554,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const fileName = cleanText(request.body.fileName).replace(/[\\/]/g, "_").slice(0, 180) || `statement.${upload.format}`;
     const duplicate = await findStatementImport(departmentId, request.body.accountId, contentHash);
     if (duplicate.rowCount) return reply.code(409).send({ error: "This exact statement file has already been imported for the selected account." });
-    const minDate = rows.reduce((min, row) => row.date < min ? row.date : min, rows[0]!.date);
-    const maxDate = rows.reduce((max, row) => row.date > max ? row.date : max, rows[0]!.date);
-    const candidates = await pool!.query<{ id: string; booking_date: string; receipt_number: string; booking_text: string; amount_cents: string }>(
-      `SELECT transaction.id,transaction.booking_date::text,transaction.receipt_number,transaction.booking_text,
-              sum(line.debit_cents-line.credit_cents)::text AS amount_cents
-         FROM finance_transactions transaction JOIN finance_transaction_lines line ON line.department_id=transaction.department_id AND line.transaction_id=transaction.id
-        WHERE transaction.department_id=$1 AND transaction.status='posted' AND line.account_id=$2
-          AND transaction.booking_date BETWEEN ($3::date - 3) AND ($4::date + 3)
-        GROUP BY transaction.id ORDER BY transaction.booking_date DESC LIMIT 20000`, [departmentId, request.body.accountId, minDate, maxDate],
-    );
-    const parsedCandidates = candidates.rows.map((candidate) => ({ ...candidate, amount: asMoney(candidate.amount_cents) }));
-    const ruleRows = await pool!.query<{ statement_contains: string; transaction_contains: string }>(
-      "SELECT statement_contains,transaction_contains FROM finance_bank_suggestion_rules WHERE department_id=$1 AND account_id=$2 AND active ORDER BY priority DESC,created_at,id LIMIT 500",
-      [departmentId, request.body.accountId],
-    );
-    const rules = ruleRows.rows.map((rule) => ({ statement: rule.statement_contains.toLocaleLowerCase(), transaction: rule.transaction_contains.toLocaleLowerCase() }));
-    let ruleAppliedRows = 0;
-    const suggested = rows.map((row) => {
-      const statementText = `${row.description} ${row.reference}`.toLocaleLowerCase();
-      const appliedRule = rules.find((rule) => statementText.includes(rule.statement));
-      if (appliedRule) ruleAppliedRows += 1;
-      const matches = parsedCandidates.filter((candidate) => candidate.amount === row.amount
-        && Math.abs(Date.parse(candidate.booking_date) - Date.parse(row.date)) <= 3 * 86_400_000
-        && (!appliedRule || `${candidate.booking_text} ${candidate.receipt_number}`.toLocaleLowerCase().includes(appliedRule.transaction)));
-      return matches.length === 1 ? matches[0]!.id : null;
-    });
+    const { suggestions: suggested, ruleCount, ruleAppliedRows } = await bankStatementSuggestions(pool!, departmentId, request.body.accountId, rows);
     const batchId = randomUUID(); const client = await pool!.connect();
     try {
       await client.query("BEGIN");
@@ -1614,7 +1594,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const row = rows[index]!; const suggestedTransactionId = suggested[index];
         await client.query("INSERT INTO finance_bank_statement_rows(id,department_id,import_id,line_number,booking_date,description,reference,amount_cents,status,suggested_transaction_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, batchId, row.line, row.date, row.description, row.reference, row.amount, suggestedTransactionId ? "suggested" : "unmatched", suggestedTransactionId]);
       }
-      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: rules.length, ruleAppliedRows, ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency, ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}) });
+      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: ruleCount, ruleAppliedRows, ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency, ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}) });
       await client.query("COMMIT");
       publish(departmentId, "bank-statement-imported", batchId);
       return reply.code(201).send({ id: batchId, rowCount: rows.length, suggestedCount: suggested.filter(Boolean).length });
@@ -1628,17 +1608,77 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get("/api/modules/finance/bank-statements", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     return (await pool!.query(`SELECT imported.id,imported.file_name AS "fileName",imported.imported_at AS "importedAt",imported.row_count AS "rowCount",account.code AS "accountCode",account.name AS "accountName",
-      count(row.id) FILTER(WHERE row.status='matched')::int AS matched,count(row.id) FILTER(WHERE row.status='suggested')::int AS suggested,count(row.id) FILTER(WHERE row.status='unmatched')::int AS unmatched,count(row.id) FILTER(WHERE row.status='ignored')::int AS ignored
+      count(row.id) FILTER(WHERE row.status='matched')::int AS matched,count(row.id) FILTER(WHERE (${currentBankStatus("row", "suggestion")})='suggested')::int AS suggested,count(row.id) FILTER(WHERE (${currentBankStatus("row", "suggestion")})='unmatched')::int AS unmatched,count(row.id) FILTER(WHERE row.status='ignored')::int AS ignored
       FROM finance_bank_statement_imports imported JOIN finance_accounts account ON account.department_id=imported.department_id AND account.id=imported.account_id LEFT JOIN finance_bank_statement_rows row ON row.department_id=imported.department_id AND row.import_id=imported.id
+      LEFT JOIN finance_bank_statement_suggestions suggestion ON suggestion.department_id=row.department_id AND suggestion.row_id=row.id
       WHERE imported.department_id=$1 GROUP BY imported.id,account.code,account.name ORDER BY imported.imported_at DESC LIMIT 100`, [departmentId])).rows;
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/finance/bank-statements/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
-    const result = await pool!.query(`SELECT row.id,imported.account_id AS "accountId",row.line_number AS "lineNumber",row.booking_date AS "bookingDate",row.description,row.reference,row.amount_cents AS "amountCents",row.status,row.suggested_transaction_id AS "suggestedTransactionId",row.matched_transaction_id AS "matchedTransactionId",transaction.receipt_number AS "transactionReceipt",transaction.booking_text AS "transactionText"
-      FROM finance_bank_statement_rows row JOIN finance_bank_statement_imports imported ON imported.department_id=row.department_id AND imported.id=row.import_id LEFT JOIN finance_transactions transaction ON transaction.department_id=row.department_id AND transaction.id=COALESCE(row.matched_transaction_id,row.suggested_transaction_id)
+    const result = await pool!.query(`SELECT row.id,imported.account_id AS "accountId",row.line_number AS "lineNumber",row.booking_date AS "bookingDate",row.description,row.reference,row.amount_cents AS "amountCents",${currentBankStatus("row", "suggestion")} AS status,
+      CASE WHEN row.status IN ('unmatched','suggested') THEN ${currentBankSuggestion("row", "suggestion")} END AS "suggestedTransactionId",row.matched_transaction_id AS "matchedTransactionId",transaction.receipt_number AS "transactionReceipt",transaction.booking_text AS "transactionText"
+      FROM finance_bank_statement_rows row JOIN finance_bank_statement_imports imported ON imported.department_id=row.department_id AND imported.id=row.import_id LEFT JOIN finance_bank_statement_suggestions suggestion ON suggestion.department_id=row.department_id AND suggestion.row_id=row.id
+      LEFT JOIN finance_transactions transaction ON transaction.department_id=row.department_id AND transaction.id=CASE
+        WHEN row.status='matched' THEN row.matched_transaction_id
+        WHEN row.status IN ('unmatched','suggested') THEN ${currentBankSuggestion("row", "suggestion")} END
       WHERE row.department_id=$1 AND imported.id=$2 ORDER BY row.line_number LIMIT 20000`, [departmentId, request.params.id]);
     return result.rows.map((row) => ({ ...row, amountCents: asMoney(row.amountCents) }));
+  });
+
+  app.post<{ Params: { id: string } }>("/api/modules/finance/bank-statements/:id/recalculate-suggestions", {
+    schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    const importId = request.params.id;
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      const { rows: [statement] } = await client.query<{ account_id: string }>(
+        "SELECT account_id FROM finance_bank_statement_imports WHERE department_id=$1 AND id=$2", [departmentId, importId]);
+      if (!statement) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Bank statement not found." });
+      }
+      // Take the same row locks used by reconciliation and posting. Re-read
+      // suggestions after the locks so two recalculations do not race.
+      const locked = await client.query<{ id: string }>(
+        `SELECT id FROM finance_bank_statement_rows
+          WHERE department_id=$1 AND import_id=$2 AND status IN ('unmatched','suggested')
+          ORDER BY id LIMIT 20001 FOR UPDATE`, [departmentId, importId]);
+      if (locked.rows.length > 20_000) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This statement has too many rows to refresh." });
+      }
+      const { rows } = await client.query<{ id: string; date: string; amount: string; description: string; reference: string; previous_id: string | null }>(
+        `SELECT row.id,row.booking_date::text AS date,row.amount_cents::text AS amount,row.description,row.reference,
+                ${currentBankSuggestion("row", "suggestion")} AS previous_id
+           FROM finance_bank_statement_rows row LEFT JOIN finance_bank_statement_suggestions suggestion
+                ON suggestion.department_id=row.department_id AND suggestion.row_id=row.id
+          WHERE row.department_id=$1 AND row.id=ANY($2::uuid[]) ORDER BY row.line_number`,
+        [departmentId, locked.rows.map(row => row.id)]);
+      const { suggestions, ruleCount, ruleAppliedRows } = await bankStatementSuggestions(client, departmentId, statement.account_id, rows);
+      const changed = rows.flatMap((row, index) => row.previous_id === (suggestions[index] ?? null) ? [] : [{ id: row.id, suggestion: suggestions[index] ?? null }]);
+      if (changed.length) await client.query(
+        `INSERT INTO finance_bank_statement_suggestions(department_id,row_id,transaction_id)
+         SELECT $1,input.row_id,input.transaction_id FROM unnest($2::uuid[],$3::uuid[]) input(row_id,transaction_id)
+         ON CONFLICT (department_id,row_id) DO UPDATE SET transaction_id=EXCLUDED.transaction_id,updated_at=now()`,
+        [departmentId, changed.map(row => row.id), changed.map(row => row.suggestion)]);
+      const result = { reviewedCount: rows.length, updatedCount: changed.length, suggestedCount: suggestions.filter(Boolean).length };
+      await audit(client, departmentId, request, "bank_suggestions_recalculated", "bank_statement_import", importId,
+        { ...result, accountId: statement.account_id, activeRuleCount: ruleCount, ruleAppliedRows });
+      await client.query("COMMIT");
+      publish(departmentId, "bank-suggestions-recalculated", importId);
+      return reply.send(result);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
   });
 
   app.put<{ Params: { id: string }; Body: { action: "match" | "ignore"; transactionId?: string } }>("/api/modules/finance/bank-statement-rows/:id/reconcile", {
