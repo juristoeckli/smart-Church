@@ -8,10 +8,12 @@ type Step =
   | { kind: "followup"; subject: string; dueDays: number; assigneeId: string }
   | { kind: "membership"; role?: string; status?: Status }
   | { kind: "addToGroup"; targetGroupId: string; role: string; status: Status }
+  | { kind: "memberField"; fieldId: string; value?: string | boolean | number | null }
   | { kind: "removeMembership" };
+type Field = { id: string; label: string; type: "text" | "boolean" | "number" | "date" | "select"; options: string[] };
 type Routine = { id: string; name: string; role: string; status: Status; steps: Step[]; enabled: boolean };
 type Run = { id: string; routineId: string; memberName: string; phase: "queued" | "waiting" | "completed" | "cancelled" | "failed"; nextStep: number; dueAt: string; updatedAt: string; outcome: string | null };
-type Data = { active: boolean; canChangeMembership: boolean; roles: string[]; assignees: Array<{id: string; name: string}>; routines: Routine[]; runs: Run[]; targetGroups: Array<{id: string; name: string}> };
+type Data = { active: boolean; canChangeMembership: boolean; roles: string[]; assignees: Array<{id: string; name: string}>; routines: Routine[]; runs: Run[]; targetGroups: Array<{id: string; name: string}>; fields?: Field[] };
 type Props = Pick<ModuleContext, "departmentId" | "csrfToken" | "realtime"> & { groupId: string };
 const statuses: Record<Status, string> = { active: "Active", paused: "Paused", waitlist: "Waitlist" };
 const phases: Record<Run["phase"], string> = { queued: "Queued", waiting: "Waiting", completed: "Completed", cancelled: "Cancelled", failed: "Failed" };
@@ -34,21 +36,49 @@ const templates: Array<{ id: string; name: string; description: string; steps: S
 ];
 
 const terminal = (step?: Step) => step?.kind === "membership" || step?.kind === "removeMembership";
-const membershipStep = (step: Step) => terminal(step) || step.kind === "addToGroup";
+const membershipStep = (step: Step) => terminal(step) || step.kind === "addToGroup" || step.kind === "memberField";
 const stepTitles: Record<Step["kind"], string> = {
   wait: "Wait", followup: "Follow-up", membership: "Final membership change",
-  addToGroup: "Add to another group", removeMembership: "End source membership",
+  addToGroup: "Add to another group", removeMembership: "End source membership", memberField: "Set a membership field",
 };
 
-function stepLabel(step: Step, groups: Data["targetGroups"] = []) {
+function stepLabel(step: Step, groups: Data["targetGroups"] = [], fields: Field[] = []) {
   if (step.kind === "wait") {
     if ("minutes" in step) return `Wait ${step.minutes} ${step.minutes === 1 ? "minute" : "minutes"}`;
     return `Wait ${step.duration} ${step.duration === 1 ? step.unit.slice(0, -1) : step.unit}`;
   }
   if (step.kind === "followup") return `Create follow-up: ${step.subject}`;
+  if (step.kind === "memberField") return `${step.value === null ? "Reset" : "Set"} ${fields.find((field) => field.id === step.fieldId)?.label ?? "membership field"}`;
   if (step.kind === "removeMembership") return "End membership in this group";
   if (step.kind === "addToGroup") return `Add to ${groups.find(({ id }) => id === step.targetGroupId)?.name ?? "another group"} as ${step.role} · ${statuses[step.status]}`;
   return `Change membership to ${[step.role, step.status && statuses[step.status]].filter(Boolean).join(" · ")}`;
+}
+
+function MembershipFieldEditor({ fields, step, onChange }: {
+  fields: Field[]; step: Extract<Step, { kind: "memberField" }>; onChange: (step: Extract<Step, { kind: "memberField" }>) => void;
+}) {
+  const field = fields.find(({ id }) => id === step.fieldId);
+  const value = step.value;
+  const set = (next?: typeof value) => onChange({ ...step, value: next });
+  return <>
+    <label>Membership field<select required value={step.fieldId} onChange={(event) => onChange({ ...step, fieldId: event.target.value, value: undefined })}>
+      <option value="">Choose a field</option>{fields.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+    </select></label>
+    {field && <>
+      <label><input type="checkbox" checked={value === null} onChange={(event) => set(event.target.checked ? null : undefined)} /> Reset to the field default</label>
+      {value !== null && (field.type === "select" || field.type === "boolean" ? <label>Field value
+        <select required value={value === undefined ? "" : String(value)} onChange={(event) =>
+          set(event.target.value === "" ? undefined : field.type === "boolean" ? event.target.value === "true" : event.target.value)}>
+          <option value="">Choose a value</option>{field.type === "boolean"
+            ? <><option value="true">Yes</option><option value="false">No</option></>
+            : field.options.map((option) => <option key={option} value={option}>{option}</option>)}
+        </select>
+      </label> : <label>Field value<input required type={field.type} value={typeof value === "boolean" ? "" : value ?? ""} maxLength={500}
+        step={field.type === "number" ? "any" : undefined}
+        onChange={(event) => set(event.target.value === "" ? undefined : field.type === "number" ? event.target.valueAsNumber : event.target.value)} />
+      </label>)}
+    </>}
+  </>;
 }
 
 export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realtime }: Props) {
@@ -186,6 +216,7 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
             </select></label>
             <label>Due in days<input type="number" min={0} max={365} required value={step.dueDays} onChange={(event) => sendStep(index, { ...step, dueDays: Number(event.target.value) })} /></label>
           </>}
+          {step.kind === "memberField" && <MembershipFieldEditor fields={data.fields ?? []} step={step} onChange={(updated) => sendStep(index, updated)} />}
           {step.kind === "addToGroup" && <>
             <label>Destination group<select required value={step.targetGroupId} onChange={(event) => sendStep(index, { ...step, targetGroupId: event.target.value })}>
               <option value="">Choose a group</option>{data.targetGroups.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
@@ -210,6 +241,8 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
           <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12} onClick={() => addStep({ kind: "wait", minutes: 1440 })}>Add wait</button>
           <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12 || !data.assignees.length}
             onClick={() => addStep({ kind: "followup", subject: "", assigneeId: "", dueDays: 1 })}>Add follow-up</button>
+          {data.canChangeMembership && Boolean(data.fields?.length) && <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12}
+            onClick={() => addStep({ kind: "memberField", fieldId: "" })}>Set a membership field</button>}
           {data.canChangeMembership && data.targetGroups.length > 0 && <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12}
             onClick={() => addStep({ kind: "addToGroup", targetGroupId: "", role: "Member", status: "active" })}>Add to another group</button>}
           {data.canChangeMembership && <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12 || hasFinalStep}
@@ -227,7 +260,7 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
       <h2>Definitions and progress</h2>
       <div className="go-list">{data.routines.map((routine) => <article key={routine.id}>
         <div><strong>{routine.name}</strong><small>{routine.role} · {statuses[routine.status]} · {routine.enabled ? "Enabled" : "Disabled"}</small>
-          <ol>{routine.steps.map((step, index) => <li key={index}>{stepLabel(step, data.targetGroups)}</li>)}</ol></div>
+          <ol>{routine.steps.map((step, index) => <li key={index}>{stepLabel(step, data.targetGroups, data.fields)}</li>)}</ol></div>
         <button className="button button-secondary" type="button" disabled={busy || (!routine.enabled && (
           !data.active || !data.canChangeMembership && routine.steps.some(membershipStep)
         ))} onClick={() => {
@@ -250,8 +283,8 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
         }
 
         return <article key={run.id}><div><strong>{run.memberName}</strong><small>{routine?.name} · {phases[run.phase]}</small>
-          {run.phase === "waiting" && <small>Wait ends {new Date(run.dueAt).toLocaleString()}{routine && routine.steps[run.nextStep] ? ` · Next: ${stepLabel(routine.steps[run.nextStep], data.targetGroups)}` : ""}</small>}
-          {failedStep && <small>Failed step: {stepLabel(failedStep, data.targetGroups)}</small>}
+          {run.phase === "waiting" && <small>Wait ends {new Date(run.dueAt).toLocaleString()}{routine && routine.steps[run.nextStep] ? ` · Next: ${stepLabel(routine.steps[run.nextStep], data.targetGroups, data.fields)}` : ""}</small>}
+          {failedStep && <small>Failed step: {stepLabel(failedStep, data.targetGroups, data.fields)}</small>}
           {run.outcome && <p>{run.outcome}</p>}</div>
           {canRecover && <div className="form-actions">
             <button className="button button-secondary" type="button" disabled={busy} onClick={() => recover("retry")}>Retry failed step</button>

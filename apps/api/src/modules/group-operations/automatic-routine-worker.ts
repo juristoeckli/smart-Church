@@ -1,3 +1,5 @@
+import { applyRoutineMembershipField } from "./automatic-membership-fields.js";
+import type { MembershipFieldValue } from "../group-hierarchy/membership-field-value.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
@@ -10,10 +12,11 @@ export type RoutineStep =
   | { kind: "followup"; subject: string; assigneeId: string; dueDays: number }
   | { kind: "membership"; role?: string; status?: MemberStatus }
   | { kind: "addToGroup"; targetGroupId: string; role: string; status: MemberStatus }
+  | { kind: "memberField"; fieldId: string; value: MembershipFieldValue | null }
   | { kind: "removeMembership" };
 
 export const isTerminalMembershipStep = (step: RoutineStep) => step.kind === "membership" || step.kind === "removeMembership";
-export const requiresMembershipAuthority = (step: RoutineStep) => isTerminalMembershipStep(step) || step.kind === "addToGroup";
+export const requiresMembershipAuthority = (step: RoutineStep) => isTerminalMembershipStep(step) || step.kind === "addToGroup" || step.kind === "memberField";
 
 type Job = {
   id: string; department_id: string; group_id: string; routine_id: string; contact_id: string;
@@ -119,6 +122,19 @@ async function processCandidate(client: PoolClient, context: ModuleServerContext
       await client.query(`INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details)
         VALUES($1,$2,$3,$4,'follow_up_created',$5,jsonb_build_object('automaticRoutineRunId',$6::uuid))`,
         [randomUUID(), departmentId, job.group_id, job.actor_id, taskId, job.id]);
+    }
+    if (step.kind === "memberField") {
+      const changed = await applyRoutineMembershipField(client, departmentId, job.group_id, job.contact_id, job.actor_id, step);
+      if (changed === null) {
+        await finish(client, job.id, "failed", next, "The membership field, its value, or the person is no longer eligible.");
+        return result();
+      }
+      if (changed) {
+        changedGroups.add(job.group_id);
+        await client.query(`INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details)
+          VALUES($1,$2,$3,$4,'automatic_routine_member_field',$5,jsonb_build_object('fieldId',$6::uuid))`,
+          [randomUUID(), departmentId, job.group_id, job.actor_id, job.id, step.fieldId]);
+      }
     }
     if (step.kind === "addToGroup") {
       const target = await client.query(`SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND id<>$3

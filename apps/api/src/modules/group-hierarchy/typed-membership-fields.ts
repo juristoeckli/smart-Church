@@ -1,3 +1,4 @@
+import { membershipFieldTypes as types, normalizeMembershipFieldValue, type MembershipFieldType as FieldType, type MembershipFieldValue as Value } from "./membership-field-value.js";
 import { randomUUID } from "node:crypto";
 import { csvDocument } from "../../csv-export.js";
 import { createWorkbook } from "../finance/workbook.js";
@@ -12,25 +13,9 @@ const memberParams = { type: "object", required: ["groupId", "contactId"], addit
 const definitionParams = { type: "object", required: ["groupId", "fieldId"], additionalProperties: false, properties: { groupId: uuid, fieldId: uuid } } as const;
 const labelSchema = { type: "string", minLength: 1, maxLength: 80 } as const;
 const definitionColumns = 'id,label,field_type AS type,options,revision,archived_at AS "archivedAt",default_value AS "defaultValue"';
-const types = ["text", "number", "boolean", "date", "select"] as const;
-type FieldType = typeof types[number];
-type Value = string | number | boolean;
 type Field = { id: string; label: string; type: FieldType; options: string[]; revision: number; archivedAt: Date | null; defaultValue: Value | null };
 type Scope = { departmentId: string; groupId: string };
 type ManagerCheck = (request: FastifyRequest, groupId: string, departmentId: string, db?: Pick<PoolClient, "query">) => Promise<boolean>;
-
-function normalizedValue(field: Pick<Field, "type" | "options">, value: unknown) {
-  if (value === null) return null;
-  if (field.type === "boolean") return typeof value === "boolean" ? value : undefined;
-  if (field.type === "number") return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-  if (typeof value !== "string" || value.includes("\u0000")) return undefined;
-  const text = value.trim();
-  if (field.type === "text") return text.length <= 500 ? text || null : undefined;
-  if (field.type === "select") return field.options.includes(text) ? text : undefined;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || text.startsWith("0000-")) return undefined;
-  const date = new Date(text + "T00:00:00Z");
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === text ? text : undefined;
-}
 
 export function registerTypedMembershipFields(app: FastifyInstance, context: ModuleServerContext, canManageGroup: ManagerCheck) {
   const { pool, isDatabaseReady, validateMutation, resolveDepartmentId, lockDepartmentForWrite } = context;
@@ -132,7 +117,7 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     if (previous.length >= 40 || previous.some(field => field.label.toLowerCase() === label.toLowerCase())) {
       reply.code(409).send({ error: "A group can have up to 40 fields with unique labels." }); return null;
     }
-    const defaultValue = normalizedValue({ type, options }, request.body.defaultValue ?? null);
+    const defaultValue = normalizeMembershipFieldValue({ type, options }, request.body.defaultValue ?? null);
     if (defaultValue === undefined) { reply.code(400).send({ error: "Enter a valid default for this field type." }); return null; }
     return insertDefinition(client, location, request.authenticatedUser!.id, { label, type, options, defaultValue });
   }, 201));
@@ -185,7 +170,7 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
       reply.code(409).send({ error: "This label is already used by a membership field, including archived fields." }); return null;
     }
     const archived = request.body.archived ?? Boolean(field.archivedAt);
-    const defaultValue = request.body.defaultValue === undefined ? field.defaultValue : normalizedValue(field, request.body.defaultValue);
+    const defaultValue = request.body.defaultValue === undefined ? field.defaultValue : normalizeMembershipFieldValue(field, request.body.defaultValue);
     if (defaultValue === undefined) { reply.code(400).send({ error: "Enter a valid default for this field type." }); return null; }
     if (field.label === label && Boolean(field.archivedAt) === archived && field.defaultValue === defaultValue) return field;
 
@@ -215,7 +200,7 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     if (!field || field.archivedAt || field.revision !== input.fieldRevision) {
       reply.code(409).send({ error: "This field is unavailable or changed. Reload the member fields and try again." }); return null;
     }
-    const value = normalizedValue(field, input.value);
+    const value = normalizeMembershipFieldValue(field, input.value);
     if (value === undefined || (value === null && input.value !== null)) {
       reply.code(400).send({ error: `Enter a valid value for ${field.label} or choose Clear value.` }); return null;
     }
@@ -411,7 +396,7 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
       if (field?.archivedAt) {
         reply.code(409).send({ error: "A membership field was archived. Reload the editor before saving." }); return null;
       }
-      const normalized = field ? normalizedValue(field, value) : undefined;
+      const normalized = field ? normalizeMembershipFieldValue(field, value) : undefined;
       if (normalized === undefined) { reply.code(400).send({ error: field ? `Enter a valid value for ${field.label}.` : "A membership field does not belong to this group." }); return null; }
       patch[id] = normalized;
     }

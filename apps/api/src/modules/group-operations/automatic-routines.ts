@@ -1,3 +1,5 @@
+import { routineMembershipFields } from "./automatic-membership-fields.js";
+import { normalizeMembershipFieldValue } from "../group-hierarchy/membership-field-value.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -13,12 +15,12 @@ const roleText = { type: "string", minLength: 1, maxLength: 80 } as const;
 const groupParams = { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: uuid } } as const;
 const base = "/api/modules/group-operations/automatic-routines/:groupId";
 const stepSchema = { type: "object", additionalProperties: false, required: ["kind"], properties: {
-  kind: { type: "string", enum: ["wait", "followup", "membership", "addToGroup", "removeMembership"] },
+  kind: { type: "string", enum: ["wait", "followup", "membership", "addToGroup", "removeMembership", "memberField"] },
   minutes: { type: "integer", minimum: 1, maximum: 525600 },
   duration: { type: "integer", minimum: 1, maximum: 120 }, unit: { type: "string", enum: ["months", "years"] },
   subject: { type: "string", minLength: 1, maxLength: 160 },
   assigneeId: uuid, dueDays: { type: "integer", minimum: 0, maximum: 365 },
-  role: roleText, status: membershipStatus, targetGroupId: uuid,
+  role: roleText, status: membershipStatus, targetGroupId: uuid, fieldId: uuid, value: {},
 }, oneOf: [
   { properties: { kind: { const: "wait" } }, oneOf: [
     { required: ["minutes"], not: { anyOf: [{ required: ["duration"] }, { required: ["unit"] }] } },
@@ -28,6 +30,7 @@ const stepSchema = { type: "object", additionalProperties: false, required: ["ki
   { properties: { kind: { const: "membership" } }, anyOf: [{ required: ["role"] }, { required: ["status"] }] },
   { properties: { kind: { const: "addToGroup" } }, required: ["targetGroupId", "role", "status"] },
   { properties: { kind: { const: "removeMembership" } } },
+  { properties: { kind: { const: "memberField" } }, required: ["fieldId", "value"] },
 ] } as const;
 
 export function registerAutomaticGroupRoutines(app: FastifyInstance, context: ModuleServerContext,
@@ -115,6 +118,7 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
     ) : null;
     reply.header("Cache-Control", "private, no-store");
     return { active, canChangeMembership: Boolean(authority?.manage_members), routines: routines.rows, runs: runs.rows, targetGroups: targets?.rows ?? [],
+      fields: authority?.manage_members ? await routineMembershipFields(pool!, departmentId, groupId) : [],
       assignees: members.rows.filter((member) => member.status === "active").map(({id, name}) => ({ id, name })),
       roles: [...new Set(members.rows.map((member) => String(member.role).trim()))].sort((a, b) => a.localeCompare(b)) };
   });
@@ -162,10 +166,20 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
       );
       if (result.rowCount !== assigneeIds.length) { reply.code(400).send({ error: "Each follow-up must be assigned to an active member of this group." }); return null; }
     }
+    const fieldSteps = steps.filter((step) => step.kind === "memberField");
+    const fields = fieldSteps.length ? await routineMembershipFields(client, departmentId, groupId) : [];
+    const fieldsById = new Map(fields.map((field) => [field.id, field]));
+    if (fieldSteps.some((step) => {
+      const field = fieldsById.get(step.fieldId.toLowerCase());
+      return !field || normalizeMembershipFieldValue(field, step.value) === undefined;
+    })) {
+      reply.code(400).send({ error: "Choose a valid active membership field and value for this group." }); return null;
+    }
     const cleaned = steps.map((step) => {
       if (step.kind === "followup") return { kind: step.kind, subject: step.subject.trim(), assigneeId: step.assigneeId, dueDays: step.dueDays };
       if (step.kind === "membership") return { kind: step.kind, role: step.role?.trim() || undefined, status: step.status };
       if (step.kind === "addToGroup") return { kind: step.kind, targetGroupId: step.targetGroupId.toLowerCase(), role: step.role.trim(), status: step.status };
+      if (step.kind === "memberField") return { kind: step.kind, fieldId: step.fieldId.toLowerCase(), value: step.value };
       if (step.kind === "removeMembership") return { kind: step.kind };
       return "minutes" in step ? { kind: step.kind, minutes: step.minutes } : { kind: step.kind, duration: step.duration, unit: step.unit };
     });
