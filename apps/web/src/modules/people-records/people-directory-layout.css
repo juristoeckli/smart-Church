@@ -1,0 +1,48 @@
+.people-directory-table-scroll {
+  overflow-x: auto;
+}
+.people-directory-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: start;
+}
+.people-directory-table th, .people-directory-table td {
+  text-align: start;
+  padding: .55rem .7rem;
+  border-block-end: 1px solid var(--line, #cbd5e1);
+  overflow-wrap: anywhere;
+}
+.people-directory-open {
+  text-align: start;
+  font-weight: 700;
+}
+.people-directory-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: .65rem;
+}
+.people-directory-card {
+  border: 1px solid var(--line, #cbd5e1);
+  border-radius: .5rem;
+  padding: .65rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.people-directory-card-heading {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+}
+.people-directory-card dl {
+  display: grid;
+  gap: .35rem;
+  margin-block: .55rem 0;
+}
+.people-directory-card dl div {
+  display: grid;
+  grid-template-columns: minmax(5rem, 1fr) minmax(0, 2fr);
+  gap: .4rem;
+}
+.people-directory-card dd {
+  margin: 0;
+}
