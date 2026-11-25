@@ -1479,7 +1479,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       .update(JSON.stringify(["smart-church.bank-statement-source.v1", scope, parsed.currency,
         isIban ? "iban" : format, isIban ? normalized : parsed.sourceAccount]))
       .digest("hex");
-    return { entries: parsed.entries, currency: parsed.currency, accountEnding: parsed.accountEnding, digest, scope };
+    return { entries: parsed.entries, currency: parsed.currency, accountEnding: parsed.accountEnding, digest, scope, ...("profile" in parsed && parsed.profile === "stuzza" ? { profile: "stuzza" as const } : {}) };
   }
   async function recognizedStatementAccount(departmentId: string, digest: string) {
     const { rows: [mapping] } = await pool!.query<{ accountId: string; available: boolean }>(
@@ -1663,7 +1663,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       return reply.header("Cache-Control", "private, no-store").send({
         format: upload.format, rowCount: parsed.entries.length, duplicate,
-        accountEnding: parsed.accountEnding, currency: parsed.currency,
+        accountEnding: parsed.accountEnding, currency: parsed.currency, ...(parsed.profile ? { profile: parsed.profile } : {}),
         rememberedAccountId: (await recognizedStatementAccount(departmentId, parsed.digest))?.accountId ?? null,
         headers: ["Booking date", "Amount", "Description", "Reference"],
         sample: parsed.entries.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.amount), row.description, row.reference]),
@@ -1696,6 +1696,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const upload = statementUpload(request.body);
     if (!upload) return reply.code(400).send({ error: "Choose one CSV, MT940, CAMT.053, or PayPal Activity Report." });
     let nativeStatementCurrency: string | undefined;
+    let nativeProfile: "stuzza" | undefined;
     let nativeSourceDigest: string | undefined;
     let nativeSourceScope: string | undefined;
     const rememberSource = request.body.rememberSource;
@@ -1720,6 +1721,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const parsed = await readNativeStatement(departmentId, upload.format, upload.content);
       if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
       nativeStatementCurrency = parsed.currency;
+      nativeProfile = parsed.profile;
       nativeSourceDigest = parsed.digest;
       nativeSourceScope = parsed.scope;
       if (nativeStatementCurrency !== await statementCurrency(departmentId)) {
@@ -1808,7 +1810,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         nativeCurrency: nativeStatementCurrency,
         details: {
           ...(paypalReport ? { overlapCount, ignoredCount: paypalReport.ignoredCount } : {}),
-          ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency,
+          ...(nativeStatementCurrency ? { format: upload.format, currency: nativeStatementCurrency, ...(nativeProfile ? { profile: nativeProfile } : {}),
             ...(rememberSource ? { rememberedSourceAccount: true } : {}) } : {}),
         },
       });
@@ -1869,7 +1871,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const files: ArchiveFile[] = [];
     const hashes = new Set<string>();
     let currency: string | undefined;
-    let account: { digest: string; accountEnding: string } | undefined;
+    let account: { digest: string; accountEnding: string; profile?: "stuzza" } | undefined;
     let rowCount = 0, ignoredCount = 0, duplicateCount = 0;
     let firstDate = "9999-12-31", lastDate = "0000-01-01";
     for (const source of sources) {
@@ -1890,6 +1892,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       } else {
         const parsed = await readNativeStatement(departmentId, format, content, scope);
         if (typeof parsed === "string") return `${fileName}: ${parsed}`;
+        if (account && account.profile !== parsed.profile) return "All CAMT.053 statements in a ZIP must use the same banking profile.";
         if (account && account.digest !== parsed.digest) return "All statements in a ZIP must belong to the same source account and currency.";
         account = parsed;
         fileCurrency = parsed.currency;
@@ -1909,7 +1912,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       files.push({ fileName, contentHash, rows, paypalRows, internalDuplicateCount });
     }
     if (!currency || !rowCount) return "The ZIP has no statement rows.";
-    return { format, currency, accountEnding: account?.accountEnding, files, firstDate, lastDate, ignoredCount, duplicateCount };
+    return { format, currency, accountEnding: account?.accountEnding, profile: account?.profile, files, firstDate, lastDate, ignoredCount, duplicateCount };
   }
 
   type ParsedArchive = Exclude<Awaited<ReturnType<typeof readBankArchive>>, string>;
@@ -1981,6 +1984,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const isPaypal = archive.format === "paypal";
     return reply.header("Cache-Control", "private, no-store").send({
       format: "zip", archiveFormat: archive.format, accountingYear, currency: archive.currency,
+      ...(archive.profile ? { profile: archive.profile } : {}),
       accountEnding: archive.accountEnding, duplicate: !available.length, rowCount: available.length,
       files: reviewed.files.map(({ file, alreadyImported }, index) => {
         const receivedCount = archive.files[index]!.rows.length;
@@ -2041,7 +2045,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         imports.push(await writeStatementImport(client, departmentId, request, {
           ...file, batchId: randomUUID(), accountId, nativeCurrency: archive.currency,
           paypalByLine: file.paypalRows && new Map(file.paypalRows.map(row => [row.line, row])),
-          details: { format: archive.format, currency: archive.currency, archiveName, accountingYear,
+          details: { format: archive.format, currency: archive.currency, archiveName, accountingYear, ...(archive.profile ? { profile: archive.profile } : {}),
             ...(archive.format === "paypal" ? { archiveOverlapCount: overlapCount, archiveIgnoredCount: archive.ignoredCount } : {}) },
         }));
       }

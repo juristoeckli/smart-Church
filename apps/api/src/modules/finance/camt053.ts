@@ -7,12 +7,17 @@ type Element = {
   currency?: string;
   children: Element[];
 };
-type Statement = { entries: ImportedBankStatementEntry[]; accountEnding: string; currency: string; sourceAccount: string; sourceAccountIsIban: boolean };
+type Statement = { entries: ImportedBankStatementEntry[]; accountEnding: string; currency: string; sourceAccount: string; sourceAccountIsIban: boolean; profile?: "stuzza" };
 
 const camtNamespace = /^urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.\d{2}$/;
+// PSA Austrian rulebook versions for the legacy CAMT.053.001.02 envelope.
+const stuzzaNamespaces = new Set([
+  "ISO:camt.053.001.02:APC:STUZZA:payments:003",
+  "ISO:camt.053.001.02:APC:STUZZA:payments:004",
+]);
 const maxCents = 9_000_000_000_000_000n;
 
-function readXml(input: string): Element {
+function readXml(input: string) {
   const stack: Element[] = [];
   const parser = new SaxesParser({ xmlns: true });
   let namespace = "";
@@ -21,7 +26,7 @@ function readXml(input: string): Element {
   parser.on("doctype", () => { throw new Error("Document type declarations are not allowed in CAMT.053 files."); });
   parser.on("opentag", tag => {
     if (!stack.length) {
-      if (tag.local !== "Document" || !camtNamespace.test(tag.uri)) {
+      if (tag.local !== "Document" || (!camtNamespace.test(tag.uri) && !stuzzaNamespaces.has(tag.uri))) {
         throw new Error("Choose a CAMT.053 bank statement. Intraday and notification files cannot be imported.");
       }
       namespace = tag.uri;
@@ -46,7 +51,7 @@ function readXml(input: string): Element {
   parser.on("error", () => { throw new Error("The CAMT.053 file is not well-formed XML."); });
   parser.write(input).close();
   if (!root) throw new Error("The CAMT.053 file is empty.");
-  return root;
+  return { root, stuzza: stuzzaNamespaces.has(namespace) };
 }
 
 const children = (node: Element | undefined, name: string) => node?.children.filter(child => child.name === name) ?? [];
@@ -113,7 +118,8 @@ function balance(statement: Element, code: string, currency: string) {
 
 export function parseCamt053(input: string): Statement | string {
   try {
-    const statements = children(child(readXml(input), "BkToCstmrStmt"), "Stmt");
+    const { root, stuzza } = readXml(input);
+    const statements = children(child(root, "BkToCstmrStmt"), "Stmt");
     if (!statements.length) return "The CAMT.053 file contains no statements.";
     const entries: ImportedBankStatementEntry[] = [];
     const ids = new Set<string>();
@@ -142,7 +148,13 @@ export function parseCamt053(input: string): Statement | string {
         return "The CAMT.053 file must use one account currency.";
       }
       currency = statementCurrency;
-      const opening = balance(statement, "OPBD", currency);
+      const openingBooked = balance(statement, "OPBD", currency);
+      // Austrian RB 7–9 reports the preceding closing balance as the new opening balance.
+      const previouslyClosed = balance(statement, "PRCD", currency);
+      if (openingBooked !== undefined && previouslyClosed !== undefined && openingBooked !== previouslyClosed) {
+        return "The CAMT.053 opening and previous closing balances disagree.";
+      }
+      const opening = openingBooked ?? previouslyClosed;
       const closing = balance(statement, "CLBD", currency);
       if ((opening === undefined) !== (closing === undefined)
         || (previousClosing !== undefined && opening !== undefined && previousClosing !== opening)) {
@@ -167,7 +179,7 @@ export function parseCamt053(input: string): Statement | string {
       previousClosing = closing;
     }
     if (!entries.length) return "The CAMT.053 file contains no booked entries.";
-    return { entries, currency, accountEnding: account.length > 4 ? account.slice(-4) : "••••", sourceAccount: account, sourceAccountIsIban: isIban };
+    return { entries, currency, accountEnding: account.length > 4 ? account.slice(-4) : "••••", sourceAccount: account, sourceAccountIsIban: isIban, ...(stuzza ? { profile: "stuzza" as const } : {}) };
   } catch (error) {
     return error instanceof Error ? error.message : "The CAMT.053 file could not be read.";
   }
