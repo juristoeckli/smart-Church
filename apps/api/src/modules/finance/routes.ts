@@ -1,3 +1,4 @@
+import { parseMt940, statementPreviewAmount, type ImportedBankStatementEntry } from "./mt940.js";
 import { allocateJournalNumber, isJournalReceiptConflict, journalReceiptConflictMessage, registerJournalNumbering } from "./journal-numbering.js";
 import { registerTransactionEvidence } from "./transaction-evidence.js";
 import { registerCostCenterTransfers } from "./cost-center-transfer.js";
@@ -9,7 +10,7 @@ import { financeWorkbook } from "./workbook.js";
 import { registerChurchToolsDraftPromotion } from "./draft-promotion-routes.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type FinanceLineInput = { accountId: string; costCenterId?: string | null; donorId?: string | null; debitCents: number; creditCents: number; text?: string };
@@ -1304,12 +1305,29 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply, "finance-transactions", header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.donor_name, row.debit_cents, row.credit_cents, row.line_text]));
   });
 
+  type StatementUpload = { accountId: string; fileName: string; csv?: string; mt940?: string };
+  type StatementMapping = { date: number; amount: number; description?: number | null; reference?: number | null };
+  const statementText = { type: "string", minLength: 1, maxLength: 2_000_000 } as const;
+  function statementUpload(body: StatementUpload) {
+    if ((body.csv === undefined) === (body.mt940 === undefined)) return null;
+    return body.mt940 === undefined ? { format: "csv" as const, content: body.csv! }
+      : { format: "mt940" as const, content: body.mt940.replace(/^\uFEFF/, "").replace(/\r\n|\r/g, "\n") };
+  }
+  async function statementCurrency(departmentId: string, db: Pool | PoolClient = pool!, lock = false) {
+    const { rows: [settings] } = await db.query<{ currency_code: string }>(
+      `SELECT currency_code FROM finance_settings WHERE department_id=$1 ${lock ? "FOR SHARE" : ""}`, [departmentId]);
+    return settings?.currency_code ?? "CHF";
+  }
+  async function findStatementImport(departmentId: string, accountId: string, contentHash: string) {
+    return pool!.query("SELECT id FROM finance_bank_statement_imports WHERE department_id=$1 AND account_id=$2 AND content_sha256=$3",
+      [departmentId, accountId, contentHash]);
+  }
   const statementUploadSchema = {
-    type: "object", additionalProperties: false, required: ["accountId", "fileName", "csv"],
-    properties: { accountId: uuid, fileName: { type: "string", minLength: 1, maxLength: 180 }, csv: { type: "string", minLength: 1, maxLength: 2_000_000 } },
+    type: "object", additionalProperties: false, required: ["accountId", "fileName"],
+    properties: { accountId: uuid, fileName: { type: "string", minLength: 1, maxLength: 180 }, csv: statementText, mt940: statementText },
   } as const;
-  async function validateStatementAccount(departmentId: string, accountId: string) {
-    const result = await pool!.query<{ id: string; account_type: string; active: boolean }>("SELECT id,account_type,active FROM finance_accounts WHERE department_id=$1 AND id=$2", [departmentId, accountId]);
+  async function validateStatementAccount(departmentId: string, accountId: string, db: Pool | PoolClient = pool!, lock = false) {
+    const result = await db.query<{ id: string; account_type: string; active: boolean }>(`SELECT id,account_type,active FROM finance_accounts WHERE department_id=$1 AND id=$2 ${lock ? "FOR SHARE" : ""}`, [departmentId, accountId]);
     return result.rows[0]?.account_type === "asset" && result.rows[0]?.active ? result.rows[0] : null;
   }
 
@@ -1382,46 +1400,92 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { deleted: true };
   });
 
-  app.post<{ Body: { accountId: string; fileName: string; csv: string } }>("/api/modules/finance/bank-statements/preview", { bodyLimit: 2_200_000, schema: { body: statementUploadSchema } }, async (request, reply) => {
-    const departmentId = await department(request, reply); if (!departmentId) return reply;
+  app.post<{ Body: StatementUpload }>("/api/modules/finance/bank-statements/preview", {
+    bodyLimit: 2_200_000, schema: { body: statementUploadSchema },
+  }, async (request, reply) => {
+    const upload = statementUpload(request.body);
+    const departmentId = await department(request, reply, upload?.format === "mt940"); if (!departmentId) return reply;
+    if (!upload) return reply.code(400).send({ error: "Choose one CSV or MT940 statement." });
     const account = await validateStatementAccount(departmentId, request.body.accountId);
     if (!account) return reply.code(400).send({ error: "Choose an active asset account for this statement." });
-    const parsed = parseCsvRows(request.body.csv);
+    const contentHash = createHash("sha256").update(upload.content, "utf8").digest("hex");
+    const duplicate = Boolean((await findStatementImport(departmentId, request.body.accountId, contentHash)).rowCount);
+    if (upload.format === "mt940") {
+      const parsed = parseMt940(upload.content);
+      if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+      if (parsed.currency !== await statementCurrency(departmentId)) {
+        return reply.code(400).send({ error: "The MT940 statement currency does not match this ledger." });
+      }
+      return reply.header("Cache-Control", "private, no-store").send({
+        format: upload.format, rowCount: parsed.entries.length, duplicate,
+        accountEnding: parsed.accountEnding, currency: parsed.currency,
+        headers: ["Booking date", "Amount", "Description", "Reference"],
+        sample: parsed.entries.slice(0, 5).map(row => [row.date, statementPreviewAmount(row.amount), row.description, row.reference]),
+      });
+    }
+    const parsed = parseCsvRows(upload.content);
     if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
     const headers = parsed[0]!.map((value, index) => (index === 0 ? value.replace(/^\uFEFF/, "") : value).trim().slice(0, 120));
-    const contentHash = createHash("sha256").update(request.body.csv, "utf8").digest("hex");
-    const duplicate = await pool!.query("SELECT id FROM finance_bank_statement_imports WHERE department_id=$1 AND account_id=$2 AND content_sha256=$3", [departmentId, request.body.accountId, contentHash]);
-    return { headers, rowCount: parsed.length - 1, duplicate: Boolean(duplicate.rowCount), sample: parsed.slice(1, 6).map((row) => row.map((value) => value.slice(0, 200))) };
+    return { headers, rowCount: parsed.length - 1, duplicate, sample: parsed.slice(1, 6).map((row) => row.map((value) => value.slice(0, 200))) };
   });
 
-  app.post<{ Body: { accountId: string; fileName: string; csv: string; mapping: { date: number; amount: number; description?: number | null; reference?: number | null } } }>("/api/modules/finance/bank-statements/import", {
+  app.post<{ Body: StatementUpload & { mapping?: StatementMapping; confirmSourceAccount?: boolean } }>("/api/modules/finance/bank-statements/import", {
     bodyLimit: 2_200_000,
-    schema: { body: { ...statementUploadSchema, required: ["accountId", "fileName", "csv", "mapping"], properties: { ...statementUploadSchema.properties, mapping: { type: "object", additionalProperties: false, required: ["date", "amount"], properties: { date: { type: "integer", minimum: 0, maximum: 49 }, amount: { type: "integer", minimum: 0, maximum: 49 }, description: { anyOf: [{ type: "integer", minimum: 0, maximum: 49 }, { type: "null" }] }, reference: { anyOf: [{ type: "integer", minimum: 0, maximum: 49 }, { type: "null" }] } } } } } },
+    schema: { body: { ...statementUploadSchema, properties: { ...statementUploadSchema.properties,
+      confirmSourceAccount: { type: "boolean" },
+      mapping: { type: "object", additionalProperties: false, required: ["date", "amount"], properties: {
+        date: { type: "integer", minimum: 0, maximum: 49 }, amount: { type: "integer", minimum: 0, maximum: 49 },
+        description: { anyOf: [{ type: "integer", minimum: 0, maximum: 49 }, { type: "null" }] },
+        reference: { anyOf: [{ type: "integer", minimum: 0, maximum: 49 }, { type: "null" }] },
+      } },
+    } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
     if (!await validateStatementAccount(departmentId, request.body.accountId)) return reply.code(400).send({ error: "Choose an active asset account for this statement." });
-    const parsed = parseCsvRows(request.body.csv);
-    if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
-    const headers = parsed[0]!.map((value, index) => (index === 0 ? value.replace(/^\uFEFF/, "") : value).trim().slice(0, 120));
-    const { date: dateColumn, amount: amountColumn, description: descriptionColumn, reference: referenceColumn } = request.body.mapping;
-    const selected = [dateColumn, amountColumn, descriptionColumn, referenceColumn].filter((value): value is number => typeof value === "number");
-    if (selected.some((value) => value < 0 || value >= headers.length) || new Set(selected).size !== selected.length) return reply.code(400).send({ error: "Map each statement column to a different CSV column." });
-    const rows: Array<{ line: number; date: string; amount: number; description: string; reference: string }> = [];
-    const errors: string[] = [];
-    for (let index = 1; index < parsed.length; index += 1) {
-      const values = parsed[index]!;
-      const date = statementDate(values[dateColumn] ?? "");
-      const amount = statementAmount(values[amountColumn] ?? "");
-      if (!date) errors.push(`Row ${index + 1}: date is invalid.`);
-      if (amount === null) errors.push(`Row ${index + 1}: amount is invalid or zero.`);
-      if (errors.length >= 50) break;
-      if (date && amount !== null) rows.push({ line: index + 1, date, amount, description: cleanText(values[descriptionColumn ?? -1] ?? "").slice(0, 500), reference: cleanText(values[referenceColumn ?? -1] ?? "").slice(0, 180) });
+    const upload = statementUpload(request.body);
+    if (!upload) return reply.code(400).send({ error: "Choose one CSV or MT940 statement." });
+    let mt940Currency: string | undefined;
+    let rows: ImportedBankStatementEntry[];
+    if (upload.format === "mt940") {
+      if (request.body.confirmSourceAccount !== true) {
+        return reply.code(400).send({ error: "Confirm the MT940 source account matches the chosen ledger account." });
+      }
+      const parsed = parseMt940(upload.content);
+      if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+      mt940Currency = parsed.currency;
+      if (mt940Currency !== await statementCurrency(departmentId)) {
+        return reply.code(400).send({ error: "The MT940 statement currency does not match this ledger." });
+      }
+      rows = parsed.entries;
+    } else {
+      const parsed = parseCsvRows(upload.content);
+      if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+      const width = parsed[0]!.length;
+      if (!request.body.mapping) return reply.code(400).send({ error: "Map the statement CSV columns before importing." });
+      const { date: dateColumn, amount: amountColumn, description: descriptionColumn, reference: referenceColumn } = request.body.mapping;
+      const selected = [dateColumn, amountColumn, descriptionColumn, referenceColumn].filter((value): value is number => typeof value === "number");
+      if (selected.some(value => value < 0 || value >= width) || new Set(selected).size !== selected.length) {
+        return reply.code(400).send({ error: "Map each statement column to a different CSV column." });
+      }
+      rows = [];
+      const errors: string[] = [];
+      for (let index = 1; index < parsed.length; index++) {
+        const values = parsed[index]!;
+        const date = statementDate(values[dateColumn] ?? "");
+        const amount = statementAmount(values[amountColumn] ?? "");
+        if (!date) errors.push(`Row ${index + 1}: date is invalid.`);
+        if (amount === null) errors.push(`Row ${index + 1}: amount is invalid or zero.`);
+        if (errors.length >= 50) break;
+        if (date && amount !== null) rows.push({ line: index + 1, date, amount,
+          description: cleanText(values[descriptionColumn ?? -1] ?? "").slice(0, 500),
+          reference: cleanText(values[referenceColumn ?? -1] ?? "").slice(0, 180) });
+      }
+      if (errors.length) return reply.code(400).send({ error: "Fix the CSV rows before importing.", details: errors });
     }
-    if (errors.length) return reply.code(400).send({ error: "Fix the CSV rows before importing.", details: errors });
-    const contentHash = createHash("sha256").update(request.body.csv, "utf8").digest("hex");
-    const fileName = cleanText(request.body.fileName).replace(/[\\/]/g, "_").slice(0, 180) || "statement.csv";
-    const duplicate = await pool!.query("SELECT id FROM finance_bank_statement_imports WHERE department_id=$1 AND account_id=$2 AND content_sha256=$3", [departmentId, request.body.accountId, contentHash]);
+    const contentHash = createHash("sha256").update(upload.content, "utf8").digest("hex");
+    const fileName = cleanText(request.body.fileName).replace(/[\\/]/g, "_").slice(0, 180) || `statement.${upload.format}`;
+    const duplicate = await findStatementImport(departmentId, request.body.accountId, contentHash);
     if (duplicate.rowCount) return reply.code(409).send({ error: "This exact statement file has already been imported for the selected account." });
     const minDate = rows.reduce((min, row) => row.date < min ? row.date : min, rows[0]!.date);
     const maxDate = rows.reduce((max, row) => row.date > max ? row.date : max, rows[0]!.date);
@@ -1452,12 +1516,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const batchId = randomUUID(); const client = await pool!.connect();
     try {
       await client.query("BEGIN");
+      if (mt940Currency) {
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        if (!await validateStatementAccount(departmentId, request.body.accountId, client, true)
+          || mt940Currency !== await statementCurrency(departmentId, client, true)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The ledger account or currency has changed. Review this statement again." });
+        }
+      }
       await client.query("INSERT INTO finance_bank_statement_imports(id,department_id,account_id,file_name,content_sha256,imported_by,row_count) VALUES($1,$2,$3,$4,$5,$6,$7)", [batchId, departmentId, request.body.accountId, fileName, contentHash, request.authenticatedUser?.id ?? null, rows.length]);
       for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index]!; const suggestedTransactionId = suggested[index];
         await client.query("INSERT INTO finance_bank_statement_rows(id,department_id,import_id,line_number,booking_date,description,reference,amount_cents,status,suggested_transaction_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, batchId, row.line, row.date, row.description, row.reference, row.amount, suggestedTransactionId ? "suggested" : "unmatched", suggestedTransactionId]);
       }
-      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: rules.length, ruleAppliedRows });
+      await audit(client, departmentId, request, "bank_statement_imported", "bank_statement_import", batchId, { fileName, rowCount: rows.length, accountId: request.body.accountId, suggestedCount: suggested.filter(Boolean).length, activeRuleCount: rules.length, ruleAppliedRows, ...(mt940Currency ? { format: "mt940", currency: mt940Currency } : {}) });
       await client.query("COMMIT");
       publish(departmentId, "bank-statement-imported", batchId);
       return reply.code(201).send({ id: batchId, rowCount: rows.length, suggestedCount: suggested.filter(Boolean).length });
