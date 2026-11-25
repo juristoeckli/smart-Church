@@ -16,6 +16,22 @@ const statuses: Record<Status, string> = { active: "Active", paused: "Paused", w
 const phases: Record<Run["phase"], string> = { queued: "Queued", waiting: "Waiting", completed: "Completed", cancelled: "Cancelled", failed: "Failed" };
 const emptyDraft = () => ({ name: "", role: "Member", status: "active" as Status, steps: [] as Step[] });
 
+const templates: Array<{ id: string; name: string; description: string; steps: Step[] }> = [
+  { id: "contact-card", name: "Contact card follow-up", description: "Wait one day, then assign a welcome follow-up.", steps: [
+    { kind: "wait", minutes: 1440 }, { kind: "followup", subject: "Welcome and get to know the new contact", dueDays: 2, assigneeId: "" },
+  ] },
+  { id: "volunteer-start", name: "Volunteer onboarding", description: "Give a volunteer coordinator a week to arrange an introduction.", steps: [
+    { kind: "followup", subject: "Arrange a volunteer introduction", dueDays: 7, assigneeId: "" },
+  ] },
+  { id: "small-group", name: "Small-group placement", description: "Assign a placement conversation and add the person to a selected group after a wait.", steps: [
+    { kind: "followup", subject: "Discuss small-group placement", dueDays: 2, assigneeId: "" },
+    { kind: "wait", minutes: 10080 }, { kind: "addToGroup", targetGroupId: "", role: "Member", status: "active" },
+  ] },
+  { id: "key-handover", name: "Key handover", description: "Assign the key handover to a group member.", steps: [
+    { kind: "followup", subject: "Arrange and record the key handover", dueDays: 3, assigneeId: "" },
+  ] },
+];
+
 const terminal = (step?: Step) => step?.kind === "membership" || step?.kind === "removeMembership";
 const membershipStep = (step: Step) => terminal(step) || step.kind === "addToGroup";
 const stepTitles: Record<Step["kind"], string> = {
@@ -34,6 +50,7 @@ function stepLabel(step: Step, groups: Data["targetGroups"] = []) {
 export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realtime }: Props) {
   const [data, setData] = useState<Data | null>(null);
   const [draft, setDraft] = useState(emptyDraft);
+  const [templateId, setTemplateId] = useState("");
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
@@ -86,11 +103,14 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const enabled = (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value") === "true";
     const last = draft.steps.at(-1);
     if (last?.kind === "membership" && !last.role?.trim() && !last.status) {
       setError("Choose a new membership role or status."); return;
     }
-    if (await mutate("POST", "", draft, "Automatic routine enabled.")) setDraft(emptyDraft());
+    if (await mutate("POST", "", { ...draft, enabled }, enabled ? "Automatic routine enabled." : "Disabled routine saved.")) {
+      setDraft(emptyDraft()); setTemplateId("");
+    }
   }
 
   function sendStep(index: number, step: Step) {
@@ -105,6 +125,19 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
     });
   }
 
+  const eligibleTemplates = data ? templates.filter((template) => template.steps.every((step) => {
+    if (step.kind === "followup") return data.assignees.length > 0;
+    if (step.kind === "addToGroup") return data.canChangeMembership && data.targetGroups.length > 0;
+    return true;
+  })) : [];
+  const selectedTemplate = eligibleTemplates.find(({ id }) => id === templateId);
+  function applyTemplate() {
+    if (!selectedTemplate) return;
+    if ((draft.name || draft.steps.length) && !window.confirm("Replace the draft name and steps with this template?")) return;
+    setDraft((current) => ({ ...current, name: selectedTemplate.name, steps: selectedTemplate.steps }));
+    setFeedback("Template loaded. Review the steps and complete the required settings.");
+  }
+
   return <div className="go-layout">
     <section className="go-panel">
       <h2>Automatic member routines</h2>
@@ -114,6 +147,15 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
       {feedback && <p role="status">{feedback}</p>}
       {data && (data.active ? <form className="go-form" onSubmit={(event) => void create(event)}>
         <p>Starts when a member receives this role and status. Existing matches stay out of the routine until their membership changes.</p>
+        {eligibleTemplates.length > 0 && <fieldset>
+          <legend>Start from a template</legend>
+          <label>Routine template<select value={selectedTemplate?.id ?? ""} onChange={(event) => setTemplateId(event.target.value)}>
+            <option value="">Choose a template</option>
+            {eligibleTemplates.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
+          </select></label>
+          {selectedTemplate && <p>{selectedTemplate.description}</p>}
+          <button className="button button-secondary" type="button" disabled={!selectedTemplate || busy} onClick={applyTemplate}>Use template</button>
+        </fieldset>}
         <label>Routine name<input required maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
         <label>Trigger role<input required maxLength={80} list={roleList} value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })} /></label>
         <datalist id={roleList}>{data.roles.map((role) => <option key={role} value={role} />)}</datalist>
@@ -162,7 +204,10 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
           {data.canChangeMembership && <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12 || hasFinalStep}
             onClick={() => addStep({ kind: "membership" })}>Add membership change</button>}
         </div>
-        <button className="button button-primary" disabled={busy || !draft.steps.length}>Enable routine</button>
+        <div className="form-actions">
+          <button className="button button-secondary" type="submit" value="false" disabled={busy || !draft.steps.length}>Save disabled</button>
+          <button className="button button-primary" type="submit" value="true" disabled={busy || !draft.steps.length}>Enable routine</button>
+        </div>
       </form> : <p>Activate this group to create automatic routines.</p>)}
     </section>
     {data && <section className="go-panel">

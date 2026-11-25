@@ -5,7 +5,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { automaticRoutineAuthority, isTerminalMembershipStep, requiresMembershipAuthority, startAutomaticGroupRoutineWorker, type MemberStatus, type RoutineStep } from "./automatic-routine-worker.js";
 
 type GroupParams = { groupId: string };
-type RoutineInput = { name: string; role: string; status: MemberStatus; steps: RoutineStep[] };
+type RoutineInput = { name: string; role: string; status: MemberStatus; steps: RoutineStep[]; enabled?: boolean };
 type Scope = { departmentId: string; groupId: string; actorId: string; active: boolean };
 const uuid = { type: "string", format: "uuid" } as const;
 const membershipStatus = { type: "string", enum: ["active", "paused", "waitlist"] } as const;
@@ -118,10 +118,10 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
   app.post<{ Params: GroupParams; Body: RoutineInput }>(base, { schema: { params: groupParams, body: {
     type: "object", additionalProperties: false, required: ["name", "role", "status", "steps"], properties: {
       name: { type: "string", minLength: 1, maxLength: 120 }, role: roleText, status: membershipStatus,
-      steps: { type: "array", minItems: 1, maxItems: 12, items: stepSchema },
+      steps: { type: "array", minItems: 1, maxItems: 12, items: stepSchema }, enabled: { type: "boolean" },
     },
   } } }, async (request, reply) => mutate(request, reply, async (client, { departmentId, groupId, actorId, active }, canChangeMembership) => {
-    const { name, role, status, steps } = request.body;
+    const { name, role, status, steps, enabled = true } = request.body;
     if (!active) { reply.code(409).send({ error: "Activate the group before creating an automatic routine." }); return null; }
     if (!name.trim() || !role.trim()) { reply.code(400).send({ error: "Enter a routine name and trigger role." }); return null; }
     const final = steps.findIndex(isTerminalMembershipStep);
@@ -164,13 +164,13 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
     });
     const id = randomUUID();
     const saved = await client.query(`INSERT INTO group_automatic_routines
-      (id,department_id,group_id,name,trigger_role,trigger_status,steps,created_by,authorized_by)
-      VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$8) ON CONFLICT DO NOTHING RETURNING id`,
-      [id, departmentId, groupId, name.trim(), role.trim(), status, JSON.stringify(cleaned), actorId],
+      (id,department_id,group_id,name,trigger_role,trigger_status,steps,created_by,authorized_by,enabled)
+      VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$8,$9) ON CONFLICT DO NOTHING RETURNING id`,
+      [id, departmentId, groupId, name.trim(), role.trim(), status, JSON.stringify(cleaned), actorId, enabled],
     );
     if (!saved.rowCount) { reply.code(409).send({ error: "An enabled routine already exists for this role and status." }); return null; }
     reply.code(201);
-    return { action: "automatic-routine-created", response: { id } };
+    return { action: "automatic-routine-created", response: { id, enabled } };
   }));
 
   app.patch<{ Params: GroupParams & { routineId: string }; Body: { enabled: boolean } }>(base + "/:routineId", { schema: {
