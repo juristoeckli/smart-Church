@@ -3,13 +3,18 @@ import { useState } from "react";
 type PreviewRow = { rowNumber: number; code: string; name: string; accountType: string; active: boolean; status: "create" | "skip" | "invalid"; error?: string };
 type Preview = { rows: PreviewRow[]; creates: number; skips: number; errors: number; review: string };
 type Props = {
+  dataset: "accounts" | "cost-centers";
   send: <T>(path: string, method: string, body: unknown) => Promise<T>;
   refresh: () => Promise<void>;
 };
 
-const path = "/api/modules/finance/accounts/import/";
-
-export function FinanceChartImport({ send, refresh }: Props) {
+export function FinanceMasterDataImport({ dataset, send, refresh }: Props) {
+  const isChart = dataset === "accounts";
+  const name = isChart ? "chart of accounts" : "cost centers";
+  const item = isChart ? "account" : "cost center";
+  const itemPlural = isChart ? "accounts" : "cost centers";
+  const path = `/api/modules/finance/${dataset}/import/`;
+  const template = isChart ? "Code,Name,Type,Active\r\n" : "Code,Name,Active\r\n";
   const [file, setFile] = useState<File | null>(null);
   const [reviewed, setReviewed] = useState<{ csv: string; preview: Preview } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -31,7 +36,7 @@ export function FinanceChartImport({ send, refresh }: Props) {
     } finally { setBusy(false); }
   }
 
-  async function importChart() {
+  async function importRows() {
     if (!reviewed || busy || !reviewed.preview.creates || reviewed.preview.errors) return;
     setError("");
     setBusy(true);
@@ -39,7 +44,7 @@ export function FinanceChartImport({ send, refresh }: Props) {
       const { imported, skipped } = await send<{ imported: number; skipped: number }>(path + "apply", "POST",
         { csv: reviewed.csv, review: reviewed.preview.review });
       setReviewed(null);
-      setResult(`Imported ${imported}. Skipped ${skipped} existing accounts.`);
+      setResult(`Imported ${imported}. Skipped ${skipped} existing ${itemPlural}.`);
       await refresh();
     } catch (reason) {
       setReviewed(null);
@@ -48,12 +53,14 @@ export function FinanceChartImport({ send, refresh }: Props) {
   }
 
   return <details className="finance-section">
-    <summary>Import chart of accounts</summary>
-    <p>Use a CSV with Code, Name, Type, and Active columns. Use asset, liability, equity, income, or expense for Type, and true or false for Active. Existing account codes are skipped.</p>
+    <summary>Import {name}</summary>
+    <p>{isChart
+      ? "Use Code, Name, Type, and Active columns. Use asset, liability, equity, income, or expense for Type."
+      : "Use Code, Name, and Active columns."} Use true or false for Active. Existing {item} codes are skipped.</p>
     <div className="finance-action-row">
-      <a download="finance-chart-template.csv"
-        href="data:text/csv;charset=utf-8,Code%2CName%2CType%2CActive%0D%0A">Download empty template</a>
-      <label>Chart of accounts CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={event => {
+      <a download={`finance-${dataset}-template.csv`}
+        href={`data:text/csv;charset=utf-8,${encodeURIComponent(template)}`}>Download empty template</a>
+      <label>{isChart ? "Chart of accounts CSV" : "Cost centers CSV"}<input type="file" accept=".csv,text/csv" disabled={busy} onChange={event => {
         setFile(event.target.files?.[0] ?? null);
         setReviewed(null);
         setError("");
@@ -67,16 +74,16 @@ export function FinanceChartImport({ send, refresh }: Props) {
       <p role="status">{reviewed.preview.creates} new · {reviewed.preview.skips} existing · {reviewed.preview.errors} invalid</p>
       <div className="finance-table-wrap">
         <table className="finance-table">
-          <thead><tr><th>Row</th><th>Code</th><th>Name</th><th>Type</th><th>Active</th><th>Review result</th></tr></thead>
+          <thead><tr><th>Row</th><th>Code</th><th>Name</th>{isChart && <th>Type</th>}<th>Active</th><th>Review result</th></tr></thead>
           <tbody>{reviewed.preview.rows.map(row => <tr key={row.rowNumber}>
-            <td>{row.rowNumber}</td><td>{row.code}</td><td>{row.name}</td><td>{row.accountType}</td>
-            <td>{row.active ? "Yes" : "No"}</td><td>{row.error ?? (row.status === "skip" ? "Existing account" : "Create")}</td>
+            <td>{row.rowNumber}</td><td>{row.code}</td><td>{row.name}</td>{isChart && <td>{row.accountType}</td>}
+            <td>{row.active ? "Yes" : "No"}</td><td>{row.error ?? (row.status === "skip" ? `Existing ${item}` : "Create")}</td>
           </tr>)}</tbody>
         </table>
       </div>
       <button type="button" className="button button-primary"
         disabled={busy || reviewed.preview.errors > 0 || reviewed.preview.creates === 0}
-        onClick={() => void importChart()}>Import new accounts</button>
+        onClick={() => void importRows()}>Import new {itemPlural}</button>
     </>}
   </details>;
 }
