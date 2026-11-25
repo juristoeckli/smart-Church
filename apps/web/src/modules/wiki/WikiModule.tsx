@@ -1,3 +1,4 @@
+import { WikiPageCategoryFilter } from "./WikiPageCategoryFilter";
 import { wikiAttachmentDownloadPath } from "@smart-church/contracts";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
@@ -68,6 +69,10 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const pageList = useRef({ version: 0, hideRedirects: false });
   const [status, setStatus] = useState<"active" | "archived">("active");
   const [categoryStatus, setCategoryStatus] = useState<"active" | "archived">("active");
+  const categoryFilterScope = departmentId + ":" + categoryStatus;
+  const [categoryFilters, setCategoryFilters] = useState<{ scope: string; ids: string[] }>({ scope: "", ids: [] });
+  const filterCategoryIds = categoryFilters.scope === categoryFilterScope ? categoryFilters.ids : [];
+  const filteredCategoriesKey = filterCategoryIds.join(",");
   const [editing, setEditing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
@@ -217,9 +222,10 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const [tableSort, setTableSort] = useState("updated-desc");
   const [tableColumns, setTableColumns] = useState({ category: true, updated: true, editor: false, status: false });
   const categoryNames = useMemo(() => new Map(categories.map((category) => [category.id, category.name])), [categories]);
-  const visiblePages = useMemo(() => pages.filter((page) =>
-    (!hideRedirects || !page.redirectPageId) && (!selectedCategoryId || page.categoryId === selectedCategoryId)),
-  [pages, hideRedirects, selectedCategoryId]);
+  const visiblePages = useMemo(() => {
+    const categoryIds = selectedCategoryId ? [selectedCategoryId] : filteredCategoriesKey ? filteredCategoriesKey.split(",") : [];
+    return pages.filter((page) => (!hideRedirects || !page.redirectPageId) && (!categoryIds.length || categoryIds.includes(page.categoryId)));
+  }, [pages, hideRedirects, selectedCategoryId, filteredCategoriesKey]);
   const tablePages = useMemo(() => [...visiblePages].sort((a, b) => {
     if (tableSort === "title") return a.title.localeCompare(b.title);
     if (tableSort === "category") return (categoryNames.get(a.categoryId) ?? "").localeCompare(categoryNames.get(b.categoryId) ?? "") || a.title.localeCompare(b.title);
@@ -228,7 +234,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   }), [visiblePages, tableSort, categoryNames]);
   const bulkIds = visiblePages.filter((page) => page.status === "active" && bulkPageIds.includes(page.id)).map((page) => page.id);
   useEffect(() => { setShowTableForm(false); }, [departmentId, selectedPage?.id, editing]);
-  useEffect(() => { setBulkPageIds([]); setBulkAudience(""); setBulkGroupId(""); setBulkCategoryId(""); }, [departmentId, selectedCategoryId, search, status, hideRedirects]);
+  useEffect(() => { setBulkPageIds([]); setBulkAudience(""); setBulkGroupId(""); setBulkCategoryId(""); }, [departmentId, selectedCategoryId, search, status, hideRedirects, filteredCategoriesKey]);
 
   function pageSelection(page: WikiPage) {
     if (!canManage || status !== "active" || editing || creating || page.status !== "active") return null;
@@ -257,12 +263,14 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     const listVersion = ++pageList.current.version;
     const stillCurrent = () => generation === directorySearchGeneration.current && listVersion === pageList.current.version;
     const hide = pageList.current.hideRedirects;
+    const categoryId = categoryLandingRef.current || selectedCategoryId;
     setError("");
     try {
       const [nextCategories, nextPages] = await Promise.all([
         api<Category[]>(`/api/modules/wiki/categories?status=${categoryStatus}`),
         api<WikiPage[]>(`/api/modules/wiki/pages?${new URLSearchParams({
           status: nextStatus, ...(search.trim() ? { search: search.trim() } : {}), ...(hide ? { hideRedirects: "true" } : {}),
+          ...(categoryId ? { categoryId } : filteredCategoriesKey ? { categoryIds: filteredCategoriesKey } : {}),
         })}`),
       ]);
       const nextGroups = canManage ? await api<GroupOption[]>("/api/modules/wiki/groups") : null;
@@ -378,6 +386,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     setStatus("active");
     setSearch("");
     setSelectedCategoryId("");
+    setCategoryFilters({ scope: "", ids: [] });
     setEditing(false);
     setCreating(false);
     setError("");
@@ -508,11 +517,11 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
         return;
       }
       sharedPageOpened.current = true;
-      void refresh("");
+      void refresh("", status, Boolean(selectedCategoryId || filteredCategoriesKey));
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [departmentId, status, categoryStatus, search]);
-  useEffect(() => realtime?.subscribe("module:wiki:changed", () => { void refresh(undefined, status, editing || creating); }), [realtime, departmentId, status, categoryStatus, search, hideRedirects, editing, creating]);
+  }, [departmentId, status, categoryStatus, search, selectedCategoryId, filteredCategoriesKey]);
+  useEffect(() => realtime?.subscribe("module:wiki:changed", () => { void refresh(undefined, status, editing || creating); }), [realtime, departmentId, status, categoryStatus, search, hideRedirects, editing, creating, selectedCategoryId, filteredCategoriesKey]);
   useEffect(() => {
     if (!selectedPage || !editor.current || editing) {
       setHeadings([]);
@@ -941,11 +950,12 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
 
   function goToWikiHome() {
     closeCategoryLanding();
-    const needsRefresh = status !== "active" || categoryStatus !== "active" || search !== "";
+    const needsRefresh = status !== "active" || categoryStatus !== "active" || search !== "" || Boolean(selectedCategoryId || filteredCategoriesKey);
     setStatus("active");
     setCategoryStatus("active");
     setSearch("");
     setSelectedCategoryId("");
+    setCategoryFilters({ scope: "", ids: [] });
     setEditing(false);
     setCreating(false);
     if (!needsRefresh) void refresh("");
@@ -964,6 +974,8 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     <aside className="wiki-panel" aria-label="Wiki pages">
       <div className="wiki-panel-head"><h2>Pages</h2><select className="wiki-select" aria-label="Page status" value={status} onChange={(event) => setStatus(event.target.value as "active" | "archived")}><option value="active">Active</option><option value="archived">Archived</option></select></div>
       <label className="wiki-search"><Search size={14} /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search pages" aria-label="Search Wiki pages" /></label>
+      {!selectedCategoryId && flatCategories.length > 0 && <WikiPageCategoryFilter choices={flatCategories} selected={filterCategoryIds}
+        onChange={(ids) => { pageList.current.version += 1; setCategoryFilters({ scope: categoryFilterScope, ids }); }} />}
       <label className="wiki-redirect-filter"><input type="checkbox" checked={hideRedirects} onChange={(event) => {
         const next = event.target.checked;
         pageList.current.hideRedirects = next;
