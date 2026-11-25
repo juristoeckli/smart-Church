@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Plus, Printer, Search } from "lucide-react";
 import "./module.css";
 import { translate } from "../../i18n";
+import { GroupAttendanceCodes } from "./GroupAttendanceCodes";
 import { GroupMeetingAddAttendee } from "./GroupMeetingAddAttendee";
 import type { ModuleRealtime } from "../../module-registry";
 import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
@@ -44,12 +45,13 @@ function useData<T>(path: string, departmentId: string, label: string) {
   };
 }
 
-export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target, realtime, printOptions = readCheckInPrintOptions("") }: {
+export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target, realtime, showAttendanceCodes = false, printOptions = readCheckInPrintOptions("") }: {
   departmentId: string;
   csrfToken: string;
   onBack: () => void;
   target?: GroupMeetingTarget;
   printOptions?: CheckInPrintOptions;
+  showAttendanceCodes?: boolean;
   realtime?: ModuleRealtime;
 }) {
   const [groupId, selectGroup] = useState("");
@@ -103,6 +105,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
     refreshRoster();
     if (!target) refreshMeetings();
   }, [activeMeetingId, busy, refreshMeetings, refreshRoster, remoteMeetingId, target]);
+  const attendanceCodeGroup = target?.groupId ?? (group?.status === "active" ? group.id : undefined);
   const term = query.trim().toLocaleLowerCase();
   const names = new Intl.Collator(document.documentElement.lang || undefined, { sensitivity: "base" });
   const roles = [...new Set(rows.map((row) => row.role?.trim()).filter((role): role is string => Boolean(role)))].sort(names.compare);
@@ -263,6 +266,10 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
         </button>
       </form>}
     </section>}
+    {showAttendanceCodes && attendanceCodeGroup && <GroupAttendanceCodes
+      key={[departmentId, attendanceCodeGroup, meeting?.id].join(":")} departmentId={departmentId} csrfToken={csrfToken}
+      groupId={attendanceCodeGroup} meetingId={roster.data ? meeting?.id : undefined} completed={Boolean(completedAt)}
+      disabled={busy} onRedeemed={roster.refresh} />}
     {(error || loadError) && <p className="checkin-error" role="alert">{error || loadError}</p>}
     {notice && <p role="status">{notice}</p>}
     {loadError && <button className="checkin-print" type="button" onClick={groups.error ? groups.reload : meetings.error ? meetings.reload : roster.reload}>Retry</button>}

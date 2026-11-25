@@ -1,3 +1,4 @@
+import { registerGroupAttendanceCodes } from "./group-attendance-codes.js";
 import { canReadPrivateContactDetails } from "../../location-grants.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -7,6 +8,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
+  registerGroupAttendanceCodes(app, context);
   async function scope(request: FastifyRequest, reply: FastifyReply, write = false) {
     if (!pool || !isDatabaseReady()) { reply.code(503).send({ error: "Check-in is unavailable while the database is offline." }); return null; }
     const departmentId = await resolveDepartmentId(request, reply);
