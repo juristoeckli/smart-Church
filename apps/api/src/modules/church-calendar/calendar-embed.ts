@@ -1,6 +1,6 @@
 export const calendarEmbedContentPolicy = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors *; sandbox; base-uri 'none'; form-action 'none'";
 
-export type EmbedSettings = { days?: number; entries?: number };
+export type EmbedSettings = { days?: number; entries?: number; searchEntry?: string };
 export type EmbedAppointment = {
   id: string; originalStart: string; startsAt: string; endsAt: string; allDay: boolean; title: string; subtitle: string; place: string;
   calendarName?: string; calendarOrder?: number;
@@ -10,11 +10,20 @@ function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
 }
 
-export function renderCalendarEmbed(title: string, appointments: EmbedAppointment[], timeZone: string, entries: number) {
+function searchText(value: string) {
+  return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+export function renderCalendarEmbed(title: string, appointments: EmbedAppointment[], timeZone: string, entries: number, searchEntry = "") {
+  const terms = searchEntry.split(",").map((value) => searchText(value.trim())).filter(Boolean);
+  const matching = terms.length ? appointments.filter((appointment) => {
+    const fields = [appointment.title, appointment.subtitle, appointment.place].map(searchText);
+    return terms.some((term) => fields.some((field) => field.includes(term)));
+  }) : appointments;
   const dayHeading = new Intl.DateTimeFormat("en", { dateStyle: "full", timeZone: "UTC" });
   const timeLabel = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit", timeZone: "UTC" });
   const days = new Map<string, EmbedAppointment[]>();
-  for (const appointment of appointments.sort((left, right) => left.startsAt.localeCompare(right.startsAt)
+  for (const appointment of matching.sort((left, right) => left.startsAt.localeCompare(right.startsAt)
     || (left.calendarOrder ?? 0) - (right.calendarOrder ?? 0) || left.title.localeCompare(right.title) || left.id.localeCompare(right.id) || left.originalStart.localeCompare(right.originalStart)).slice(0, entries)) {
     const day = appointment.startsAt.slice(0, 10);
     const items = days.get(day) ?? [];
@@ -37,5 +46,5 @@ p{margin:.25rem 0 .5rem}ol{list-style:none;padding:0;margin:0}
 li{display:grid;grid-template-columns:minmax(5.25rem,9rem) minmax(0,1fr);gap:.85rem;padding:.6rem 0;border-top:1px solid GrayText}
 li>div{overflow-wrap:anywhere}
 </style></head><body><main><h1>${escapeHtml(title)}</h1><p>Times shown in ${escapeHtml(timeZone)}</p>
-${schedule || "<p>No upcoming appointments.</p>"}</main></body></html>`;
+${schedule || (terms.length ? "<p>No upcoming appointments match the search terms.</p>" : "<p>No upcoming appointments.</p>")}</main></body></html>`;
 }
