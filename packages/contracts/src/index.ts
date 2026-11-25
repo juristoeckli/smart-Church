@@ -239,8 +239,18 @@ export interface ChurchGroup {
   publicSignupEnabled?: boolean;
   publicSignupToken?: string;
   meetingPin?: { latitude: number; longitude: number };
+  meetingPlace?: GroupMeetingPlace;
   importedFrom?: "churchtools" | "elvanto";
 }
+
+export type GroupMeetingPlace = {
+  name: string;
+  street: string;
+  postalCode: string;
+  locality: string;
+  country: string;
+  visibility: "managers" | "members";
+};
 
 export type GroupLifecycleStatus = "active" | "draft" | "ended" | "archived";
 

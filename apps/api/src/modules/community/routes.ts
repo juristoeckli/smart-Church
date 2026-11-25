@@ -1,3 +1,4 @@
+import { registerGroupMeetingPlaces } from "./group-meeting-places.js";
 import { registerGroupMeetingPins } from "./group-meeting-pins.js";
 import { canReadPrivateContactDetails, hasLocationPermission } from "../../location-grants.js";
 import { registerBulkGroupLifecycle } from "./group-bulk-lifecycle.js";
@@ -60,7 +61,12 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT g.id, g.name, g.description, g.group_type, g.status, g.starts_on, g.ends_on, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token, pin.latitude, pin.longitude,
+        `SELECT g.id, g.name, g.description, g.group_type, g.status, g.starts_on, g.ends_on, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token, pin.latitude, pin.longitude, meeting.place AS meeting_place,
+                EXISTS (SELECT 1 FROM department_memberships membership
+                  JOIN contacts own_contact ON own_contact.id=membership.contact_id AND own_contact.department_id=membership.department_id
+                  JOIN group_members own_member ON own_member.contact_id=own_contact.id AND own_member.group_id=g.id
+                 WHERE meeting.place->>'visibility'='members' AND membership.department_id=g.department_id AND membership.user_id=$2
+                   AND own_contact.archived_at IS NULL AND own_member.status='active') AS can_read_meeting_place,
                 EXISTS (SELECT 1 FROM department_memberships membership
                   JOIN group_members own_member ON own_member.contact_id=membership.contact_id AND own_member.group_id=g.id
                  WHERE membership.department_id=g.department_id AND membership.user_id=$2 AND own_member.status='active') AS is_my_group,
@@ -68,15 +74,18 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
                 COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids,
                 COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on) ORDER BY lower(c.last_name),lower(c.first_name)) FILTER (WHERE gm.contact_id IS NOT NULL), '[]'::json) AS member_details
            FROM church_groups g LEFT JOIN group_meeting_pins pin ON pin.group_id=g.id AND pin.department_id=g.department_id
+           LEFT JOIN group_meeting_places meeting ON meeting.group_id=g.id AND meeting.department_id=g.department_id
            LEFT JOIN group_members gm ON gm.group_id = g.id LEFT JOIN contacts c ON c.id=gm.contact_id
-          WHERE g.department_id = $1 GROUP BY g.id,pin.latitude,pin.longitude ORDER BY lower(g.name), g.created_at`,
+          WHERE g.department_id = $1 GROUP BY g.id,pin.latitude,pin.longitude,meeting.place ORDER BY lower(g.name), g.created_at`,
         [departmentId, request.authenticatedUser!.id],
       );
       const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
       reply.header('cache-control', 'private, no-store');
       return result.rows.map((row) => {
         const pinVisible = row.status === "active" || (canManageGroups && row.status !== "archived");
+        const placeVisible = row.status !== "archived" && (canManageGroups || (row.status === "active" && row.can_read_meeting_place));
         const group = { ...mapGroup(row), isMyGroup: row.is_my_group === true,
+          ...(placeVisible && row.meeting_place ? { meetingPlace: row.meeting_place } : {}),
           ...(pinVisible && typeof row.latitude === "number" && typeof row.longitude === "number"
             ? { meetingPin: { latitude: row.latitude, longitude: row.longitude } } : {}) };
         return canManageGroups ? group : (({ publicSignupToken: _token, ...safeGroup }) => safeGroup)(group);
@@ -84,6 +93,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     });
 
     registerGroupMeetingPins(routes, dependencies, (request, reply) => department(request, reply, "groups_manage"));
+    registerGroupMeetingPlaces(routes, dependencies, (request, reply) => department(request, reply, "groups_manage"));
 
     routes.get("/api/groups/views", async (request, reply) => {
       const departmentId = await department(request, reply);

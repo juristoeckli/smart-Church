@@ -19,10 +19,41 @@ const meetingPin = {
   },
 } as const;
 
+export type ResolveGroupManager = (request: FastifyRequest, reply: FastifyReply) => Promise<string | null>;
+
+export async function editGroupMeetingLocation(
+  context: ModuleServerContext, reply: FastifyReply, department: string, groupId: string,
+  kind: "pin" | "place", result: object, apply: (client: PoolClient) => Promise<void>,
+) {
+  const client = await context.pool!.connect();
+  try {
+    await client.query("BEGIN");
+    if (!await context.lockDepartmentForWrite(client, department)) {
+      await client.query("ROLLBACK");
+      return reply.code(423).send({ error: "This location is read-only." });
+    }
+    const { rows: [group] } = await client.query<{ source_system: string | null; status: string }>(
+      "SELECT source_system,status FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [groupId, department]);
+    if (!group || group.source_system || group.status === "archived") {
+      await client.query("ROLLBACK");
+      if (!group) return reply.code(404).send({ error: "Group not found." });
+      if (group.source_system) return reply.code(403).send({ error: "This group is managed in its source system." });
+      return reply.code(409).send({ error: `Restore the group before editing its meeting ${kind}.` });
+    }
+    await apply(client);
+    await client.query("COMMIT");
+    context.realtime.publish("core:groups:changed", department, { groupId, action: `meeting-${kind}-updated` });
+    return reply.header("Cache-Control", "private, no-store").send(result);
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally { client.release(); }
+}
+
 export function registerGroupMeetingPins(
   routes: FastifyInstance,
   context: ModuleServerContext,
-  resolveManagerDepartment: (request: FastifyRequest, reply: FastifyReply) => Promise<string | null>,
+  resolveManagerDepartment: ResolveGroupManager,
 ) {
   routes.put<{ Params: { id: string }; Body: { pin: MeetingPin | null } }>("/api/groups/:id/meeting-pin", {
     schema: {
@@ -37,21 +68,7 @@ export function registerGroupMeetingPins(
     const groupId = request.params.id;
     const { pin } = request.body;
     if (pin && !isMeetingPin(pin)) return reply.code(400).send({ error: "Enter valid map coordinates." });
-    const client = await context.pool!.connect();
-    try {
-      await client.query("BEGIN");
-      if (!await context.lockDepartmentForWrite(client, department)) {
-        await client.query("ROLLBACK");
-        return reply.code(423).send({ error: "This location is read-only." });
-      }
-      const { rows: [group] } = await client.query<{ source_system: string | null; status: string }>(
-        "SELECT source_system,status FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [groupId, department]);
-      if (!group || group.source_system || group.status === "archived") {
-        await client.query("ROLLBACK");
-        if (!group) return reply.code(404).send({ error: "Group not found." });
-        if (group.source_system) return reply.code(403).send({ error: "This group is managed in its source system." });
-        return reply.code(409).send({ error: "Restore the group before editing its meeting pin." });
-      }
+    return editGroupMeetingLocation(context, reply, department, groupId, "pin", { pin }, async client => {
       if (pin) {
         await client.query(`INSERT INTO group_meeting_pins(group_id,department_id,latitude,longitude) VALUES($1,$2,$3,$4)
           ON CONFLICT(group_id) DO UPDATE SET latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude`,
@@ -59,13 +76,7 @@ export function registerGroupMeetingPins(
       } else {
         await client.query("DELETE FROM group_meeting_pins WHERE group_id=$1 AND department_id=$2", [groupId, department]);
       }
-      await client.query("COMMIT");
-      context.realtime.publish("core:groups:changed", department, { groupId, action: "meeting-pin-updated" });
-      return reply.header("Cache-Control", "private, no-store").send({ pin });
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally { client.release(); }
+    });
   });
 }
 
