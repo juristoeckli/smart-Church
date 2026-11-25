@@ -183,6 +183,11 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
 
 const dependentModuleRecords = [
   {
+    moduleId: "group-operations",
+    tables: ["group_automatic_routines", "group_automatic_routine_runs"],
+    message: "This location has automatic group routines. A matching Group Operations snapshot is required to preserve them.",
+  },
+  {
     moduleId: "church-calendar",
     // The other Calendar tables are children of these site-owned roots.
     tables: ["church_calendar_calendars", "church_calendar_event_generations", "church_calendar_tag_definitions", "church_calendar_agenda_publications"],

@@ -1,3 +1,4 @@
+import { registerAutomaticGroupRoutines } from "./automatic-routines.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -86,6 +87,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     await pool!.query("INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)", [randomUUID(), departmentId, groupId, request.authenticatedUser?.id ?? null, action, recordId, JSON.stringify(details)]);
     realtime.publish("module:group-operations:changed", departmentId, { action, groupId, recordId });
   }
+
+  registerAutomaticGroupRoutines(app, context, canManageGroup);
 
   app.get("/api/modules/group-operations/bootstrap", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;

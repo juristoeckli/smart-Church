@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type Row = Record<string, unknown>;
-type Snapshot = { version: 3; tables: Record<string, Row[]> };
+type Snapshot = { version: 4; tables: Record<string, Row[]> };
 const maxRows = 250_000;
 const maxBytes = 50 * 1024 * 1024;
 const batchSize = 500;
@@ -57,6 +57,16 @@ const tables = [
     columns: "id department_id group_id actor_user_id action record_id details created_at",
     users: ["actor_user_id"], contacts: [],
   },
+  {
+    name: "group_automatic_routines",
+    columns: "id department_id group_id name trigger_role trigger_status steps enabled created_by authorized_by created_at updated_at",
+    users: ["created_by", "authorized_by"], contacts: [],
+  },
+  {
+    name: "group_automatic_routine_runs",
+    columns: "id department_id group_id routine_id contact_id phase next_step due_at chain outcome created_at updated_at",
+    users: [], contacts: ["contact_id"],
+  },
 ].map((table) => ({ ...table, columns: table.columns.split(" ") }));
 
 type Table = typeof tables[number];
@@ -66,10 +76,12 @@ function record(value: unknown): value is Row {
 }
 
 function checkedSnapshot(input: unknown): Snapshot {
-  if (!record(input) || input.version !== 3 || !record(input.tables) || Object.keys(input.tables).length !== tables.length) {
+  if (!record(input) || (input.version !== 3 && input.version !== 4) || !record(input.tables)) {
     throw new Error("The Group Operations snapshot has an unsupported format.");
   }
-  const data = input.tables;
+  if (input.version === 3 && Object.keys(input.tables).length !== tables.length - 2) throw new Error("The Group Operations snapshot has an unsupported format.");
+  const data = input.version === 3 ? { group_automatic_routines: [], group_automatic_routine_runs: [], ...input.tables } : input.tables;
+  if (Object.keys(data).length !== tables.length) throw new Error("The Group Operations snapshot has an unsupported format.");
   let count = 0;
   for (const table of tables) {
     const rows = data[table.name];
@@ -82,11 +94,11 @@ function checkedSnapshot(input: unknown): Snapshot {
   if (count > maxRows || Buffer.byteLength(JSON.stringify(input)) > maxBytes) {
     throw new Error("The Group Operations snapshot exceeds the supported size.");
   }
-  return { version: 3, tables: data as Snapshot["tables"] };
+  return { version: 4, tables: data as Snapshot["tables"] };
 }
 
 async function selectRows(client: PoolClient, table: Table, departmentId: string) {
-  const timestamps = new Set(["created_at", "updated_at", "completed_at", "revoked_at"]);
+  const timestamps = new Set(["created_at", "updated_at", "completed_at", "revoked_at", "due_at"]);
   const projectedColumns = table.columns.map((column) => timestamps.has(column)
     ? `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ${column}`
     : column).join(",");
@@ -158,7 +170,7 @@ function canonical(value: unknown): string {
 export function registerGroupOperationsReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "3",
+    schemaVersion: "4",
     async inspect(departmentId) {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The Group Operations database is unavailable."], recordCount: 0 };
       try {
@@ -170,7 +182,7 @@ export function registerGroupOperationsReplication(context: ModuleServerContext)
       }
     },
     async exportSnapshot(client, departmentId) {
-      const snapshot: Snapshot = { version: 3, tables: {} };
+      const snapshot: Snapshot = { version: 4, tables: {} };
       for (const table of tables) snapshot.tables[table.name] = await selectRows(client, table, departmentId);
       checkedSnapshot(snapshot);
       return snapshot;
