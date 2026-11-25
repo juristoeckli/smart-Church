@@ -1,3 +1,5 @@
+import { renderCheckInLabelTemplate, type CheckInLabelTemplates } from "@smart-church/contracts";
+
 const formats = {
   a4: { label: "A4 / Letter sheet", page: "auto", height: null },
   "62x38": { label: "62 × 38 mm roll labels", page: "62mm 38mm", height: "38mm" },
@@ -41,13 +43,31 @@ function nameWithSurname(person: Person, initialOnly: boolean) {
   return [person.firstName.trim(), initialOnly && initial ? `${initial}.` : lastName].filter(Boolean).join(" ");
 }
 
-export function checkInPrintItems(person: Person, meeting: string, reference: string, mode: CheckInPrintMode, options: CheckInPrintOptions): PrintItem[] {
+type TemplateContext = { templates?: CheckInLabelTemplates; date?: string; title?: string };
+
+export function checkInPrintItems(person: Person, meeting: string, reference: string, mode: CheckInPrintMode, options: CheckInPrintOptions, context?: TemplateContext): PrintItem[] {
   const details = [options.showGroup && person.groups.join(" · "), options.showMeeting && meeting].filter((line): line is string => Boolean(line));
-  if (mode === "labels") return [{ heading: "Name label", name: nameWithSurname(person, options.surname === "initial"), details }];
+  const customize = (item: PrintItem, template: string | undefined, initialOnly: boolean) => {
+    if (!template) return item;
+    const lastName = person.lastName.trim();
+    const initial = Array.from(lastName)[0];
+    const abbreviated = initial ? initial + "." : "";
+    const [name, ...lines] = renderCheckInLabelTemplate(template, {
+      firstName: person.firstName.trim(), lastName: initialOnly ? abbreviated : lastName,
+      "lastName.1": abbreviated, group: options.showGroup ? person.groups.join(" · ") : "",
+      meeting: options.showMeeting ? context?.title ?? meeting : "", date: context?.date?.slice(0, 10) ?? "",
+    });
+    return name ? { ...item, name, details: lines } : item;
+  };
+  if (mode === "labels") {
+    const initialOnly = options.surname === "initial";
+    return [customize({ heading: "Name label", name: nameWithSurname(person, initialOnly), details }, context?.templates?.individual, initialOnly)];
+  }
   const name = nameWithSurname(person, true);
   return [
-    { heading: "Child label", name, details, reference },
-    { heading: "Pickup slip", name, details: options.showMeeting && meeting ? [meeting] : [], reference, note: "Desk reference only. Staff verifies pickup identity." },
+    customize({ heading: "Child label", name, details, reference }, context?.templates?.child, true),
+    customize({ heading: "Pickup slip", name, details: options.showMeeting && meeting ? [meeting] : [], reference,
+      note: "Desk reference only. Staff verifies pickup identity." }, context?.templates?.parent, true),
   ];
 }
 

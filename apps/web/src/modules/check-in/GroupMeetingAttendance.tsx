@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Plus, Printer, Search } from "lucide-react";
 import "./module.css";
 import { translate } from "../../i18n";
+import { useCheckInLabelTemplates } from "./CheckInLabelTemplates";
 import { GroupAttendanceCodes } from "./GroupAttendanceCodes";
 import { GroupMeetingAddAttendee } from "./GroupMeetingAddAttendee";
 import type { ModuleRealtime } from "../../module-registry";
@@ -54,6 +55,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   showAttendanceCodes?: boolean;
   realtime?: ModuleRealtime;
 }) {
+  const labelTemplates = useCheckInLabelTemplates(departmentId, realtime);
   const [groupId, selectGroup] = useState("");
   const groups = useData<Group[]>(target ? "" : "/api/groups", departmentId, "groups");
   const localGroups = (groups.data ?? []).filter((group) => !group.importedFrom);
@@ -131,6 +133,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
       const meetingLabel = [meeting.title, meeting.date].filter(Boolean).join(" · ");
       const items = attendees.flatMap((row) => checkInPrintItems(
         { ...row, groups: group ? [group.name] : [] }, meetingLabel, "", "labels", printOptions,
+        { templates: labelTemplates.data?.templates, date: meeting.date, title: meeting.title } ,
       ));
       writeCheckInPrintDocument(printWindow.document, "Group meeting name labels", items, printOptions);
       printWindow.focus();

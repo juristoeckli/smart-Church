@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Check, ChevronDown, Printer, RotateCcw, Search, UserPlus, Users } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import "./module.css";
+import { CheckInLabelTemplateEditor, useCheckInLabelTemplates } from "./CheckInLabelTemplates";
 import { CalendarGroupAttendance } from "./CalendarGroupAttendance";
 import { GroupMeetingAttendance } from "./GroupMeetingAttendance";
 import { checkInPrintFormats, checkInPrintItems, readCheckInPrintOptions, writeCheckInPrintDocument, type CheckInPrintMode, type CheckInPrintOptions } from "./printing";
@@ -35,6 +36,7 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
   const [releaseContactId, setReleaseContactId] = useState("");
   const [identityCheck, setIdentityCheck] = useState<IdentityCheck>("");
   const printOptions = readCheckInPrintOptions(state);
+  const labelTemplates = useCheckInLabelTemplates(departmentId, realtime);
   function updatePrintOptions(changes: Partial<CheckInPrintOptions>) {
     onStateChange(JSON.stringify({ ...printOptions, ...changes }));
   }
@@ -263,7 +265,8 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
     if (printWindow.closed) return;
     try {
       const title = mode === "labels" ? "Check-in name labels" : "Check-in pickup pairs";
-      const items = people.flatMap((person) => checkInPrintItems(person, selected?.title ?? "", deskCode(departmentId, eventId, person.id), mode, printOptions));
+      const items = people.flatMap((person) => checkInPrintItems(person, selected?.title ?? "", deskCode(departmentId, eventId, person.id), mode, printOptions,
+        { templates: labelTemplates.data?.templates, date: selected?.eventDate }));
       writeCheckInPrintDocument(printWindow.document, title, items, printOptions);
       printWindow.focus();
       printWindow.print();
@@ -318,6 +321,8 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
       <label><input type="checkbox" checked={printOptions.showMeeting} onChange={(event) => updatePrintOptions({ showMeeting: event.target.checked })} /> Print meeting name</label>
     </div>
     <p>Choose the matching paper or roll in your browser’s print dialog.</p>
+    {department.role === "site_admin" && <CheckInLabelTemplateEditor key={departmentId}
+      departmentId={departmentId} csrfToken={csrfToken} current={labelTemplates} />}
   </details>;
 
   const canUseCalendarAttendance = canManageGroupAttendance && department.enabledModules?.includes("church-calendar");
