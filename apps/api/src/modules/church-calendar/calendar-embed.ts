@@ -47,6 +47,9 @@ function renderCalendarGrid(window: NonNullable<ReturnType<typeof publicEmbedCal
   function navigation(period: CalendarPeriod, date: string) {
     const query = new URLSearchParams({ viewname: "calView", period, date });
     if (settings.title) query.set("title", settings.title);
+    if (settings.searchEntry) query.set("searchEntry", settings.searchEntry);
+    if (settings.entries !== undefined) query.set("entries", String(settings.entries));
+    if (settings.days !== undefined) query.set("days", String(settings.days));
     if (settings.darkmode) query.set("darkmode", "true");
     return escapeHtml("?" + query);
   }
