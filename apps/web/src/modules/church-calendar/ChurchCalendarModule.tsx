@@ -1,3 +1,4 @@
+import { CalendarSignupSchedule } from "./CalendarSignupSchedule";
 import { CalendarRemoval } from "./CalendarRemoval";
 import { CalendarBookingDecision } from "./CalendarBookingDecision";
 import { CalendarDraftResources, type CalendarDraftResource } from "./CalendarDraftResources";
@@ -150,7 +151,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
   const [view, setView] = useState<View>("month");
   const [confirmRemoval, setConfirmRemoval] = useState(false);
   const [createEventTemplateId, setCreateEventTemplateId] = useState("");
-  const [newSignupGroup, setNewSignupGroup] = useState<{ templateGroupId: string; throughDate: string }>();
+  const [newSignupGroup, setNewSignupGroup] = useState<{ templateGroupId: string; throughDate: string; scheduled: boolean; leadDays: string }>();
   const [newResourceBookings, setNewResourceBookings] = useState<CalendarDraftResource[]>([]);
   const layoutScope = JSON.stringify([accountId, departmentId]);
   const layoutKey = accountId ? "smart-church-calendar-compact:" + layoutScope : undefined;
@@ -475,7 +476,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
         ? { signupGroupId: draft.signupGroupId || null } : {}),
       ...(canCreateSignupGroup && newSignupGroup ? { newSignupGroup: {
         ...(newSignupGroup.templateGroupId ? { templateGroupId: newSignupGroup.templateGroupId } : {}),
-        ...(draft.repeat ? { throughDate: newSignupGroup.throughDate } : {}),
+        ...(newSignupGroup.scheduled ? { leadDays: Number(newSignupGroup.leadDays) } : draft.repeat ? { throughDate: newSignupGroup.throughDate } : {}),
       } } : {}),
       ...(choices.canSelectPeople ? { responsibleContactId: draft.responsibleContactId || null } : {}),
     } : {}), ...(editing ? { occurrenceStartAt: editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt, ...(editing.canManage && notifyCreator ? { notifyCreator } : {}) } : {}) };
@@ -484,15 +485,17 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
       let creatorNotificationQueued = false;
       let createdEventId: string | undefined;
       let createdSignupGroupCount = 0;
+      let signupScheduled = false;
       let bookings: Array<{ status: "requested" | "approved"; occurrenceStart: string }> | undefined;
       if (editing) ({ creatorNotificationQueued = false } = await api<{ creatorNotificationQueued?: boolean }>(`/api/modules/church-calendar/appointments/${editing.appointmentId}?scope=${scope}`, { method: "PUT", headers: mutationHeaders, body: JSON.stringify(payload) }));
       else {
-        const created = await api<{ id: string; linkedEventId?: string; signupGroupId?: string; signupGroupCount?: number; bookings?: Array<{ status: "requested" | "approved"; occurrenceStart: string }> }>("/api/modules/church-calendar/appointments", {
+        const created = await api<{ id: string; linkedEventId?: string; signupGroupId?: string; signupGroupCount?: number; signupScheduled?: boolean; bookings?: Array<{ status: "requested" | "approved"; occurrenceStart: string }> }>("/api/modules/church-calendar/appointments", {
           method: "POST", headers: mutationHeaders, body: JSON.stringify(payload),
         });
         appointmentId = created.id;
         createdEventId = created.linkedEventId;
         createdSignupGroupCount = created.signupGroupCount ?? (created.signupGroupId ? 1 : 0);
+        signupScheduled = created.signupScheduled ?? false;
         bookings = created.bookings;
       }
       if (!contributorDraft && imageFile && appointmentId) {
@@ -504,7 +507,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
       const bookedDates = new Set(bookings?.map(({ occurrenceStart }) => occurrenceStart)).size;
       const bookingNotice = bookings?.length ? " Resources: " + approved + " confirmed, " + pending + " pending"
         + (bookedDates > 1 ? " across " + bookedDates + " occurrences." : ".") : "";
-      setNotice(editing ? (notifyCreator ? (creatorNotificationQueued ? "Appointment updated. Creator notification queued." : "Appointment updated. No creator notification was queued.") : "Appointment updated.") : (createdEventId ? "Appointment and linked service event created." : "Appointment created.") + (createdSignupGroupCount ? (createdSignupGroupCount === 1 ? " Draft registration group created." : ` ${createdSignupGroupCount} draft registration groups created.`) : "") + bookingNotice); setShowForm(false); await load();
+      setNotice(editing ? (notifyCreator ? (creatorNotificationQueued ? "Appointment updated. Creator notification queued." : "Appointment updated. No creator notification was queued.") : "Appointment updated.") : (createdEventId ? "Appointment and linked service event created." : "Appointment created.") + (createdSignupGroupCount ? (createdSignupGroupCount === 1 ? " Draft registration group created." : ` ${createdSignupGroupCount} draft registration groups created.`) : "") + (signupScheduled ? " Draft registration group creation scheduled." : "") + bookingNotice); setShowForm(false); await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save this appointment."); }
     finally { setBusy(false); }
   }
@@ -998,9 +1001,20 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
           <option value={editing.signupGroupId}>{editing.signupGroupName ?? "Linked registration group"}</option>}
         {choices.signupGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select><small>Existing public group signup page.</small></label>{canCreateSignupGroup && <div className="church-calendar-extra-date wide">
         <label className="church-calendar-check"><input type="checkbox" checked={!!newSignupGroup}
-          onChange={(event) => setNewSignupGroup(event.target.checked ? { templateGroupId: "", throughDate: draft.endsOn } : undefined)} /> {draft.repeat ? "Create registration groups for this series" : "Create a registration group"}</label>
+          onChange={(event) => setNewSignupGroup(event.target.checked ? { templateGroupId: "", throughDate: draft.endsOn, scheduled: false, leadDays: "14" } : undefined)} /> {draft.repeat ? "Create registration groups for this series" : "Create a registration group"}</label>
         {newSignupGroup && <>
-          {draft.repeat && <label>Generate registration groups through
+          <label>When to create registration drafts
+            <select value={newSignupGroup.scheduled ? "scheduled" : "now"}
+              onChange={(event) => setNewSignupGroup({ ...newSignupGroup, scheduled: event.target.value === "scheduled" })}>
+              <option value="now">On appointment save</option>
+              <option value="scheduled">A set number of days before each appointment</option>
+            </select>
+          </label>
+          {newSignupGroup.scheduled && <label>Draft creation lead days
+            <input type="number" min={0} max={365} required value={newSignupGroup.leadDays}
+              onChange={(event) => setNewSignupGroup({ ...newSignupGroup, leadDays: event.target.value })} />
+          </label>}
+          {draft.repeat && !newSignupGroup.scheduled && <label>Generate registration groups through
             <input type="date" required min={draft.startsAt.slice(0, 10)} value={newSignupGroup.throughDate}
               onChange={(event) => setNewSignupGroup({ ...newSignupGroup, throughDate: event.target.value })} />
           </label>}
@@ -1010,9 +1024,12 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
               {choices.registrationFormTemplates.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
             </select>
           </label>}
-          <small>{draft.repeat ? "Each occurrence through that date gets its own draft group with an empty roster." : "A draft group with an empty roster is created with the appointment."} A group manager can review and enable signup in Groups.</small>
+          <small>{newSignupGroup.scheduled ? "Drafts are prepared when each occurrence enters the lead time." : draft.repeat ? "Each occurrence through that date gets its own draft group with an empty roster." : "A draft group with an empty roster is created with the appointment."} A group manager can review and enable signup in Groups.</small>
         </>}
-      </div>}{(!editing?.recurrence || scope !== "occurrence") && <label>Link approved resource bookings to the appointment<select multiple value={draft.resourceBookingIds} onChange={(event) => setDraft({ ...draft, resourceBookingIds: Array.from(event.currentTarget.selectedOptions, (option) => option.value) })}>{choices.resourceBookings.map((booking) => <option key={booking.id} value={booking.id}>{booking.starts_at.slice(0,16).replace("T", " ")} · {booking.purpose}</option>)}</select><small>Hold Ctrl or Command to select multiple bookings.</small></label>}</>}<label className="church-calendar-check"><input type="checkbox" checked={draft.allDay} onChange={(event) => setDraft({ ...draft, allDay: event.target.checked })} /> All day</label><label className="church-calendar-check"><input type="checkbox" checked={draft.internalOnly} onChange={(event) => { setCreateEventTemplateId(""); setNewSignupGroup(undefined); setDraft({ ...draft, internalOnly: event.target.checked }); }} /> Internal appointment</label><label className="church-calendar-check wide"><input type="checkbox" checked={draft.repeat} onChange={(event) => { setCreateEventTemplateId(""); setDraft({ ...draft, repeat: event.target.checked }); }} /><Repeat2 size={15} /> Repeat appointment</label>{draft.repeat && <div className="church-calendar-recurrence wide"><label>Repeat pattern<select value={draft.frequency} onChange={(event) => setDraft({ ...draft, frequency: event.target.value as Frequency })}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly by date</option><option value="monthly_weekday">Monthly by weekday</option><option value="yearly">Yearly</option><option value="manual">Manual dates</option></select></label><label>Every<input type="number" min={1} max={365} value={draft.interval} onChange={(event) => setDraft({ ...draft, interval: Number(event.target.value) })} /></label>{draft.frequency === "weekly" && <fieldset><legend>Days of week</legend>{weekDays.map((day, index) => <label key={day}><input type="checkbox" checked={draft.weekdays.includes(index)} onChange={(event) => setDraft({ ...draft, weekdays: event.target.checked ? [...draft.weekdays, index] : draft.weekdays.filter((value) => value !== index) })} />{day}</label>)}</fieldset>}{draft.frequency === "monthly_weekday" && <><label>Week of month<select value={draft.weekOfMonth} onChange={(event) => setDraft({ ...draft, weekOfMonth: Number(event.target.value) })}><option value={1}>First</option><option value={2}>Second</option><option value={3}>Third</option><option value={4}>Fourth</option><option value={-1}>Last</option></select></label><label>Weekday<select value={draft.weekday} onChange={(event) => setDraft({ ...draft, weekday: Number(event.target.value) })}>{weekDays.map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label></>}{draft.frequency === "manual" && <div className="church-calendar-manual-dates"><label className="wide">Manual dates<input type="text" placeholder="YYYY-MM-DD, YYYY-MM-DD" value={draft.manualDates} onChange={(event) => setDraft({ ...draft, manualDates: event.target.value })} /><small>Enter up to 100 dates separated by commas.</small></label></div>}<label>End date<input type="date" value={draft.endsOn} onChange={(event) => setDraft({ ...draft, endsOn: event.target.value })} /></label><label>Or after occurrences<input type="number" min={1} max={500} value={draft.count} onChange={(event) => setDraft({ ...draft, count: event.target.value })} /></label></div>}{editing?.canManage && <label className="church-calendar-check wide"><input type="checkbox" checked={notifyCreator} onChange={(event) => setNotifyCreator(event.target.checked)} /> Notify the appointment creator</label>}{editing?.recurrence && <label className="wide">Apply changes<select disabled={busy} value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="occurrence">This appointment only</option><option value="future">This and following</option><option value="series">Entire series</option></select></label>}{editing?.recurrence && canManageGroups && <div className="church-calendar-extra-date wide"><strong>Generate registration groups</strong>
+      </div>}{editing?.canManage && canManageGroups && draftCalendar?.scope === "community" && department.enabledModules?.includes("community") &&
+        <CalendarSignupSchedule key={departmentId + ":" + editing.appointmentId} appointmentId={editing.appointmentId}
+          departmentId={departmentId} csrfToken={csrfToken} templates={choices.registrationFormTemplates ?? []} />
+      }{(!editing?.recurrence || scope !== "occurrence") && <label>Link approved resource bookings to the appointment<select multiple value={draft.resourceBookingIds} onChange={(event) => setDraft({ ...draft, resourceBookingIds: Array.from(event.currentTarget.selectedOptions, (option) => option.value) })}>{choices.resourceBookings.map((booking) => <option key={booking.id} value={booking.id}>{booking.starts_at.slice(0,16).replace("T", " ")} · {booking.purpose}</option>)}</select><small>Hold Ctrl or Command to select multiple bookings.</small></label>}</>}<label className="church-calendar-check"><input type="checkbox" checked={draft.allDay} onChange={(event) => setDraft({ ...draft, allDay: event.target.checked })} /> All day</label><label className="church-calendar-check"><input type="checkbox" checked={draft.internalOnly} onChange={(event) => { setCreateEventTemplateId(""); setNewSignupGroup(undefined); setDraft({ ...draft, internalOnly: event.target.checked }); }} /> Internal appointment</label><label className="church-calendar-check wide"><input type="checkbox" checked={draft.repeat} onChange={(event) => { setCreateEventTemplateId(""); setDraft({ ...draft, repeat: event.target.checked }); }} /><Repeat2 size={15} /> Repeat appointment</label>{draft.repeat && <div className="church-calendar-recurrence wide"><label>Repeat pattern<select value={draft.frequency} onChange={(event) => setDraft({ ...draft, frequency: event.target.value as Frequency })}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly by date</option><option value="monthly_weekday">Monthly by weekday</option><option value="yearly">Yearly</option><option value="manual">Manual dates</option></select></label><label>Every<input type="number" min={1} max={365} value={draft.interval} onChange={(event) => setDraft({ ...draft, interval: Number(event.target.value) })} /></label>{draft.frequency === "weekly" && <fieldset><legend>Days of week</legend>{weekDays.map((day, index) => <label key={day}><input type="checkbox" checked={draft.weekdays.includes(index)} onChange={(event) => setDraft({ ...draft, weekdays: event.target.checked ? [...draft.weekdays, index] : draft.weekdays.filter((value) => value !== index) })} />{day}</label>)}</fieldset>}{draft.frequency === "monthly_weekday" && <><label>Week of month<select value={draft.weekOfMonth} onChange={(event) => setDraft({ ...draft, weekOfMonth: Number(event.target.value) })}><option value={1}>First</option><option value={2}>Second</option><option value={3}>Third</option><option value={4}>Fourth</option><option value={-1}>Last</option></select></label><label>Weekday<select value={draft.weekday} onChange={(event) => setDraft({ ...draft, weekday: Number(event.target.value) })}>{weekDays.map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label></>}{draft.frequency === "manual" && <div className="church-calendar-manual-dates"><label className="wide">Manual dates<input type="text" placeholder="YYYY-MM-DD, YYYY-MM-DD" value={draft.manualDates} onChange={(event) => setDraft({ ...draft, manualDates: event.target.value })} /><small>Enter up to 100 dates separated by commas.</small></label></div>}<label>End date<input type="date" value={draft.endsOn} onChange={(event) => setDraft({ ...draft, endsOn: event.target.value })} /></label><label>Or after occurrences<input type="number" min={1} max={500} value={draft.count} onChange={(event) => setDraft({ ...draft, count: event.target.value })} /></label></div>}{editing?.canManage && <label className="church-calendar-check wide"><input type="checkbox" checked={notifyCreator} onChange={(event) => setNotifyCreator(event.target.checked)} /> Notify the appointment creator</label>}{editing?.recurrence && <label className="wide">Apply changes<select disabled={busy} value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="occurrence">This appointment only</option><option value="future">This and following</option><option value="series">Entire series</option></select></label>}{editing?.recurrence && canManageGroups && <div className="church-calendar-extra-date wide"><strong>Generate registration groups</strong>
       {!!choices.registrationFormTemplates?.length && <label>Signup form template
         <select value={registrationTemplateId} onChange={(event) => setRegistrationTemplateId(event.target.value)}>
           <option value="">Start with an empty form</option>
