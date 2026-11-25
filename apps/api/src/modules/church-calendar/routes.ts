@@ -1,3 +1,5 @@
+import { addResourcesToNewCalendarAppointment, type CalendarCreatedBooking } from "./new-appointment-resources.js";
+import { resourceSelectionListSchema, type ResourceSelection } from "../../resource-booking-series-write.js";
 import { calendarImageMetadataSchema, defaultCalendarImageMetadata, normalizeCalendarImageMetadata, type CalendarImageMetadata } from "./image-metadata.js";
 import { registerCalendarEmailSubscriptions } from "./email-subscriptions.js";
 import { registerCalendarBookingDescriptions } from "./booking-descriptions.js";
@@ -1570,9 +1572,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").header("X-Calendar-Image-Revision", file.revision).send(file.content);
   });
 
-  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string } }>("/api/modules/church-calendar/appointments", { schema: { body: {
+  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string; newResourceBookings?: ResourceSelection[] } }>("/api/modules/church-calendar/appointments", { schema: { body: {
     type: "object", additionalProperties: false, required: ["calendarId", "title", "startsAt", "endsAt"],
-    properties: { createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
+    properties: { newResourceBookings: resourceSelectionListSchema, createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
   } } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -1597,6 +1599,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!calendar) return responseError(reply, 404, "The calendar was not found.");
     const isContributor = !canManageCalendar(request, calendar.scope, calendar.owner_user_id);
     const createEventTemplateId = request.body.createEventTemplateId;
+    const newResourceBookings = request.body.newResourceBookings;
+    if (newResourceBookings) {
+      if (isContributor || calendar.scope === "personal") return responseError(reply, 403, "Shared calendar management is required to book resources with an appointment.");
+      if (normalized.recurrence) return responseError(reply, 400, "Create new resource bookings with a one-time appointment.");
+    }
     if (createEventTemplateId) {
       if (isContributor || !canManageServiceEvents(request)) {
         return responseError(reply, 403, "Calendar and event management access is required to create a linked event.");
@@ -1629,10 +1636,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const id = randomUUID();
     let linkedEventId = normalized.linkedEventId ?? null;
+    let bookings: CalendarCreatedBooking[] | undefined;
     const client = await context.pool.connect();
     try {
       await client.query("BEGIN");
-      if ((isContributor || createEventTemplateId) && !await context.lockDepartmentForWrite(client, departmentId)) {
+      if ((isContributor || createEventTemplateId || newResourceBookings) && !await context.lockDepartmentForWrite(client, departmentId)) {
         await client.query("ROLLBACK");
         return responseError(reply, 409, "This location is read-only on this installation.");
       }
@@ -1698,12 +1706,27 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           [randomUUID(), departmentId, id, normalized.startsAt, linkedEventId, createEventTemplateId, userId(request)],
         );
       }
+      if (newResourceBookings) {
+        const result = await addResourcesToNewCalendarAppointment(client, {
+          departmentId, calendarId: normalized.calendarId, appointmentId: id, userId: userId(request),
+          canManageResources: isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")),
+          startsAt: normalized.startsAt, endsAt: normalized.endsAt, authoredTimeZone: normalized.timeZone,
+          allDay: normalized.allDay ?? false, privateTitle: calendar.scope === "group" || normalized.internalOnly === true,
+          title: normalized.title, selections: newResourceBookings,
+        });
+        if (result.error !== undefined) {
+          await client.query("ROLLBACK");
+          return responseError(reply, result.status, result.error);
+        }
+        bookings = result.bookings;
+      }
       for (const resourceId of resourceIds) await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3)", [id, resourceId, userId(request)]);
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-created", appointmentId: id });
-    return reply.code(201).send({ id, ...(createEventTemplateId ? { linkedEventId } : {}) });
+    if (bookings?.length) context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
+    return reply.code(201).send({ id, ...(createEventTemplateId ? { linkedEventId } : {}), ...(bookings ? { bookings } : {}) });
   });
 
   app.get("/api/modules/church-calendar/archive", async (request, reply) => {
