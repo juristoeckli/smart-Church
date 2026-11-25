@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { postalAddressFields, type PostalAddress } from "./postal-address";
 
-export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select" | "number" | "multiline" | "datetime"; required: boolean; options: string[]; textMaxLength?: number | null };
+export type CreationField = { id: string; label: string; type: "text" | "date" | "boolean" | "select" | "number" | "multiline" | "datetime" | "multiselect"; required: boolean; options: string[]; textMaxLength?: number | null };
 export type CreatePersonInput = {
   firstName: string; lastName: string; email?: string; phone?: string; status: "member" | "visitor";
-  postalAddress: PostalAddress; fields: Record<string, string | boolean | number>;
+  postalAddress: PostalAddress; fields: Record<string, string | boolean | number | string[]>;
 };
 
 export function PeopleCreateForm({ fields, timeZone, onCreate, onClose }: {
@@ -23,9 +23,15 @@ export function PeopleCreateForm({ fields, timeZone, onCreate, onClose }: {
     if (pending.current) return;
     const data = new FormData(event.currentTarget);
     const string = (name: string) => String(data.get(name) ?? "");
-    const values: Record<string, string | boolean | number> = {};
+    const values: Record<string, string | boolean | number | string[]> = {};
     for (const field of fields) {
-      const raw = string("field:" + field.id);
+      const name = "field:" + field.id;
+      if (field.type === "multiselect") {
+        const choices = data.getAll(name).map(String);
+        if (choices.length) values[field.id] = choices;
+        continue;
+      }
+      const raw = string(name);
       if (raw === "") continue;
       if (field.type === "number") values[field.id] = Number(raw);
       else values[field.id] = field.type === "boolean" ? raw === "true" : raw;
@@ -71,7 +77,10 @@ export function PeopleCreateForm({ fields, timeZone, onCreate, onClose }: {
       {fields.length > 0 && <fieldset disabled={saving}>
         <legend>Custom fields</legend>
         {fields.map((field) => <label key={field.id}>{field.label}{field.type === "datetime" && ` (${timeZone})`}
-          {field.type === "select" || field.type === "boolean" ?
+          {field.type === "multiselect" ?
+            <select name={"field:" + field.id} multiple required={field.required} size={Math.max(2, Math.min(field.options.length, 6))}>
+              {field.options.map((option) => <option key={option}>{option}</option>)}
+            </select> : field.type === "select" || field.type === "boolean" ?
             <select name={"field:" + field.id} required={field.required}>
               <option value="">Choose a value</option>
               {field.type === "boolean" ? <><option value="true">Yes</option><option value="false">No</option></> :

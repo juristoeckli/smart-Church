@@ -8,10 +8,10 @@ import { canManagePeopleFields } from "../people-records/field-privacy.js";
 
 import { normalizePeopleLocalDateTime } from "../people-records/local-datetime.js";
 
-type FieldType = "text" | "number" | "date" | "datetime";
+type FieldType = "text" | "number" | "date" | "datetime" | "multiselect";
 type DatasetKey = "people" | "groups" | "memberships" | "events" | "finance" | "resourceBookings";
-type Field = { key: string; label: string; type: FieldType };
-type Filter = { field: string; operator: "equals" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string | number };
+type Field = { key: string; label: string; type: FieldType; options?: string[] };
+type Filter = { field: string; operator: "equals" | "includes" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string | number };
 type ChartType = "table" | "column" | "line";
 type Axis = string | string[];
 type Definition = { dataset: DatasetKey; columns: string[]; filters: Filter[]; sortBy: string; direction: "asc" | "desc"; groupBy?: Axis; pivotBy?: Axis; chartType?: ChartType; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
@@ -96,11 +96,17 @@ function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
     if (Object.keys(f).some((key) => !["field", "operator", "value"].includes(key))) return "A filter contains an unsupported option.";
     const field = typeof f.field === "string" ? fieldByKey.get(f.field) : undefined;
     const operator = f.operator;
-    if (!field || !["equals", "contains", "gt", "gte", "lt", "lte"].includes(String(operator))) return "A filter uses an unsupported field or operator.";
+    if (!field || !["equals", "includes", "contains", "gt", "gte", "lt", "lte"].includes(String(operator))) return "A filter uses an unsupported field or operator.";
+    if (field.type === "multiselect" ? operator !== "includes" : operator === "includes") {
+      return "Use includes with a multi-choice field.";
+    }
     if (operator === "contains" && field.type !== "text") return "Contains can only be used with text fields.";
     if (["gt", "gte", "lt", "lte"].includes(String(operator)) && field.type === "text") return "Numeric or date comparisons need a number or date field.";
     let filterValue: string | number;
-    if (field.type === "number") {
+    if (field.type === "multiselect") {
+      if (typeof f.value !== "string" || !field.options?.includes(f.value)) return "Choose a configured option.";
+      filterValue = f.value;
+    } else if (field.type === "number") {
       if (typeof f.value !== "number" || !Number.isFinite(f.value) ||
           (field.key.startsWith("custom_") ? Math.abs(f.value) > Number.MAX_SAFE_INTEGER : !Number.isSafeInteger(f.value))) {
         return "Enter a numeric value within the supported range for this field.";
@@ -149,6 +155,7 @@ function compare(a: unknown, b: unknown, type: FieldType) {
     if (/^-?\d+$/.test(left) && /^-?\d+$/.test(right)) { const difference = BigInt(left) - BigInt(right); return difference < 0n ? -1 : difference > 0n ? 1 : 0; }
     return Number(a ?? 0) - Number(b ?? 0);
   }
+  if (type === "multiselect") return JSON.stringify(a ?? []).localeCompare(JSON.stringify(b ?? []));
   return String(a ?? "").localeCompare(String(b ?? ""), undefined, { numeric: type === "date", sensitivity: "base" });
 }
 
@@ -174,7 +181,7 @@ function aggregateLabel(operation: NonNullable<Definition["aggregate"]>["operati
 function groupRows(rows: Array<Record<string, unknown>>, fields: Field[]) {
   const groups = new Map<string, { values: string[]; records: Array<Record<string, unknown>> }>();
   for (const row of rows) {
-    const values = fields.map(({ key }) => String(row[key] ?? ""));
+    const values = fields.map(({ key }) => Array.isArray(row[key]) ? JSON.stringify(row[key]) : String(row[key] ?? ""));
     const key = JSON.stringify(values);
     const existing = groups.get(key);
     if (existing) existing.records.push(row);
@@ -232,6 +239,7 @@ function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: 
     const field = byKey.get(filter.field)!;
     const raw = row[field.key];
     if ((field.type === "datetime" || (field.type === "number" && field.key.startsWith("custom_"))) && raw == null) return false;
+    if (filter.operator === "includes") return Array.isArray(raw) && raw.includes(filter.value);
     if (filter.operator === "equals") return field.type === "text" ? String(raw ?? "").toLocaleLowerCase() === String(filter.value).toLocaleLowerCase() : compare(raw, filter.value, field.type) === 0;
     if (filter.operator === "contains") return String(raw ?? "").toLocaleLowerCase().includes(String(filter.value).toLocaleLowerCase());
     const order = compare(raw, filter.value, field.type);
@@ -272,8 +280,8 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     const present = presence.rows[0];
     const canManageFields = canManagePeopleFields(request);
     const customFields = permitted(request, "people") && present?.people
-      ? await database.query<{ id: string; label: string; field_type: string }>(
-        `SELECT field.id::text,field.label,field.field_type FROM people_record_fields field
+      ? await database.query<{ id: string; label: string; field_type: string; options: unknown }>(
+        `SELECT field.id::text,field.label,field.field_type,field.options FROM people_record_fields field
           WHERE field.department_id=$1 AND field.active AND ($2::boolean OR COALESCE(to_jsonb(field)->>'visibility','private_people')='private_people')
           ORDER BY field.position,field.label LIMIT 40`, [departmentId, canManageFields],
       )
@@ -294,10 +302,14 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       }
       if (item.key !== "people" || !customFields.rows.length) return item;
       const fields = customFields.rows.filter((field) => /^[0-9a-f-]{36}$/i.test(field.id));
-      const additions = fields.map((field) => ({ key: `custom_${field.id.replace(/-/g, "")}`, label: `Custom: ${field.label}`, type: field.field_type === "date" ? "date" as const : field.field_type === "number" ? "number" as const : field.field_type === "datetime" ? "datetime" as const : "text" as const }));
+      const additions: Field[] = fields.map((field) => ({
+        key: `custom_${field.id.replace(/-/g, "")}`, label: `Custom: ${field.label}`,
+        type: field.field_type === "date" || field.field_type === "number" || field.field_type === "datetime" || field.field_type === "multiselect" ? field.field_type : "text",
+        ...(field.field_type === "multiselect" && Array.isArray(field.options) ? { options: field.options.filter((option): option is string => typeof option === "string") } : {}),
+      }));
       if (!additions.length) return item;
       const fieldVisibility = canManageFields ? "TRUE" : "COALESCE(to_jsonb(field)->>'visibility','private_people')='private_people'";
-      const expressions = fields.map((field) => `(SELECT ${field.field_type === "number" ? "(record.value #>> '{}')::double precision" : "record.value #>> '{}'"} FROM people_record_values record
+      const expressions = fields.map((field) => `(SELECT ${field.field_type === "multiselect" ? "record.value" : field.field_type === "number" ? "(record.value #>> '{}')::double precision" : "record.value #>> '{}'"} FROM people_record_values record
         JOIN people_record_fields field ON field.id=record.field_id AND field.department_id=record.department_id
         WHERE record.department_id=c.department_id AND record.contact_id=c.id AND record.field_id='${field.id}'::uuid AND field.active AND ${fieldVisibility}) AS "custom_${field.id.replace(/-/g, "")}"`);
       return { ...item, fields: [...item.fields, ...additions], sql: item.sql.replace(" FROM contacts", `,${expressions.join(",")} FROM contacts`) };

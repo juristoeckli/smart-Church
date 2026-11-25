@@ -11,7 +11,9 @@ import { normalizePeopleLocalDateTime } from "./local-datetime.js";
 import { normalizeMultilineField } from "./multiline-field.js";
 import { validPeopleNumber } from "./number-field.js";
 
-type FieldValue = string | boolean | number;
+import { validPeopleChoices } from "./multiselect-field.js";
+
+type FieldValue = string | boolean | number | string[];
 type NewPerson = CreateContact & { postalAddress?: PostalAddress; fields?: Record<string, unknown> };
 type CreationField = { id: string; field_key: string; field_type: string; label: string; required: boolean; options: unknown; text_max_length: number | null };
 type DepartmentResolver = (request: FastifyRequest, reply: FastifyReply, write?: boolean) => Promise<string | null>;
@@ -20,6 +22,7 @@ type WriteHistory = (
   subject: string, before: unknown, after: unknown, client: PoolClient,
 ) => Promise<void>;
 function validValue(field: CreationField, value: unknown): value is FieldValue {
+  if (field.field_type === "multiselect") return validPeopleChoices(value, field.options);
   if (field.field_type === "number") return validPeopleNumber(value, field.text_max_length ?? undefined);
   if (field.field_type === "boolean") return typeof value === "boolean";
   if (typeof value !== "string" || !value.trim()) return false;
@@ -66,7 +69,7 @@ export function registerPersonCreation(routes: FastifyInstance, context: ModuleS
       for (const field of fields) {
         const raw = provided[field.id];
         const value = field.field_type === "multiline" && typeof raw === "string" ? normalizeMultilineField(raw) : raw;
-        if (value === undefined || value === "") {
+        if (value === undefined || value === "" || (field.field_type === "multiselect" && Array.isArray(value) && value.length === 0)) {
           if (field.required) return { status: 400, error: "Enter a value for “" + field.label + "”." } as const;
           continue;
         }

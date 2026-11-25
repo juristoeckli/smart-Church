@@ -23,7 +23,7 @@ export async function lockChoiceRenameContacts(client: PoolClient, departmentId:
   const result = await client.query<{ id: string }>(
     `SELECT person.id FROM contacts person
        JOIN people_record_values value ON value.department_id=person.department_id AND value.contact_id=person.id
-      WHERE person.department_id=$1 AND value.field_id=$2 AND value.value=to_jsonb($3::text)
+      WHERE person.department_id=$1 AND value.field_id=$2 AND (value.value=to_jsonb($3::text) OR value.value @> jsonb_build_array($3::text))
       ORDER BY person.id FOR UPDATE OF person`,
     [departmentId, fieldId, oldName],
   );
@@ -31,8 +31,8 @@ export async function lockChoiceRenameContacts(client: PoolClient, departmentId:
 }
 
 type SavedView = { id: string; criteria: Record<string, unknown> };
-type RenameProfile = { id: string; archived: boolean; replacement: boolean };
-type ChoiceRename = { departmentId: string; fieldId: string; fieldKey: string; oldName: string; newName: string; options: string[] };
+type RenameProfile = { id: string; archived: boolean; replacement: boolean; value: string | string[] };
+type ChoiceRename = { departmentId: string; fieldId: string; fieldKey: string; multiple: boolean; oldName: string; newName: string; options: string[] };
 type RenamePlan = {
   reviewToken: string;
   profiles: RenameProfile[];
@@ -40,7 +40,7 @@ type RenamePlan = {
 };
 type Blocked = { error: string };
 
-function updateSavedView(view: SavedView, fieldKey: string, oldName: string, newName: string): { criteria: SavedView["criteria"] } | Blocked {
+function updateSavedView(view: SavedView, fieldKey: string, oldName: string, newName: string, multiple: boolean): { criteria: SavedView["criteria"] } | Blocked {
   const criteria = view.criteria;
   const next = { ...criteria };
   if (criteria.field === fieldKey) {
@@ -54,7 +54,7 @@ function updateSavedView(view: SavedView, fieldKey: string, oldName: string, new
         filters.push(raw);
         continue;
       }
-      if (raw.value === newName || (raw.value === oldName && raw.operator !== undefined && raw.operator !== "equals")) {
+      if (raw.value === newName || (raw.value === oldName && raw.operator !== undefined && raw.operator !== (multiple ? "includes" : "equals"))) {
         return { error: "A saved People view uses a filter that cannot be safely migrated. Change that view before renaming this choice." };
       }
       filters.push(raw.value === oldName ? { ...raw, value: newName } : raw);
@@ -93,7 +93,7 @@ function readChoiceViews(client: PoolClient, departmentId: string, fieldKey: str
 
 export async function choiceRemovalBlocker(client: PoolClient, departmentId: string, fieldId: string, fieldKey: string, name: string) {
   const usage = await client.query(
-    "SELECT 1 FROM people_record_values WHERE department_id=$1 AND field_id=$2 AND value=to_jsonb($3::text) LIMIT 1",
+    "SELECT 1 FROM people_record_values WHERE department_id=$1 AND field_id=$2 AND (value=to_jsonb($3::text) OR value @> jsonb_build_array($3::text)) LIMIT 1",
     [departmentId, fieldId, name],
   );
   if (usage.rowCount) return "This choice is used by a People profile, including archived profiles.";
@@ -106,14 +106,15 @@ export async function choiceRemovalBlocker(client: PoolClient, departmentId: str
 }
 
 export async function inspectChoiceRename(client: PoolClient, rename: ChoiceRename, lockViews = false): Promise<RenamePlan | Blocked> {
-  const { departmentId, fieldId, fieldKey, oldName, newName, options } = rename;
+  const { departmentId, fieldId, fieldKey, oldName, newName, options, multiple } = rename;
   if (await hasDesignerChoiceFilter(client, departmentId, fieldId)) {
-    return { error: "A saved Designer report filters this choice field. Remove or update that report filter before renaming because its text matching cannot be safely rewritten." };
+    return { error: "A saved Designer report filters this choice field. Remove or update that report filter before renaming to avoid changing the report’s results." };
   }
   const { rows: profiles } = await client.query<RenameProfile>(
-    `SELECT person.id,person.archived_at IS NOT NULL AS archived,value.value=to_jsonb($4::text) AS replacement
+    `SELECT person.id,person.archived_at IS NOT NULL AS archived,(value.value=to_jsonb($4::text) OR value.value @> jsonb_build_array($4::text)) AS replacement,value.value
        FROM contacts person JOIN people_record_values value ON value.department_id=person.department_id AND value.contact_id=person.id
-      WHERE person.department_id=$1 AND value.field_id=$2 AND value.value IN(to_jsonb($3::text),to_jsonb($4::text)) ORDER BY person.id`,
+      WHERE person.department_id=$1 AND value.field_id=$2 AND (value.value IN(to_jsonb($3::text),to_jsonb($4::text))
+        OR value.value @> jsonb_build_array($3::text) OR value.value @> jsonb_build_array($4::text)) ORDER BY person.id`,
     [departmentId, fieldId, oldName, newName],
   );
   if (profiles.some((row) => row.replacement)) {
@@ -122,7 +123,7 @@ export async function inspectChoiceRename(client: PoolClient, rename: ChoiceRena
   const { rows: views } = await readChoiceViews(client, departmentId, fieldKey, [oldName, newName], { lockViews });
   const replacements = [];
   for (const view of views) {
-    const next = updateSavedView(view, fieldKey, oldName, newName);
+    const next = updateSavedView(view, fieldKey, oldName, newName, multiple);
     if ("error" in next) return next;
     replacements.push({ ...view, replacementCriteria: next.criteria });
   }
@@ -134,12 +135,18 @@ export async function applyChoiceRename(client: PoolClient, rename: ChoiceRename
   const { departmentId, fieldId, oldName, newName } = rename;
   const history = await client.query(
     `WITH updated AS (
-      UPDATE people_record_values SET value=to_jsonb($4::text),updated_by=$5,updated_at=now()
-       WHERE department_id=$1 AND field_id=$2 AND value=to_jsonb($3::text) RETURNING contact_id
+      UPDATE people_record_values current SET value=reviewed.after_value,updated_by=$5,updated_at=now()
+       FROM unnest($3::uuid[],$4::jsonb[],$6::jsonb[]) AS reviewed(contact_id,before_value,after_value)
+       WHERE current.department_id=$1 AND current.field_id=$2 AND current.contact_id=reviewed.contact_id
+         AND current.value=reviewed.before_value
+       RETURNING current.contact_id,reviewed.before_value,reviewed.after_value
     )
     INSERT INTO people_record_history (id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value)
-    SELECT gen_random_uuid(),$1,contact_id,$5,'field_updated',$2::uuid::text,to_jsonb($3::text),to_jsonb($4::text) FROM updated`,
-    [departmentId, fieldId, oldName, newName, actorId],
+    SELECT gen_random_uuid(),$1,contact_id,$5,'field_updated',$2::uuid::text,before_value,after_value FROM updated`,
+    [departmentId, fieldId, plan.profiles.map((person) => person.id),
+      plan.profiles.map((person) => JSON.stringify(person.value)), actorId,
+      plan.profiles.map(({ value }) => JSON.stringify(Array.isArray(value)
+        ? value.map((choice) => choice === oldName ? newName : choice) : newName))],
   );
   if (history.rowCount !== plan.profiles.length) throw new Error("The reviewed People records changed while renaming this choice.");
   if (plan.views.length) {
