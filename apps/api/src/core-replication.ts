@@ -205,7 +205,7 @@ const dependentModuleRecords = [
       "finance_bank_statement_imports", "finance_bank_statement_rows", "finance_bank_suggestion_rules",
       "finance_accounting_years", "finance_year_end_transfers", "finance_tax_types",
       "finance_transaction_evidence", "finance_journal_numbering", "finance_bank_statement_account_mappings",
-      "finance_actor_attribution", "finance_bank_statement_suggestions", "finance_paypal_statement_keys",
+      "finance_actor_attribution", "finance_bank_statement_suggestions", "finance_paypal_statement_keys", "finance_booking_purposes",
     ],
     message: "This location has Finance & Giving data. A matching Finance snapshot is required to transfer it.",
   },

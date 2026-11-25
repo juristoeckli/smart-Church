@@ -1,3 +1,4 @@
+import { BookingPurposesPanel, type BookingPurpose } from "./BookingPurposesPanel";
 import { FinanceMasterDataImport } from "./FinanceMasterDataImport";
 import { FinanceTransactionEvidence } from "./FinanceTransactionEvidence";
 import { FinanceCostCenterTransfer } from "./FinanceCostCenterTransfer";
@@ -91,7 +92,7 @@ type BankImport = { id: string; fileName: string; importedAt: string; rowCount: 
 type PaypalBookingMode = "payment" | "transfer";
 type BankRow = { paypal: { grossCents: number; feeCents: number; currency: string } | null; id: string; accountId: string; lineNumber: number; bookingDate: string; description: string; reference: string; amountCents: number; status: "unmatched" | "suggested" | "matched" | "ignored"; suggestedTransactionId: string | null; matchedTransactionId: string | null; transactionReceipt: string | null; transactionText: string | null };
 type StatementCounterLine = { key: string; accountId: string; costCenterId: string; amount: string };
-type BankPosting = { row: BankRow; lines: StatementCounterLine[]; paypalMode: PaypalBookingMode; feeAccountId: string };
+type BankPosting = { row: BankRow; lines: StatementCounterLine[]; paypalMode: PaypalBookingMode; feeAccountId: string; purposeId?: string };
 type StatementReviewDraft = { posting: BankPosting; receiptNumber: string; bookingText: string; manualReceipt: boolean; submissionId: string | null };
 const newCounterLine = (): StatementCounterLine => ({ key: crypto.randomUUID(), accountId: "", costCenterId: "", amount: "" });
 type BankSuggestionRule = { id: string; accountId: string; accountCode: string; accountName: string; name: string; statementContains: string; transactionContains: string; priority: number; active: boolean };
@@ -121,6 +122,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [exportFormat, setExportFormat] = useState<"csv" | "xlsx" | "html" | "pdf">("csv");
   const [bootstrap, setBootstrap] = useState<Bootstrap>({ currency: "CHF", accounts: [], costCenters: [], donors: [], years: [], accountingYears: [], budgets: [] });
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [bookingPurposes, setBookingPurposes] = useState<BookingPurpose[]>([]);
   const [statement, setStatement] = useState<StatementLine[]>([]);
   const [statementFrom, setStatementFrom] = useState("");
   const [statementTo, setStatementTo] = useState("");
@@ -205,6 +207,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     statementReviewDrafts.current.clear();
     setBankPosting(null);
     setShowPosting(false);
+    setBookingPurposes([]);
     setBankText(""); setBankFileName(""); setBankPreview(null); setBankSourceConfirmed(false); setBankRememberSource(false); setBankAccountId("");
   }, [departmentId]);
   const [bankFileName, setBankFileName] = useState("");
@@ -240,8 +243,13 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
       if (transactionCostCenterId) params.set("costCenterId", transactionCostCenterId);
       if (transactionTo) params.set("to", transactionTo);
       if (transactionPostedOnly) params.set("postedOnly", "true");
-      const [next, result] = await Promise.all([send<Bootstrap>("/api/modules/finance/bootstrap"), send<TransactionPage>(`/api/modules/finance/transactions?${params}`)]);
+      const [next, result, purposes] = await Promise.all([
+        send<Bootstrap>("/api/modules/finance/bootstrap"),
+        send<TransactionPage>(`/api/modules/finance/transactions?${params}`),
+        canManage ? send<BookingPurpose[]>("/api/modules/finance/booking-purposes") : Promise.resolve([]),
+      ]);
       if (version !== loadVersion.current) return;
+      setBookingPurposes(purposes);
       setBootstrap(next); setCurrencyDraft(next.currency); setTransactions(result.items); setTransactionTotal(result.total);
       if (next.accountingYears.length && !next.accountingYears.some((item) => item.accountingYear === Number(year))) {
         const todayYear = next.accountingYears.find((item) => item.startDate.slice(0, 10) <= today() && item.endDate.slice(0, 10) >= today());
@@ -254,7 +262,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     } finally {
       if (version === loadVersion.current) setLoading(false);
     }
-  }, [send, year, query, statementAccount, bankAccountId, transactionFrom, transactionTo, transactionPage, transactionSort, transactionDonorId, transactionAccountId, transactionCostCenterId, transactionPostedOnly]);
+  }, [send, canManage, year, query, statementAccount, bankAccountId, transactionFrom, transactionTo, transactionPage, transactionSort, transactionDonorId, transactionAccountId, transactionCostCenterId, transactionPostedOnly]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -350,8 +358,22 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
       && bootstrap.accounts.some(account => account.active && account.id === line.accountId && account.id !== bankAsset.id)
       && (!line.costCenterId || bootstrap.costCenters.some(center => center.active && center.id === line.costCenterId)))));
 
+  const purposeAmount = paypal?.grossCents ?? bankPosting?.row.amountCents ?? 0;
+  const availablePurposes = bankPosting && bankPosting.lines.length === 1 && purposeAmount !== 0
+    && (!paypal || bankPosting.paypalMode === "payment")
+    ? bookingPurposes.filter(purpose => purpose.usable && purpose.bankAccountId === bankPosting.row.accountId
+      && purpose.direction === (purposeAmount > 0 ? "income" : "expense")) : [];
+
+  function applyBookingPurpose(id: string) {
+    const choice = availablePurposes.find(purpose => purpose.id === id);
+    setBankPosting(current => current && {
+      ...current, purposeId: choice?.id,
+      lines: choice ? [{ ...current.lines[0]!, accountId: choice.counterAccountId, costCenterId: choice.costCenterId }] : current.lines,
+    });
+  }
+
   function updateBankCounterLine(key: string, changes: Partial<Omit<StatementCounterLine, "key">>) {
-    setBankPosting(current => current && { ...current, lines: current.lines.map(line =>
+    setBankPosting(current => current && { ...current, purposeId: undefined, lines: current.lines.map(line =>
       line.key === key ? { ...line, ...changes } : line) });
   }
 
@@ -411,10 +433,19 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     ] : lines.map((line) => ({ accountId: line.accountId, costCenterId: line.costCenterId || null, donorId: line.donorId || null, debitCents: Math.round(Number(line.debit || 0) * 100), creditCents: Math.round(Number(line.credit || 0) * 100), text: line.text }));
     if (automaticReceipt) journalSubmissionId.current ??= crypto.randomUUID();
     await action(async () => { await send("/api/modules/finance/transactions", "POST", {
-      bookingDate,bookingText,lines:payload,...(bankPosting ? { bankStatementRowId: bankPosting.row.id, ...(paypal ? { paypalBookingMode: bankPosting.paypalMode } : {}) } : {}),...(automaticReceipt ? {submissionId:journalSubmissionId.current} : {receiptNumber}),
+      bookingDate,bookingText,lines:payload,...(bankPosting ? { bankStatementRowId: bankPosting.row.id, ...(bankPosting.purposeId ? { bookingPurposeId: bankPosting.purposeId } : {}), ...(paypal ? { paypalBookingMode: bankPosting.paypalMode } : {}) } : {}),...(automaticReceipt ? {submissionId:journalSubmissionId.current} : {receiptNumber}),
     }); closePosting(); setReceiptNumber(""); setBookingText(""); setLines([initialLine(), initialLine()]);
       if (bankPosting) await openBankImport(selectedBankImportId);
     }, bankPosting ? "Transaction posted and matched to the statement row." : "Transaction posted and recorded in the audit trail.");
+  }
+
+  async function saveBookingPurpose(purpose: Omit<BookingPurpose, "id" | "usable">, id?: string) {
+    let saved = false;
+    await action(async () => {
+      await send(`/api/modules/finance/booking-purposes${id ? `/${id}` : ""}`, id ? "PUT" : "POST", purpose);
+      saved = true;
+    }, id ? "Booking purpose updated." : "Booking purpose added.");
+    return saved;
   }
 
   async function postTransfer(event: FormEvent<HTMLFormElement>) {
@@ -1033,6 +1064,12 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         </nav>}
         <p className="finance-form-wide">{bankAsset?.code} · {bankAsset?.name} · {money(bankPosting.row.amountCents, bootstrap.currency)}
           {bankPosting.row.reference && <> · {bankPosting.row.reference}</>}</p>
+        {availablePurposes.length > 0 && <label className="finance-form-wide">Booking purpose
+          <select value={bankPosting.purposeId ?? ""} onChange={event => applyBookingPurpose(event.target.value)}>
+            <option value="">Choose a purpose</option>
+            {availablePurposes.map(purpose => <option key={purpose.id} value={purpose.id}>{purpose.name}</option>)}
+          </select>
+        </label>}
         {paypal ? <>
           <dl className="finance-form-wide">
             <dt>PayPal gross</dt><dd>{money(paypal.grossCents, paypal.currency)}</dd>
@@ -1043,7 +1080,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
           <label>PayPal posting type
             <select value={bankPosting.paypalMode} onChange={event => {
               const paypalMode = event.target.value as PaypalBookingMode;
-              setBankPosting({ ...bankPosting, paypalMode, lines: [newCounterLine()] });
+              setBankPosting({ ...bankPosting, paypalMode, purposeId: undefined, lines: [newCounterLine()] });
             }}>
               <option value="payment">Payment or refund</option>
               <option value="transfer" disabled={paypal.grossCents === 0}>{t("Money in transit")}</option>
@@ -1099,7 +1136,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         </div>)}
         <div className="finance-form-wide finance-action-row">
           <button type="button" className="finance-text-button" disabled={bankPosting.lines.length >= 99}
-            onClick={() => setBankPosting({ ...bankPosting, lines: [...bankPosting.lines, newCounterLine()] })}>Add split line</button>
+            onClick={() => setBankPosting({ ...bankPosting, purposeId: undefined, lines: [...bankPosting.lines, newCounterLine()] })}>Add split line</button>
           {isBankSplit && <span aria-live="polite">{Number.isSafeInteger(splitTotal)
             ? splitTotal > bankAmount ? `Over by ${money(splitTotal - bankAmount, bootstrap.currency)}`
               : `Remaining ${money(bankAmount - splitTotal, bootstrap.currency)}`
@@ -1129,6 +1166,8 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
           : t("Debits the destination and credits clearing. Use the same clearing account and amount as the outgoing leg.")}</p>
       </fieldset> : <><div className="finance-journal-lines"><div className="finance-journal-header"><strong>Journal lines</strong><button className="finance-text-button" type="button" onClick={() => setLines((current) => [...current, initialLine()])}><Plus size={14} />{t("Add line")}</button></div>{lines.map((line, index) => <div className="finance-journal-line" key={index}><select aria-label={`${t("Account")} ${index + 1}`} required value={line.accountId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, accountId: event.target.value } : item))}><option value="">{t("Choose a bank or cash account")}</option>{bootstrap.accounts.filter((account) => account.active).map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select><select aria-label={`${t("Cost center")} ${index + 1}`} value={line.costCenterId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, costCenterId: event.target.value } : item))}><option value="">{t("Choose cost center")}</option>{bootstrap.costCenters.filter((center) => center.active).map((center) => <option key={center.id} value={center.id}>{center.code} · {center.name}</option>)}</select><select aria-label={`${t("Donor")} ${index + 1}`} value={line.donorId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, donorId: event.target.value } : item))}><option value="">{t("Donor")}</option>{bootstrap.donors.filter((donor) => donor.active).map((donor) => <option key={donor.id} value={donor.id}>{donor.displayName}</option>)}</select><input aria-label={t("Debit")} type="number" min="0" step="0.01" placeholder={t("Debit")} value={line.debit} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, debit: event.target.value, credit: event.target.value ? "" : item.credit } : item))} /><input aria-label={t("Credit")} type="number" min="0" step="0.01" placeholder={t("Credit")} value={line.credit} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, credit: event.target.value, debit: event.target.value ? "" : item.debit } : item))} /><input aria-label="Line memo" placeholder="Line memo" value={line.text} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, text: event.target.value } : item))} />{lines.length > 2 && <button className="finance-close" type="button" onClick={() => setLines((current) => current.filter((_, row) => row !== index))}>{t("Remove")}</button>}</div>)}</div><div className={Math.abs(totals.debit - totals.credit) < 0.005 && totals.debit > 0 ? "finance-balanced" : "finance-unbalanced"}>{Math.abs(totals.debit - totals.credit) < 0.005 && totals.debit > 0 ? t("Balanced") : `${t("Difference")}: ${money(Math.round((totals.debit - totals.credit) * 100), bootstrap.currency)}`} · {t("Debit")} {money(Math.round(totals.debit * 100), bootstrap.currency)} / {t("Credit")} {money(Math.round(totals.credit * 100), bootstrap.currency)}</div></>}<p className="finance-security-note">Posted entries are permanent. Corrections create an equal and opposite dated transaction.</p><div className="finance-form-actions"><button className="button button-secondary" type="button" onClick={closePosting}>Cancel</button><button className="button button-primary" type="submit" disabled={saving || (bankPosting ? !bankPostingValid : transitDraft ? !transitValid : bootstrap.accounts.filter(account => account.active).length < 2 || Math.abs(totals.debit - totals.credit) >= 0.005 || totals.debit === 0)}>{bankPosting ? "Post and match" : t("Post transaction")}</button></div></form></section></div>}
     {showAccount && <div className="finance-overlay"><section className="finance-dialog" role="dialog" aria-modal="true"><header><h2>{t("New account")}</h2><button className="finance-close" type="button" onClick={() => setShowAccount(false)}>×</button></header><form onSubmit={(event) => void addAccount(event)} className="finance-form-grid"><label>{t("Account code")}<input required maxLength={32} value={accountDraft.code} onChange={(event) => setAccountDraft({ ...accountDraft, code: event.target.value })} /></label><label>{t("Name")}<input required maxLength={160} value={accountDraft.name} onChange={(event) => setAccountDraft({ ...accountDraft, name: event.target.value })} /></label><label>{t("Type")}<select value={accountDraft.accountType} onChange={(event) => setAccountDraft({ ...accountDraft, accountType: event.target.value as Account["accountType"] })}>{["asset", "liability", "equity", "income", "expense"].map((type) => <option key={type}>{type}</option>)}</select></label><div className="finance-form-actions"><button className="button button-primary" type="submit" disabled={saving}>{t("Save account")}</button></div></form></section></div>}
+    {tab === "accounts" && canManage && <BookingPurposesPanel key={departmentId} purposes={bookingPurposes}
+      accounts={bootstrap.accounts} centers={bootstrap.costCenters} busy={saving} save={saveBookingPurpose} />}
     {tab === "accounts" && <section className="finance-section">
       <h3>Tax types</h3>
       <p>Reference rates for your location. These rates do not calculate taxes or post entries.</p>
@@ -1153,6 +1192,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     {showBudget && <div className="finance-overlay"><section className="finance-dialog" role="dialog" aria-modal="true"><header><h2>{t("Budgets")}</h2><button className="finance-close" type="button" onClick={() => setShowBudget(false)}>×</button></header><form onSubmit={(event) => void addBudget(event)} className="finance-form-grid"><label>{t("Budget year")}<select required value={budgetDraft.accountingYear} onChange={(event) => setBudgetDraft({ ...budgetDraft, accountingYear: event.target.value })}>{bootstrap.accountingYears.filter((item) => item.status === "open").map((item) => <option key={item.accountingYear} value={item.accountingYear}>{item.label}</option>)}</select></label><label>{t("Amount")} ({bootstrap.currency})<input required type="number" min="0" step="0.01" value={budgetDraft.amount} onChange={(event) => setBudgetDraft({ ...budgetDraft, amount: event.target.value })} /></label><label>{t("Account")}<select value={budgetDraft.accountId} onChange={(event) => setBudgetDraft({ ...budgetDraft, accountId: event.target.value })}><option value="">—</option>{bootstrap.accounts.map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select></label><label>{t("Cost center")}<select value={budgetDraft.costCenterId} onChange={(event) => setBudgetDraft({ ...budgetDraft, costCenterId: event.target.value })}><option value="">—</option>{bootstrap.costCenters.map((center) => <option key={center.id} value={center.id}>{center.code} · {center.name}</option>)}</select></label><label className="finance-form-wide">Note<input maxLength={500} value={budgetDraft.note} onChange={(event) => setBudgetDraft({ ...budgetDraft, note: event.target.value })} /></label><div className="finance-form-actions"><button className="button button-primary" type="submit" disabled={saving || (!budgetDraft.accountId && !budgetDraft.costCenterId) || bootstrap.accountingYears.every((item) => item.status !== "open")}>{t("Save budget")}</button></div></form></section></div>}
     {transactionDetail && <div className="finance-overlay" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setTransactionDetail(null)}><section className="finance-dialog" role="dialog" aria-modal="true" aria-labelledby="finance-detail-title"><header><div><span className="eyebrow">{transactionDetail.bookingDate}</span><h2 id="finance-detail-title">{transactionDetail.receiptNumber} · {transactionDetail.bookingText}</h2><p>{transactionDetail.status} · accounting year {transactionDetail.accountingYear}{transactionDetail.isCostCenterTransfer && " · Cost-center transfer"}</p></div><button className="finance-close" type="button" onClick={() => setTransactionDetail(null)} aria-label="Close">×</button></header><div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>{t("Account")}</th><th>{t("Cost center")}</th><th>{t("Donor")}</th><th>{t("Debit")}</th><th>{t("Credit")}</th><th>Line memo</th></tr></thead><tbody>{transactionDetail.lines.map((line) => <tr key={line.id}><td>{line.accountCode} · {line.accountName}</td><td>{line.costCenterName ?? "—"}</td><td>{line.donorName ?? "—"}</td><td>{money(line.debitCents, bootstrap.currency)}</td><td>{money(line.creditCents, bootstrap.currency)}</td><td>{line.text}</td></tr>)}</tbody></table></div>{transactionDetail.status === "posted" && <FinanceTransactionEvidence key={departmentId + ":" + transactionDetail.id}
       transactionId={transactionDetail.id} departmentId={departmentId} csrfToken={csrfToken} canManage={canManage} />}
-      {canManage && transactionDetail.status === "draft" && transactionDetail.audit.some((item) => item.action === "churchtools-journal-draft-created" || item.action === "churchtools-journal-split-draft-created") && <DraftPostingReview key={transactionDetail.id} transactionId={transactionDetail.id} departmentId={departmentId} onPosted={async () => { await openTransaction(transactionDetail); await load(); setFeedback("Reviewed draft posted."); }} />}<h3>Audit history</h3><ol className="finance-audit-list">{transactionDetail.audit.map((item, index) => <li key={`${item.action}-${index}`}><strong>{item.action.replaceAll("_", " ")}</strong><span>{item.actorName ?? "System"} · {new Date(item.createdAt).toLocaleString()}</span>{typeof item.details.reason === "string" && <p>{item.details.reason}</p>}</li>)}</ol></section></div>}
+      {canManage && transactionDetail.status === "draft" && transactionDetail.audit.some((item) => item.action === "churchtools-journal-draft-created" || item.action === "churchtools-journal-split-draft-created") && <DraftPostingReview key={transactionDetail.id} transactionId={transactionDetail.id} departmentId={departmentId} onPosted={async () => { await openTransaction(transactionDetail); await load(); setFeedback("Reviewed draft posted."); }} />}<h3>Audit history</h3><ol className="finance-audit-list">{transactionDetail.audit.map((item, index) => <li key={`${item.action}-${index}`}><strong>{item.action.replaceAll("_", " ")}</strong><span>{item.actorName ?? "System"} · {new Date(item.createdAt).toLocaleString()}</span>{typeof item.details.reason === "string" && <p>{item.details.reason}</p>}
+      {typeof item.details.bookingPurposeName === "string" && <p>Booking purpose · {item.details.bookingPurposeName}</p>}</li>)}</ol></section></div>}
   </main>;
 }

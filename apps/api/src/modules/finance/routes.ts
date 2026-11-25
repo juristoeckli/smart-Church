@@ -1,3 +1,4 @@
+import { readBookingPurpose, registerBookingPurposes } from "./booking-purposes.js";
 import { maximumArchiveUploadLength, readStatementArchive } from "./bank-statement-archive.js";
 import { parsePaypalActivity, type PaypalDateOrder, type PaypalEntry, isPaypalActivityHeader } from "./paypal-activity.js";
 import { bankStatementSuggestions, currentBankStatus, currentBankSuggestion } from "./bank-suggestions.js";
@@ -19,7 +20,7 @@ import type { Pool, PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type FinanceLineInput = { accountId: string; costCenterId?: string | null; donorId?: string | null; debitCents: number; creditCents: number; text?: string };
-type FinanceTransactionBody = { bookingDate: string; receiptNumber?: string; submissionId?: string; bankStatementRowId?: string; paypalBookingMode?: "payment" | "transfer"; bookingText: string; lines: FinanceLineInput[] };
+type FinanceTransactionBody = { bookingDate: string; receiptNumber?: string; submissionId?: string; bankStatementRowId?: string; bookingPurposeId?: string; paypalBookingMode?: "payment" | "transfer"; bookingText: string; lines: FinanceLineInput[] };
 type FinanceLineRow = { id: string; line_number: number; account_id: string; account_code: string; account_name: string; account_type: string; cost_center_id: string | null; cost_center_name: string | null; donor_id: string | null; donor_name: string | null; debit_cents: string | number; credit_cents: string | number; line_text: string };
 
 const uuid = { type: "string", format: "uuid" } as const;
@@ -30,7 +31,7 @@ const lineSchema = {
 } as const;
 const transactionSchema = {
   type: "object", additionalProperties: false, required: ["bookingDate", "bookingText", "lines"],
-  properties: { submissionId:uuid, bankStatementRowId: uuid, paypalBookingMode: { type: "string", enum: ["payment", "transfer"] }, bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
+  properties: { submissionId:uuid, bankStatementRowId: uuid, bookingPurposeId: uuid, paypalBookingMode: { type: "string", enum: ["payment", "transfer"] }, bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
 } as const;
 
 function cleanText(value: string) { return value.trim().replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " "); }
@@ -878,6 +879,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { items: result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents) })), total: Number(count.rows[0]?.total ?? 0), page, pageSize };
   });
 
+  registerBookingPurposes(app, context, { department, cleanText, audit, publish });
   registerCostCenterTransfers(app,context,{ department,audit,publish,periodForDate,cleanText,validDateOnly });
   registerTransactionEvidence(app,context,{department,audit});
   registerJournalNumbering(app,context,department,audit);
@@ -898,10 +900,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const actorId = request.authenticatedUser?.id ?? null;
     const bankRowId = request.body.bankStatementRowId?.toLowerCase();
     const paypalMode = request.body.paypalBookingMode;
+    const purposeId = request.body.bookingPurposeId?.toLowerCase();
+    if (purposeId && !bankRowId) return reply.code(400).send({ error: "Choose a statement row to apply a booking purpose." });
     if (paypalMode && !bankRowId) return reply.code(400).send({ error: "Choose a PayPal statement row to post." });
     const submissionHash = automatic ? createHash("sha256").update(JSON.stringify([bookingDate,bookingText,
       lines.map(line => [line.accountId.toLowerCase(),line.costCenterId?.toLowerCase() ?? null,line.donorId?.toLowerCase() ?? null,
-        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : []), ...(paypalMode ? [paypalMode] : [])])).digest("hex") : null;
+        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : []), ...(paypalMode ? [paypalMode] : []), ...(purposeId ? [purposeId] : [])])).digest("hex") : null;
     const client = await pool!.connect();
     let accountingYear = 0;
     try {
@@ -930,6 +934,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }
       }
       let bankImportId: string | undefined;
+      let purposeAudit: { bookingPurposeId: string; bookingPurposeName: string } | undefined;
       let paypalAudit: { paypalBookingMode: "payment" | "transfer"; paypalGrossCents: number; paypalFeeCents: number; paypalCurrency: string } | undefined;
       if (bankRowId) {
         const { rows: [row] } = await client.query<{
@@ -997,6 +1002,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           }
           paypalAudit = { paypalBookingMode: paypalMode, paypalGrossCents: Number(gross), paypalFeeCents: Number(fee), paypalCurrency: paypal.currency_code };
         }
+        if (purposeId) {
+          const purpose = await readBookingPurpose(client, departmentId, purposeId);
+          const payment = lines.find(line => line !== bankLine);
+          const gross = paypalAudit?.paypalGrossCents ?? Number(row.amount_cents);
+          const direction = gross > 0 ? "income" : "expense";
+          if (!purpose || gross === 0 || paypalMode === "transfer" || (!paypalMode && lines.length !== 2)
+            || purpose.direction !== direction || purpose.bankAccountId !== row.account_id
+            || purpose.counterAccountId !== payment?.accountId.toLowerCase()
+            || purpose.costCenterId !== payment?.costCenterId?.toLowerCase()) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "The booking purpose is no longer available for these statement details. Review the counteraccount and cost center before posting." });
+          }
+          purposeAudit = { bookingPurposeId: purpose.id, bookingPurposeName: purpose.name };
+        }
         bankImportId = row.import_id;
       }
       const configured = await periodForDate(client, departmentId, bookingDate);
@@ -1033,9 +1052,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query(`UPDATE finance_bank_statement_rows SET status='matched', matched_transaction_id=$3,
           reconciled_by=$4, reconciled_at=now() WHERE department_id=$1 AND id=$2`, [departmentId,bankRowId,id,actorId]);
         await audit(client, departmentId, request, "bank_statement_row_matched", "bank_statement_row", bankRowId,
-          { importId: bankImportId, transactionId: id, createdPosting: true, ...paypalAudit });
+          { importId: bankImportId, transactionId: id, createdPosting: true, ...paypalAudit, ...purposeAudit });
       }
-      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...paypalAudit, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
+      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...paypalAudit, ...purposeAudit, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
