@@ -1602,7 +1602,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const newResourceBookings = request.body.newResourceBookings;
     if (newResourceBookings) {
       if (isContributor || calendar.scope === "personal") return responseError(reply, 403, "Shared calendar management is required to book resources with an appointment.");
-      if (normalized.recurrence) return responseError(reply, 400, "Create new resource bookings with a one-time appointment.");
     }
     if (createEventTemplateId) {
       if (isContributor || !canManageServiceEvents(request)) {
@@ -1712,7 +1711,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           canManageResources: isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")),
           startsAt: normalized.startsAt, endsAt: normalized.endsAt, authoredTimeZone: normalized.timeZone,
           allDay: normalized.allDay ?? false, privateTitle: calendar.scope === "group" || normalized.internalOnly === true,
-          title: normalized.title, selections: newResourceBookings,
+          title: normalized.title, selections: newResourceBookings, recurrence: normalized.recurrence,
         });
         if (result.error !== undefined) {
           await client.query("ROLLBACK");

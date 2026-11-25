@@ -10,8 +10,8 @@ export type CalendarDraftResource = {
   resourceId: string; quantity: number; leadInMinutes: number; cleanupMinutes: number;
 };
 
-export function CalendarDraftResources({ draftDate, headers, selections, onChange, disabled }: {
-  draftDate: string; headers: Record<string, string>; selections: CalendarDraftResource[];
+export function CalendarDraftResources({ draftDate, recurring, headers, selections, onChange, disabled }: {
+  draftDate: string; recurring: boolean; headers: Record<string, string>; selections: CalendarDraftResource[];
   onChange: (items: CalendarDraftResource[]) => void; disabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -55,7 +55,9 @@ export function CalendarDraftResources({ draftDate, headers, selections, onChang
     disabled={disabled || !day} onClick={() => setOpen(true)}>Book resources with this appointment</button></div>;
   return <section className="church-calendar-extra-date wide" aria-label="Book resources with this appointment">
     <strong>New resource bookings</strong>
-    <small>Resources are requested for the appointment’s start and end. Availability is checked when you save.</small>
+    <small>{recurring
+      ? "This requests the selected resources for every occurrence. Choose a repeat end or count, or enter manual dates. The whole series must fit in the next twelve months. A conflict on any date prevents the save."
+      : "Resources are requested for the appointment’s start and end. Availability is checked when you save."}</small>
     {error && <p role="alert">{error}</p>}
     {!data && !error && <p role="status">Loading resources…</p>}
     {data && <label>Add resource<select value="" disabled={disabled || !available.length || selections.length >= 20} onChange={(event) => add(event.target.value)}>
