@@ -9,7 +9,7 @@ type Step =
   | { kind: "addToGroup"; targetGroupId: string; role: string; status: Status }
   | { kind: "removeMembership" };
 type Routine = { id: string; name: string; role: string; status: Status; steps: Step[]; enabled: boolean };
-type Run = { id: string; routineId: string; memberName: string; phase: "queued" | "waiting" | "completed" | "cancelled" | "failed"; nextStep: number; dueAt: string; outcome: string | null };
+type Run = { id: string; routineId: string; memberName: string; phase: "queued" | "waiting" | "completed" | "cancelled" | "failed"; nextStep: number; dueAt: string; updatedAt: string; outcome: string | null };
 type Data = { active: boolean; canChangeMembership: boolean; roles: string[]; assignees: Array<{id: string; name: string}>; routines: Routine[]; runs: Run[]; targetGroups: Array<{id: string; name: string}> };
 type Props = Pick<ModuleContext, "departmentId" | "csrfToken" | "realtime"> & { groupId: string };
 const statuses: Record<Status, string> = { active: "Active", paused: "Paused", waitlist: "Waitlist" };
@@ -181,9 +181,24 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
       <h3>Member progress</h3>
       <div className="go-list">{data.runs.map((run) => {
         const routine = data.routines.find((item) => item.id === run.routineId);
+        const failedStep = run.phase === "failed" ? routine?.steps[run.nextStep] : undefined;
+        const canRecover = failedStep && routine?.enabled && data.active && (data.canChangeMembership || !routine.steps.some(membershipStep));
+        const canSkip = canRecover && !terminal(failedStep) && (failedStep.kind !== "addToGroup" ||
+          !routine.steps.slice(run.nextStep + 1).some(({ kind }) => kind === "removeMembership"));
+        function recover(action: "retry" | "skip") {
+          if (action === "skip" && !window.confirm("Skip this failed step and continue the routine?")) return;
+          void mutate("POST", "/runs/" + run.id + "/recover", { action, expectedUpdatedAt: run.updatedAt },
+            action === "retry" ? "Step queued for retry." : "Step skipped. Routine queued.");
+        }
+
         return <article key={run.id}><div><strong>{run.memberName}</strong><small>{routine?.name} · {phases[run.phase]}</small>
           {run.phase === "waiting" && <small>Wait ends {new Date(run.dueAt).toLocaleString()}{routine && routine.steps[run.nextStep] ? ` · Next: ${stepLabel(routine.steps[run.nextStep], data.targetGroups)}` : ""}</small>}
+          {failedStep && <small>Failed step: {stepLabel(failedStep, data.targetGroups)}</small>}
           {run.outcome && <p>{run.outcome}</p>}</div>
+          {canRecover && <div className="form-actions">
+            <button className="button button-secondary" type="button" disabled={busy} onClick={() => recover("retry")}>Retry failed step</button>
+            {canSkip && <button className="button button-secondary" type="button" disabled={busy} onClick={() => recover("skip")}>Skip failed step</button>}
+          </div>}
           {run.phase === "waiting" && <button className="button button-secondary" type="button" disabled={busy}
             onClick={() => void mutate("POST", "/runs/" + run.id + "/skip-wait", {}, "Wait released.")}>Skip wait</button>}
         </article>;

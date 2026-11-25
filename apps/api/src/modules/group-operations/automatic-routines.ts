@@ -94,7 +94,8 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
          FROM group_automatic_routines WHERE department_id=$1 AND group_id=$2 ORDER BY lower(trigger_role),trigger_status`, args),
       pool!.query(`SELECT progress.id,progress.routine_id AS "routineId",progress.contact_id AS "contactId",
           person.first_name || ' ' || person.last_name AS "memberName",progress.phase,progress.next_step AS "nextStep",
-          progress.due_at AS "dueAt",progress.outcome
+          progress.due_at AS "dueAt",progress.outcome,
+          to_char(progress.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt"
         FROM group_automatic_routine_runs progress
         JOIN contacts person ON person.id=progress.contact_id AND person.department_id=progress.department_id
         WHERE progress.department_id=$1 AND progress.group_id=$2
@@ -207,4 +208,59 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
     if (!waiting.rowCount) { reply.code(409).send({ error: "This member is no longer waiting in the routine." }); return null; }
     return { action: "automatic-routine-wait-released", response: { released: true } };
   }));
+
+  app.post<{ Params: GroupParams & { runId: string }; Body: { action: "retry" | "skip"; expectedUpdatedAt: string } }>(
+    base + "/runs/:runId/recover", { schema: {
+      params: { ...groupParams, required: ["groupId", "runId"], properties: { groupId: uuid, runId: uuid } },
+      body: { type: "object", additionalProperties: false, required: ["action", "expectedUpdatedAt"], properties: {
+        action: { type: "string", enum: ["retry", "skip"] },
+        expectedUpdatedAt: { type: "string", format: "date-time", maxLength: 32 },
+      } },
+    } }, async (request, reply) => mutate(request, reply, async (client, { departmentId, groupId, actorId, active }, canChangeMembership) => {
+      const { runId } = request.params;
+      const { action, expectedUpdatedAt } = request.body;
+      if (!active) { reply.code(409).send({ error: "Activate the group before recovering a failed routine." }); return null; }
+      const args = [departmentId, groupId, runId];
+      const { rows: [run] } = await client.query<{ routine_id: string; contact_id: string; next_step: number }>(
+        `SELECT routine_id,contact_id,next_step FROM group_automatic_routine_runs
+           WHERE department_id=$1 AND group_id=$2 AND id=$3 AND phase='failed' AND updated_at=$4::timestamptz`,
+        [...args, expectedUpdatedAt],
+      );
+      if (!run) { reply.code(409).send({ error: "This routine progress changed. Reload it before trying again." }); return null; }
+      const { rows: [rule] } = await client.query<{ steps: RoutineStep[]; authorized_by: string | null; trigger_role: string; trigger_status: MemberStatus }>(
+        `SELECT steps,authorized_by,trigger_role,trigger_status FROM group_automatic_routines
+           WHERE department_id=$1 AND group_id=$2 AND id=$3 AND enabled FOR SHARE`,
+        [departmentId, groupId, run.routine_id],
+      );
+      const step = rule?.steps[run.next_step];
+      if (!rule || !step) { reply.code(409).send({ error: "An enabled routine and failed step are required." }); return null; }
+      const requiresMembership = rule.steps.some(requiresMembershipAuthority);
+      if (requiresMembership && !canChangeMembership) { reply.code(403).send({ error: "Group membership management is required to recover this routine." }); return null; }
+      const authority = await automaticRoutineAuthority(client, departmentId, groupId, rule.authorized_by);
+      if (!authority?.manage_group || (requiresMembership && !authority.manage_members)) {
+        reply.code(409).send({ error: "Restore the routine owner's required permissions before continuing." }); return null;
+      }
+      if (action === "skip" && (isTerminalMembershipStep(step) ||
+        step.kind === "addToGroup" && rule.steps.slice(run.next_step + 1).some(({ kind }) => kind === "removeMembership"))) {
+        reply.code(409).send({ error: "This step protects group membership and must succeed before the routine can continue." }); return null;
+      }
+      const member = await client.query(
+        `SELECT 1 FROM group_members WHERE group_id=$1 AND contact_id=$2 AND lower(trim(role))=lower(trim($3)) AND status=$4 FOR UPDATE`,
+        [groupId, run.contact_id, rule.trigger_role, rule.trigger_status],
+      );
+      if (!member.rowCount) { reply.code(409).send({ error: "The member no longer matches this routine's role and status." }); return null; }
+      const updated = await client.query(
+        `UPDATE group_automatic_routine_runs SET phase='queued',next_step=next_step+$5::integer,due_at=now(),outcome=NULL,updated_at=clock_timestamp()
+           WHERE department_id=$1 AND group_id=$2 AND id=$3 AND phase='failed' AND updated_at=$4::timestamptz
+             AND NOT EXISTS (SELECT 1 FROM group_automatic_routine_runs other WHERE other.group_id=$2
+               AND other.contact_id=$6 AND other.phase IN ('queued','waiting'))
+           RETURNING id`,
+        [...args, expectedUpdatedAt, action === "skip" ? 1 : 0, run.contact_id],
+      );
+      if (!updated.rowCount) { reply.code(409).send({ error: "This routine progress changed or the member has since started another run." }); return null; }
+      await client.query(`INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details)
+        VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('step',$7::integer))`,
+        [randomUUID(), departmentId, groupId, actorId, "automatic_routine_" + action, runId, run.next_step]);
+      return { action: "automatic-routine-recovery", response: { queued: true } };
+    }));
 }
