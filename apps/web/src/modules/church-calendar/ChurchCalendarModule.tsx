@@ -1,3 +1,4 @@
+import { CalendarEmailUpdates } from "./CalendarEmailUpdates";
 import { CalendarTimeGrid } from "./CalendarTimeGrid";
 import { CalendarBookingDescription } from "./CalendarBookingDescription";
 import { CalendarEmbedCode } from "./CalendarEmbedCode";
@@ -819,6 +820,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
           {calendar.hasSubscription && <button type="button" className="church-calendar-feed-button" disabled={busy} onClick={() => void changeSubscription(calendar, "DELETE")}>Revoke</button>}
         </div>)}
       </section>}
+      <CalendarEmailUpdates key={JSON.stringify([accountId, departmentId])} departmentId={departmentId} csrfToken={csrfToken} />
       {canManageTags && <CalendarPublicAgendas key={`${accountId ?? ""}:${departmentId}`} departmentId={departmentId} csrfToken={csrfToken}
         calendars={selectionLocation.current === departmentId ? calendars.filter((calendar) => calendar.scope === "community" && calendar.hasPublicFeed) : []} />}
       {issuedFeed?.departmentId === departmentId && <section className="church-calendar-feed-result" aria-label="Calendar link">

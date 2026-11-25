@@ -1,3 +1,4 @@
+import { registerCalendarEmailSubscriptions } from "./email-subscriptions.js";
 import { registerCalendarBookingDescriptions } from "./booking-descriptions.js";
 import { loadPublicAgenda, registerCalendarAgendaPublications } from "./calendar-agenda-publications.js";
 import { calendarEmbedContentPolicy, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
@@ -265,6 +266,7 @@ async function moveCalendarOccurrenceLinks(db: PoolClient, oldId: string, newId:
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  registerCalendarEmailSubscriptions(app, context);
   registerCalendarReplication(context);
   registerAppointmentTemplates(app, context, canManageCalendar);
   registerCalendarTagDefinitions(app, context, (request) => canManageCalendar(request, "community", null));

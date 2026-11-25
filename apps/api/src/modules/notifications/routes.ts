@@ -1,3 +1,4 @@
+import { canDeliverCalendarEmail, queueCalendarEmailUpdates } from "../church-calendar/email-subscriptions.js";
 import { activeResourceBookingRequestNotice } from "../../resource-booking-notices.js";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
@@ -20,7 +21,7 @@ function activeCalendarMeetingRequestNotice() {
 
 type NotificationRow = {
   id: string;
-  kind: "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed" | "report_ready" | "resource_booking" | "resource_booking_request" | "calendar_appointment_updated" | "calendar_meeting_request";
+  kind: "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed" | "report_ready" | "resource_booking" | "resource_booking_request" | "calendar_appointment_updated" | "calendar_meeting_request" | "calendar_new_appointments";
   title: string;
   body: string;
   event_id: string | null;
@@ -30,7 +31,7 @@ type NotificationRow = {
   read_at: Date | string | null;
 };
 
-type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; notification_email_enabled: boolean; email_suppressed: boolean; personal_announcement: boolean; personal_recipient_current: boolean; title: string; body: string; template_subject: string | null; template_body: string | null; attempt_count: number };
+type PendingEmail = { calendar_email_update: boolean; notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; notification_email_enabled: boolean; email_suppressed: boolean; personal_announcement: boolean; personal_recipient_current: boolean; title: string; body: string; template_subject: string | null; template_body: string | null; attempt_count: number };
 type ResendWebhookPayload = { type?: string; data?: { email_id?: string; to?: string[]; [key: string]: unknown } };
 type StoredResendEvent = { provider_event_id: string; event_type: string; provider_email_id: string };
 type StoredWebhookEvent = { provider_event_id: string; event_type: string; provider_email_id: string; received_at: Date | string; processed_at: Date | string | null };
@@ -368,6 +369,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        AND person.id=CASE WHEN swap.status IN ('pending','cancelled') THEN swap.target_contact_id ELSE swap.requester_contact_id END
                    ))) AS email_enabled,
                   notification.email_enabled AS notification_email_enabled,
+                  notification.kind='calendar_new_appointments' AS calendar_email_update,
                   (suppressed.email IS NOT NULL) AS email_suppressed,
                   COALESCE(batch.audience='people',false) AS personal_announcement,
                   (account.is_enabled AND NOT account.is_service_user AND trim(account.email)=trim(delivery.recipient_email) AND EXISTS (
@@ -389,12 +391,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         if (!result.rowCount) { await client.query("COMMIT"); break; }
         const delivery = result.rows[0];
-        if (delivery.personal_announcement && !await context.lockDepartmentForWrite(client, delivery.department_id)) {
+        if ((delivery.personal_announcement || delivery.calendar_email_update) && !await context.lockDepartmentForWrite(client, delivery.department_id)) {
           await client.query("ROLLBACK");
           break;
         }
         if (!delivery.email_enabled || !delivery.notification_email_enabled || !delivery.current_email || delivery.email_suppressed
-            || (delivery.personal_announcement && !delivery.personal_recipient_current)) {
+            || (delivery.personal_announcement && !delivery.personal_recipient_current)
+            || (delivery.calendar_email_update && !await canDeliverCalendarEmail(client, delivery.notification_id,
+              delivery.department_id, delivery.recipient_user_id, delivery.recipient_email))) {
           await client.query("UPDATE module_notification_email_deliveries SET status='skipped',last_error=CASE WHEN $2 THEN 'Address suppressed after a bounce or complaint.' ELSE NULL END,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.email_suppressed]);
           await client.query("COMMIT");
           continue;
@@ -402,7 +406,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const attempts = delivery.attempt_count + 1;
         try {
           const emailContent = renderNotificationEmail(delivery.title, delivery.body, process.env.SMART_CHURCH_WEB_ORIGIN, delivery.recipient_language, { subjectTemplate: delivery.template_subject, bodyTemplate: delivery.template_body });
-          const recipient = delivery.personal_announcement ? { recipientEmail: delivery.recipient_email.trim() } : { recipientUserId: delivery.recipient_user_id };
+          const recipient = delivery.personal_announcement || delivery.calendar_email_update ? { recipientEmail: delivery.recipient_email.trim() } : { recipientUserId: delivery.recipient_user_id };
           const sent = await context.email.send({ ...recipient, ...emailContent }, delivery.department_id);
           await client.query("UPDATE module_notification_email_deliveries SET recipient_email=$2,provider_email_id=$3,status='sent',attempt_count=$4,sent_at=now(),last_error=NULL,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.current_email, sent.messageId, attempts]);
         } catch (error) {
@@ -497,6 +501,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           await deliverCalendarReminders(pool, await writableDepartmentIds(), context.lockDepartmentForWrite);
         } catch (error) { app.log.error({ err: error }, "Could not deliver Calendar reminders."); }
       }
+      if (pool && isServerModuleEnabled("church-calendar")) {
+        try {
+          await queueCalendarEmailUpdates(pool, await writableDepartmentIds(), context.lockDepartmentForWrite);
+        } catch (error) { app.log.error({ err: error }, "Could not queue Calendar email updates."); }
+      }
       await deliverPendingEmails();
       await processPendingWebhookEvents();
     } finally {
@@ -522,7 +531,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           department_id UUID NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
           recipient_user_id UUID NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
           sender_user_id UUID REFERENCES app_users(id) ON DELETE SET NULL,
-          kind TEXT NOT NULL CHECK (kind IN ('announcement', 'event_reminder', 'service_request', 'follow_up_assignment', 'follow_up_reminder', 'community_feed', 'report_ready', 'resource_booking', 'resource_booking_request','calendar_appointment_updated','calendar_meeting_request')),
+          kind TEXT NOT NULL CHECK (kind IN ('announcement', 'event_reminder', 'service_request', 'follow_up_assignment', 'follow_up_reminder', 'community_feed', 'report_ready', 'resource_booking', 'resource_booking_request','calendar_appointment_updated','calendar_meeting_request','calendar_new_appointments')),
           title TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 120),
           body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
           event_id UUID REFERENCES service_events(id) ON DELETE CASCADE,
@@ -573,7 +582,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         END $$;
         CREATE INDEX IF NOT EXISTS idx_module_notifications_announcement_batch
           ON module_notifications (department_id, announcement_batch_id) WHERE announcement_batch_id IS NOT NULL;
-        ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed','report_ready','resource_booking','resource_booking_request','calendar_appointment_updated','calendar_meeting_request'));
+        ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed','report_ready','resource_booking','resource_booking_request','calendar_appointment_updated','calendar_meeting_request','calendar_new_appointments'));
         DROP INDEX IF EXISTS module_notifications_follow_up_unique_idx;
         CREATE UNIQUE INDEX IF NOT EXISTS module_notifications_follow_up_unique_idx
           ON module_notifications (department_id,recipient_user_id,kind,related_event_id,related_contact_id)

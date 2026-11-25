@@ -16,12 +16,13 @@ const tables = {
   agendaCalendars: { name: "church_calendar_agenda_calendars", key: "publication_id,position", columns: "publication_id calendar_id position" },
   subscriptions: { name: "church_calendar_subscriptions", key: "calendar_id,user_id", columns: "calendar_id user_id token_hash" },
   bookingLinks: { name: "church_calendar_resource_links", key: "appointment_id,resource_booking_id", child: true, columns: "appointment_id resource_booking_id occurrence_start created_by historical_actor_id historical_actor_name" },
+  emailSubscriptions: { name: "church_calendar_email_subscriptions", key: "calendar_id,user_id", columns: "calendar_id user_id cadence checked_through next_check_at notice_id notice_since" },
   reminders: { name: "church_calendar_reminders", key: "id", columns: "id appointment_id user_id original_start minutes_before clock_time clock_time_zone next_check_at delivered_at" },
   meetingRequests: { name: "church_calendar_meeting_requests", key: "appointment_id,original_start,recipient_user_id", columns: "appointment_id original_start recipient_user_id notice_id invited_by scheduled_start scheduled_end status invited_at responded_at historical_actor_id historical_actor_name", child: true },
 } satisfies Record<string, { name: string; columns: string; key: string; child?: boolean }>;
 type Table = keyof typeof tables;
 type Row = Record<string, unknown>;
-type Snapshot = { version: 1; calendarBookingEvidence?: string } & Record<Table, Row[]>;
+type Snapshot = { version: 3; calendarBookingEvidence?: string } & Record<Table, Row[]>;
 const keys = Object.keys(tables) as Table[];
 const wallTimes = new Set(["starts_at", "ends_at", "original_start", "occurrence_start"]);
 const tokenTables = ["feeds", "agendaPublications", "subscriptions"] as const;
@@ -36,7 +37,7 @@ function record(value: unknown): value is Row {
 }
 
 function readSnapshot(input: unknown): Snapshot {
-  if (!record(input) || input.version !== 1) throw new Error("The Church Calendar snapshot is invalid.");
+  if (!record(input) || input.version !== 3) throw new Error("The Church Calendar snapshot is invalid.");
   for (const key of keys) {
     const columns = tables[key].columns.split(" ");
     const rows = input[key];
@@ -86,10 +87,11 @@ function assertDependencies(snapshot: Snapshot, core: unknown) {
   if ([...snapshot.calendars.filter((row) => row.scope === "personal").map((row) => row.owner_user_id),
     ...snapshot.meetingRequests.map((row) => row.recipient_user_id),
     ...snapshot.reminders.map((row) => row.user_id), ...snapshot.subscriptions.map((row) => row.user_id),
+    ...snapshot.emailSubscriptions.map((row) => row.user_id),
   ].some((id) => !members.has(id))) throw new Error(memberBlocker);
   if (snapshot.calendars.some((row) => (row.group_id !== null && !groups.has(row.group_id)) ||
         (row.default_service_plan_template_id !== null && !serviceTemplates.has(row.default_service_plan_template_id))) ||
-      [...snapshot.appointments, ...snapshot.templates, ...snapshot.feeds, ...snapshot.agendaCalendars, ...snapshot.subscriptions].some((row) => !calendars.has(row.calendar_id)) ||
+      [...snapshot.appointments, ...snapshot.templates, ...snapshot.feeds, ...snapshot.agendaCalendars, ...snapshot.subscriptions, ...snapshot.emailSubscriptions].some((row) => !calendars.has(row.calendar_id)) ||
       [...snapshot.exceptions, ...snapshot.dates, ...snapshot.images, ...snapshot.reminders, ...snapshot.meetingRequests].some((row) => !appointments.has(row.appointment_id)) ||
       snapshot.agendaCalendars.some((row) => !publications.has(row.publication_id))) {
     throw new Error("Church Calendar references missing calendars, appointments, group audiences, service templates or agenda publications.");
@@ -117,7 +119,7 @@ function assertDependencies(snapshot: Snapshot, core: unknown) {
 }
 
 async function collect(client: Pick<PoolClient, "query">, departmentId: string): Promise<Snapshot> {
-  const snapshot = { version: 1 } as Snapshot;
+  const snapshot = { version: 3 } as Snapshot;
   for (const key of keys) {
     const table = tables[key];
     const columns = table.columns.split(" ").map((column) => {
@@ -176,7 +178,7 @@ export function registerCalendarReplication(context: ModuleServerContext) {
     return totals.rows[0].count;
   };
   context.replication.register({
-    schemaVersion: "2",
+    schemaVersion: "3",
     async requiresSnapshot(departmentId) {
       if (!pool || !isDatabaseReady()) return false;
       return Boolean(await count(pool, departmentId) || (await blockers(pool, departmentId)).length);
