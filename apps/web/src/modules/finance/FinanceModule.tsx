@@ -88,7 +88,8 @@ type ReceiptSettings = { organizationName: string; templateText: string; numberi
 type ReceiptPreview = { donorId: string; donorName: string; donorEmail: string; amountCents: number; donationCount: number };
 type IssuedReceipt = { id: string; batchId: string; receiptNumber: string; donorName: string; amountCents: number; currency: string; periodStart: string; periodEnd: string; printUrl: string; batchPrintUrl: string; createdAt?: string };
 type BankImport = { id: string; fileName: string; importedAt: string; rowCount: number; accountCode: string; accountName: string; matched: number; suggested: number; unmatched: number; ignored: number };
-type BankRow = { id: string; accountId: string; lineNumber: number; bookingDate: string; description: string; reference: string; amountCents: number; status: "unmatched" | "suggested" | "matched" | "ignored"; suggestedTransactionId: string | null; matchedTransactionId: string | null; transactionReceipt: string | null; transactionText: string | null };
+type PaypalBookingMode = "payment" | "transfer";
+type BankRow = { paypal: { grossCents: number; feeCents: number; currency: string } | null; id: string; accountId: string; lineNumber: number; bookingDate: string; description: string; reference: string; amountCents: number; status: "unmatched" | "suggested" | "matched" | "ignored"; suggestedTransactionId: string | null; matchedTransactionId: string | null; transactionReceipt: string | null; transactionText: string | null };
 type StatementCounterLine = { key: string; accountId: string; costCenterId: string; amount: string };
 const newCounterLine = (): StatementCounterLine => ({ key: crypto.randomUUID(), accountId: "", costCenterId: "", amount: "" });
 type BankSuggestionRule = { id: string; accountId: string; accountCode: string; accountName: string; name: string; statementContains: string; transactionContains: string; priority: number; active: boolean };
@@ -149,7 +150,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showPosting, setShowPosting] = useState(false);
-  const [bankPosting, setBankPosting] = useState<{ row: BankRow; lines: StatementCounterLine[] } | null>(null);
+  const [bankPosting, setBankPosting] = useState<{ row: BankRow; lines: StatementCounterLine[]; paypalMode: PaypalBookingMode; feeAccountId: string } | null>(null);
   const [transitDraft, setTransitDraft] = useState<TransitDraft | null>(null);
   const [manualReceipt,setManualReceipt] = useState(false);
   const journalSubmissionId=useRef<string|null>(null);
@@ -321,10 +322,20 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const isBankSplit = (bankPosting?.lines.length ?? 0) > 1;
   const counterAmounts = bankPosting?.lines.map(line => isBankSplit ? postingAmountCents(line.amount) : bankAmount) ?? [];
   const splitTotal = counterAmounts.reduce((sum, amount) => sum + amount, 0);
+  const paypal = bankPosting?.row.paypal;
+  const activeCounterAccounts = bootstrap.accounts.filter(account => account.active && account.id !== bankAsset?.id);
+  const paypalCounterAccounts = activeCounterAccounts.filter(account =>
+    bankPosting?.paypalMode === "transfer" ? account.accountType === "asset" : account.accountType !== "asset");
+  const paypalPaymentCounter = bankPosting?.lines[0];
+  const paypalFeeAccounts = activeCounterAccounts.filter(account => account.accountType === "expense");
+  const paypalValid = Boolean(bankPosting && paypal && paypal.currency === bootstrap.currency
+    && (paypal.grossCents === 0 ? bankPosting.paypalMode === "payment" : paypalCounterAccounts.some(account => account.id === bankPosting.lines[0]?.accountId))
+    && (!paypalPaymentCounter?.costCenterId || bootstrap.costCenters.some(center => center.active && center.id === paypalPaymentCounter.costCenterId))
+    && (paypal.feeCents === 0 || paypalFeeAccounts.some(account => account.id === bankPosting.feeAccountId)));
   const bankPostingValid = Boolean(bankPosting && bankAsset && Number.isSafeInteger(bankAmount) && bankAmount > 0
-    && splitTotal === bankAmount && bankPosting.lines.every((line, index) => counterAmounts[index] > 0
+    && (paypal ? paypalValid : splitTotal === bankAmount && bankPosting.lines.every((line, index) => counterAmounts[index] > 0
       && bootstrap.accounts.some(account => account.active && account.id === line.accountId && account.id !== bankAsset.id)
-      && (!line.costCenterId || bootstrap.costCenters.some(center => center.active && center.id === line.costCenterId))));
+      && (!line.costCenterId || bootstrap.costCenters.some(center => center.active && center.id === line.costCenterId)))));
 
   function updateBankCounterLine(key: string, changes: Partial<Omit<StatementCounterLine, "key">>) {
     setBankPosting(current => current && { ...current, lines: current.lines.map(line =>
@@ -338,7 +349,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     setBookingDate(row.bookingDate.slice(0, 10));
     setBookingText((row.description || row.reference || "Bank statement posting").slice(0, 500));
     setTransitDraft(null);
-    setBankPosting({ row, lines: [newCounterLine()] });
+    setBankPosting({ row, lines: [newCounterLine()], paypalMode: "payment", feeAccountId: "" });
     setShowPosting(true);
   }
 
@@ -349,18 +360,24 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     const transitCredit = transitDraft?.leg === "outgoing" ? transitDraft.bankAccount : transitDraft?.clearingAccount;
     const bankDebit = Math.max(0, bankPosting?.row.amountCents ?? 0);
     const bankCredit = Math.max(0, -(bankPosting?.row.amountCents ?? 0));
+    const paypalCounter = (accountId: string, signedCents: number, costCenterId?: string) => ({
+      accountId, costCenterId: costCenterId || null, debitCents: Math.max(0, signedCents), creditCents: Math.max(0, -signedCents),
+    });
     const payload = bankPosting ? [
       { accountId: bankPosting.row.accountId, debitCents: bankDebit, creditCents: bankCredit },
-      ...bankPosting.lines.map((line, index) => ({ accountId: line.accountId, costCenterId: line.costCenterId || null,
+      ...(paypal ? [
+        ...(paypal.grossCents ? [paypalCounter(bankPosting.lines[0]!.accountId, -paypal.grossCents, bankPosting.lines[0]!.costCenterId)] : []),
+        ...(paypal.feeCents ? [paypalCounter(bankPosting.feeAccountId, -paypal.feeCents)] : []),
+      ] : bankPosting.lines.map((line, index) => ({ accountId: line.accountId, costCenterId: line.costCenterId || null,
         debitCents: bankCredit > 0 ? counterAmounts[index] : 0,
-        creditCents: bankDebit > 0 ? counterAmounts[index] : 0 })),
+        creditCents: bankDebit > 0 ? counterAmounts[index] : 0 }))),
     ] : transitDebit && transitCredit ? [
       { accountId: transitDebit, debitCents: transitCents, creditCents: 0 },
       { accountId: transitCredit, debitCents: 0, creditCents: transitCents },
     ] : lines.map((line) => ({ accountId: line.accountId, costCenterId: line.costCenterId || null, donorId: line.donorId || null, debitCents: Math.round(Number(line.debit || 0) * 100), creditCents: Math.round(Number(line.credit || 0) * 100), text: line.text }));
     if (automaticReceipt) journalSubmissionId.current ??= crypto.randomUUID();
     await action(async () => { await send("/api/modules/finance/transactions", "POST", {
-      bookingDate,bookingText,lines:payload,...(bankPosting ? { bankStatementRowId: bankPosting.row.id } : {}),...(automaticReceipt ? {submissionId:journalSubmissionId.current} : {receiptNumber}),
+      bookingDate,bookingText,lines:payload,...(bankPosting ? { bankStatementRowId: bankPosting.row.id, ...(paypal ? { paypalBookingMode: bankPosting.paypalMode } : {}) } : {}),...(automaticReceipt ? {submissionId:journalSubmissionId.current} : {receiptNumber}),
     }); setShowPosting(false); setReceiptNumber(""); setBookingText(""); setLines([initialLine(), initialLine()]);
       setBankPosting(null);
       if (bankPosting) await openBankImport(selectedBankImportId);
@@ -959,6 +976,44 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         <legend>Statement details</legend>
         <p className="finance-form-wide">{bankAsset?.code} · {bankAsset?.name} · {money(bankPosting.row.amountCents, bootstrap.currency)}
           {bankPosting.row.reference && <> · {bankPosting.row.reference}</>}</p>
+        {paypal ? <>
+          <dl className="finance-form-wide">
+            <dt>PayPal gross</dt><dd>{money(paypal.grossCents, paypal.currency)}</dd>
+            <dt>PayPal fee</dt><dd>{money(paypal.feeCents, paypal.currency)}</dd>
+            <dt>PayPal net</dt><dd>{money(bankPosting.row.amountCents, paypal.currency)}</dd>
+          </dl>
+          {paypal.currency !== bootstrap.currency && <p role="alert">This PayPal row uses a different currency from the ledger.</p>}
+          <label>PayPal posting type
+            <select value={bankPosting.paypalMode} onChange={event => {
+              const paypalMode = event.target.value as PaypalBookingMode;
+              setBankPosting({ ...bankPosting, paypalMode, lines: [newCounterLine()] });
+            }}>
+              <option value="payment">Payment or refund</option>
+              <option value="transfer" disabled={paypal.grossCents === 0}>{t("Money in transit")}</option>
+            </select>
+          </label>
+          {paypal.grossCents !== 0 && <label>{bankPosting.paypalMode === "transfer" ? t("Clearing account") : "Payment counteraccount"}
+            <select required value={bankPosting.lines[0]?.accountId ?? ""} onChange={event =>
+              updateBankCounterLine(bankPosting.lines[0]!.key, { accountId: event.target.value })}>
+              <option value="">Choose an account</option>
+              {paypalCounterAccounts.map(account => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}
+            </select>
+          </label>}
+          {paypal.grossCents !== 0 && bankPosting.paypalMode === "payment" && <label>{t("Cost center")}
+            <select value={paypalPaymentCounter?.costCenterId ?? ""} onChange={event =>
+              updateBankCounterLine(bankPosting.lines[0]!.key, { costCenterId: event.target.value })}>
+              <option value="">{t("Choose cost center")}</option>
+              {bootstrap.costCenters.filter(center => center.active).map(center => <option key={center.id} value={center.id}>{center.code} · {center.name}</option>)}
+            </select>
+          </label>}
+          {paypal.feeCents !== 0 && <label>PayPal fee expense account
+            <select required value={bankPosting.feeAccountId} onChange={event => setBankPosting({ ...bankPosting, feeAccountId: event.target.value })}>
+              <option value="">Choose an expense account</option>
+              {paypalFeeAccounts.map(account => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}
+            </select>
+          </label>}
+          {bankPosting.paypalMode === "transfer" && <p className="finance-form-wide">Use the same clearing account on the other statement when the transfer settles.</p>}
+        </> : <>
         {bankPosting.lines.map((line, index) => <div className="finance-form-grid finance-form-wide" key={line.key}>
           <label>{isBankSplit ? `Counteraccount ${index + 1}` : "Counteraccount"}
             <select required value={line.accountId} onChange={event => updateBankCounterLine(line.key, { accountId: event.target.value })}>
@@ -993,6 +1048,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
               : `Remaining ${money(bankAmount - splitTotal, bootstrap.currency)}`
             : "Enter smaller split amounts."}</span>}
         </div>
+        </>}
       </fieldset> : transitDraft ? <fieldset className="finance-form-grid" disabled={saving}>
         <legend>{t("Transfer leg")}</legend>
         <label>{t("Direction")}<select value={transitDraft.leg} onChange={event => {

@@ -18,7 +18,7 @@ import type { Pool, PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type FinanceLineInput = { accountId: string; costCenterId?: string | null; donorId?: string | null; debitCents: number; creditCents: number; text?: string };
-type FinanceTransactionBody = { bookingDate: string; receiptNumber?: string; submissionId?: string; bankStatementRowId?: string; bookingText: string; lines: FinanceLineInput[] };
+type FinanceTransactionBody = { bookingDate: string; receiptNumber?: string; submissionId?: string; bankStatementRowId?: string; paypalBookingMode?: "payment" | "transfer"; bookingText: string; lines: FinanceLineInput[] };
 type FinanceLineRow = { id: string; line_number: number; account_id: string; account_code: string; account_name: string; account_type: string; cost_center_id: string | null; cost_center_name: string | null; donor_id: string | null; donor_name: string | null; debit_cents: string | number; credit_cents: string | number; line_text: string };
 
 const uuid = { type: "string", format: "uuid" } as const;
@@ -29,7 +29,7 @@ const lineSchema = {
 } as const;
 const transactionSchema = {
   type: "object", additionalProperties: false, required: ["bookingDate", "bookingText", "lines"],
-  properties: { submissionId:uuid, bankStatementRowId: uuid, bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
+  properties: { submissionId:uuid, bankStatementRowId: uuid, paypalBookingMode: { type: "string", enum: ["payment", "transfer"] }, bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
 } as const;
 
 function cleanText(value: string) { return value.trim().replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " "); }
@@ -896,9 +896,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const id = automatic ? request.body.submissionId!.toLowerCase() : randomUUID();
     const actorId = request.authenticatedUser?.id ?? null;
     const bankRowId = request.body.bankStatementRowId?.toLowerCase();
+    const paypalMode = request.body.paypalBookingMode;
+    if (paypalMode && !bankRowId) return reply.code(400).send({ error: "Choose a PayPal statement row to post." });
     const submissionHash = automatic ? createHash("sha256").update(JSON.stringify([bookingDate,bookingText,
       lines.map(line => [line.accountId.toLowerCase(),line.costCenterId?.toLowerCase() ?? null,line.donorId?.toLowerCase() ?? null,
-        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : [])])).digest("hex") : null;
+        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : []), ...(paypalMode ? [paypalMode] : [])])).digest("hex") : null;
     const client = await pool!.connect();
     let accountingYear = 0;
     try {
@@ -927,6 +929,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }
       }
       let bankImportId: string | undefined;
+      let paypalAudit: { paypalBookingMode: "payment" | "transfer"; paypalGrossCents: number; paypalFeeCents: number; paypalCurrency: string } | undefined;
       if (bankRowId) {
         const { rows: [row] } = await client.query<{
           import_id: string; account_id: string; amount_cents: string; booking_date: string; status: string;
@@ -954,6 +957,44 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           || !bankLine || BigInt(bankLine.debitCents - bankLine.creditCents) !== BigInt(row.amount_cents)) {
           await client.query("ROLLBACK");
           return reply.code(400).send({ error: "The booking date and signed bank amount must match the statement row." });
+        }
+        const { rows: [paypal] } = await client.query<{ gross_cents: string; fee_cents: string; currency_code: string }>(
+          "SELECT gross_cents::text, fee_cents::text, currency_code FROM finance_paypal_statement_keys WHERE department_id=$1 AND row_id=$2",
+          [departmentId, bankRowId],
+        );
+        if (Boolean(paypal) !== Boolean(paypalMode)) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: paypal ? "Choose how to post this PayPal statement row." : "PayPal posting requires a PayPal statement row." });
+        }
+        if (paypal && paypalMode) {
+          if (paypal.currency_code !== await statementCurrency(departmentId, client, "share")) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "The PayPal statement currency no longer matches this ledger." });
+          }
+          const gross = BigInt(paypal.gross_cents);
+          const fee = BigInt(paypal.fee_cents);
+          const expected = [-gross, -fee].filter(amount => amount !== 0n);
+          const counters = lines.filter(line => line !== bankLine);
+          if (gross + fee !== BigInt(row.amount_cents) || (paypalMode === "transfer" && gross === 0n)
+            || counters.length !== expected.length
+            || counters.some((line, index) => BigInt(line.debitCents - line.creditCents) !== expected[index])) {
+            await client.query("ROLLBACK");
+            return reply.code(400).send({ error: "The PayPal journal must preserve the imported gross amount, fee and signed net amount." });
+          }
+          const accounts = await client.query<{ id: string; account_type: string }>(
+            "SELECT id, account_type FROM finance_accounts WHERE department_id=$1 AND id=ANY($2::uuid[]) AND active ORDER BY id FOR SHARE",
+            [departmentId, lines.map(line => line.accountId)],
+          );
+          const accountTypes = new Map(accounts.rows.map(account => [account.id, account.account_type]));
+          const grossType = gross === 0n ? undefined : accountTypes.get(counters[0]!.accountId.toLowerCase());
+          const feeType = fee === 0n ? undefined : accountTypes.get(counters.at(-1)!.accountId.toLowerCase());
+          if (accountTypes.get(row.account_id) !== "asset"
+            || (gross !== 0n && (!grossType || (grossType === "asset") !== (paypalMode === "transfer")))
+            || (fee !== 0n && feeType !== "expense")) {
+            await client.query("ROLLBACK");
+            return reply.code(400).send({ error: "Use an active payment counteraccount or clearing asset, and an expense account for PayPal fees." });
+          }
+          paypalAudit = { paypalBookingMode: paypalMode, paypalGrossCents: Number(gross), paypalFeeCents: Number(fee), paypalCurrency: paypal.currency_code };
         }
         bankImportId = row.import_id;
       }
@@ -991,9 +1032,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query(`UPDATE finance_bank_statement_rows SET status='matched', matched_transaction_id=$3,
           reconciled_by=$4, reconciled_at=now() WHERE department_id=$1 AND id=$2`, [departmentId,bankRowId,id,actorId]);
         await audit(client, departmentId, request, "bank_statement_row_matched", "bank_statement_row", bankRowId,
-          { importId: bankImportId, transactionId: id, createdPosting: true });
+          { importId: bankImportId, transactionId: id, createdPosting: true, ...paypalAudit });
       }
-      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
+      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...paypalAudit, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -1690,8 +1731,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get<{ Params: { id: string } }>("/api/modules/finance/bank-statements/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     const result = await pool!.query(`SELECT row.id,imported.account_id AS "accountId",row.line_number AS "lineNumber",row.booking_date AS "bookingDate",row.description,row.reference,row.amount_cents AS "amountCents",${currentBankStatus("row", "suggestion")} AS status,
-      CASE WHEN row.status IN ('unmatched','suggested') THEN ${currentBankSuggestion("row", "suggestion")} END AS "suggestedTransactionId",row.matched_transaction_id AS "matchedTransactionId",transaction.receipt_number AS "transactionReceipt",transaction.booking_text AS "transactionText"
+      CASE WHEN row.status IN ('unmatched','suggested') THEN ${currentBankSuggestion("row", "suggestion")} END AS "suggestedTransactionId",row.matched_transaction_id AS "matchedTransactionId",transaction.receipt_number AS "transactionReceipt",transaction.booking_text AS "transactionText",
+      CASE WHEN paypal.row_id IS NOT NULL THEN json_build_object('grossCents', paypal.gross_cents, 'feeCents', paypal.fee_cents, 'currency', paypal.currency_code) END AS paypal
       FROM finance_bank_statement_rows row JOIN finance_bank_statement_imports imported ON imported.department_id=row.department_id AND imported.id=row.import_id LEFT JOIN finance_bank_statement_suggestions suggestion ON suggestion.department_id=row.department_id AND suggestion.row_id=row.id
+      LEFT JOIN finance_paypal_statement_keys paypal ON paypal.department_id=row.department_id AND paypal.row_id=row.id
       LEFT JOIN finance_transactions transaction ON transaction.department_id=row.department_id AND transaction.id=CASE
         WHEN row.status='matched' THEN row.matched_transaction_id
         WHEN row.status IN ('unmatched','suggested') THEN ${currentBankSuggestion("row", "suggestion")} END
