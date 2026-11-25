@@ -71,22 +71,23 @@ function PeopleFieldList({ fields, canManage, onSave, onMove }: {
       const group = fieldsByCategory.get(field.category ?? "") ?? [];
       const index = group.indexOf(field);
       return <div key={field.id}>
-      <p><strong>{field.label}</strong> · {field.fieldKey} · {field.type}{field.required ? " · required" : ""}{field.category ? " · " + field.category : ""}</p>
-      {canManage && <form className="module-toolbar" key={JSON.stringify([field.visibility, field.category, field.textMaxLength])} onSubmit={(event) => void onSave(event, field)}>
-        <label>Field category<input name="category" aria-label={`Category of ${field.label}`} list="people-field-categories" maxLength={60} defaultValue={field.category ?? ""}/></label>
-        {field.type === "text" && <label>Maximum characters<input name="textMaxLength" aria-label={"Maximum characters for " + field.label} type="number" min={1} max={2000} placeholder="Default: 2000" defaultValue={field.textMaxLength ?? ""}/></label>}
-        <label>Visibility<select name="visibility" aria-label={`Visibility of ${field.label}`} defaultValue={field.visibility ?? "private_people"}>
-          <option value="private_people">Private People readers</option><option value="people_managers">People managers only</option>
-        </select></label>
-        <button type="submit">Save field settings</button>
-        {!type && !visibility && group.length > 1 && <>
-          <button type="button" aria-label={"Move " + field.label + " up within its category"}
-            disabled={moving || index <= 0} onClick={() => void move(field, group[index - 1], "up")}>Move up</button>
-          <button type="button" aria-label={"Move " + field.label + " down within its category"}
-            disabled={moving || index >= group.length - 1} onClick={() => void move(field, group[index + 1], "down")}>Move down</button>
-        </>}
-      </form>}
-    </div>)}
+        <p><strong>{field.label}</strong> · {field.fieldKey} · {field.type}{field.required ? " · required" : ""}{field.category ? " · " + field.category : ""}</p>
+        {canManage && <form className="module-toolbar" key={JSON.stringify([field.visibility, field.category, field.textMaxLength])} onSubmit={(event) => void onSave(event, field)}>
+          <label>Field category<input name="category" aria-label={`Category of ${field.label}`} list="people-field-categories" maxLength={60} defaultValue={field.category ?? ""}/></label>
+          {field.type === "text" && <label>Maximum characters<input name="textMaxLength" aria-label={"Maximum characters for " + field.label} type="number" min={1} max={2000} placeholder="Default: 2000" defaultValue={field.textMaxLength ?? ""}/></label>}
+          <label>Visibility<select name="visibility" aria-label={`Visibility of ${field.label}`} defaultValue={field.visibility ?? "private_people"}>
+            <option value="private_people">Private People readers</option><option value="people_managers">People managers only</option>
+          </select></label>
+          <button type="submit">Save field settings</button>
+          {!type && !visibility && group.length > 1 && <>
+            <button type="button" aria-label={"Move " + field.label + " up within its category"}
+              disabled={moving || index <= 0} onClick={() => void move(field, group[index - 1], "up")}>Move up</button>
+            <button type="button" aria-label={"Move " + field.label + " down within its category"}
+              disabled={moving || index >= group.length - 1} onClick={() => void move(field, group[index + 1], "down")}>Move down</button>
+          </>}
+        </form>}
+      </div>;
+    })}
   </>;
 }
 
