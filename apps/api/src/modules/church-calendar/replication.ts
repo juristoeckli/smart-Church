@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
-import type { ModuleServerContext, ReplicationRestoreContext } from "../module-sdk.js";
+import { collectCalendarBookingEvidence, requireCalendarBookingModules, validateCalendarBookingSnapshots } from "../../calendar-booking-replication.js";
+import type { ModuleServerContext, ReplicationExportContext, ReplicationRestoreContext } from "../module-sdk.js";
 
 const tables = {
   calendars: { name: "church_calendar_calendars", key: "id", columns: "id name scope group_id owner_user_id color created_by created_at updated_at archived_at sort_order allow_member_appointments default_service_plan_template_id historical_actor_id historical_actor_name" },
@@ -14,19 +15,19 @@ const tables = {
   agendaPublications: { name: "church_calendar_agenda_publications", key: "id", columns: "id name token_hash created_by created_at revoked_at historical_actor_id historical_actor_name" },
   agendaCalendars: { name: "church_calendar_agenda_calendars", key: "publication_id,position", columns: "publication_id calendar_id position" },
   subscriptions: { name: "church_calendar_subscriptions", key: "calendar_id,user_id", columns: "calendar_id user_id token_hash" },
+  bookingLinks: { name: "church_calendar_resource_links", key: "appointment_id,resource_booking_id", child: true, columns: "appointment_id resource_booking_id occurrence_start created_by historical_actor_id historical_actor_name" },
   reminders: { name: "church_calendar_reminders", key: "id", columns: "id appointment_id user_id original_start minutes_before clock_time clock_time_zone next_check_at delivered_at" },
   meetingRequests: { name: "church_calendar_meeting_requests", key: "appointment_id,original_start,recipient_user_id", columns: "appointment_id original_start recipient_user_id notice_id invited_by scheduled_start scheduled_end status invited_at responded_at historical_actor_id historical_actor_name", child: true },
 } satisfies Record<string, { name: string; columns: string; key: string; child?: boolean }>;
 type Table = keyof typeof tables;
 type Row = Record<string, unknown>;
-type Snapshot = { version: 1 } & Record<Table, Row[]>;
+type Snapshot = { version: 1; calendarBookingEvidence?: string } & Record<Table, Row[]>;
 const keys = Object.keys(tables) as Table[];
 const wallTimes = new Set(["starts_at", "ends_at", "original_start", "occurrence_start"]);
 const tokenTables = ["feeds", "agendaPublications", "subscriptions"] as const;
 const jsonColumns = new Set(["recurrence", "overrides"]);
 const userColumns = new Set(["owner_user_id", "created_by", "updated_by", "uploaded_by", "actor_user_id", "invited_by", "user_id", "recipient_user_id"]);
 const tokenHash = /^[0-9a-f]{64}$/;
-const linkedBlocker = "Church Calendar standby cannot yet transfer links to Resource Scheduler bookings.";
 const scopeBlocker = "Calendar contains an appointment linked to a calendar in a different location.";
 const memberBlocker = "Church Calendar has a personal calendar or meeting request for an account outside the location.";
 
@@ -48,25 +49,27 @@ function readSnapshot(input: unknown): Snapshot {
 }
 
 
-async function blockers(client: Pick<PoolClient, "query">, departmentId: string) {
-  const state = await client.query<{ linked: boolean; stale_member: boolean; scheduler: boolean; invalid_scope: boolean }>(`SELECT
-    EXISTS (SELECT 1 FROM church_calendar_resource_links link
-      JOIN church_calendar_appointments appointment ON appointment.id=link.appointment_id
-      JOIN resource_bookings booking ON booking.id=link.resource_booking_id
-      WHERE appointment.department_id=$1 OR booking.department_id=$1) AS linked,
+async function linkBlocker(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
+  try {
+    requireCalendarBookingModules(await collectCalendarBookingEvidence(client, departmentId), replication);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "The Calendar booking links could not be verified.";
+  }
+}
+
+async function blockers(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
+  const state = await client.query<{ stale_member: boolean; invalid_scope: boolean }>(`SELECT
     EXISTS (SELECT 1 FROM church_calendar_calendars calendar WHERE calendar.department_id=$1 AND calendar.scope='personal'
       AND NOT EXISTS (SELECT 1 FROM department_memberships member WHERE member.department_id=$1 AND member.user_id=calendar.owner_user_id))
     OR EXISTS (SELECT 1 FROM church_calendar_meeting_requests request JOIN church_calendar_appointments appointment ON appointment.id=request.appointment_id
       WHERE appointment.department_id=$1
       AND NOT EXISTS (SELECT 1 FROM department_memberships member WHERE member.department_id=$1 AND member.user_id=request.recipient_user_id)) AS stale_member,
     EXISTS (SELECT 1 FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id
-      WHERE calendar.department_id<>appointment.department_id AND (calendar.department_id=$1 OR appointment.department_id=$1)) AS invalid_scope,
-    to_regclass('public.resource_booking_series') IS NOT NULL AS scheduler`, [departmentId]);
+      WHERE calendar.department_id<>appointment.department_id AND (calendar.department_id=$1 OR appointment.department_id=$1)) AS invalid_scope`, [departmentId]);
   const local = state.rows[0];
-  const linked = local.linked || (local.scheduler && (await client.query(`SELECT 1 FROM resource_booking_series series
-    LEFT JOIN church_calendar_appointments appointment ON appointment.id=series.linked_appointment_id
-    WHERE series.linked_appointment_id IS NOT NULL AND (series.department_id=$1 OR appointment.department_id=$1) LIMIT 1`, [departmentId])).rowCount);
-  return [linked ? linkedBlocker : null, local.stale_member ? memberBlocker : null, local.invalid_scope ? scopeBlocker : null].filter((value): value is string => !!value);
+  return [await linkBlocker(client, departmentId, replication), local.stale_member ? memberBlocker : null,
+    local.invalid_scope ? scopeBlocker : null].filter((value): value is string => !!value);
 }
 
 function assertDependencies(snapshot: Snapshot, core: unknown) {
@@ -173,20 +176,22 @@ export function registerCalendarReplication(context: ModuleServerContext) {
     return totals.rows[0].count;
   };
   context.replication.register({
-    schemaVersion: "1",
+    schemaVersion: "2",
     async requiresSnapshot(departmentId) {
       if (!pool || !isDatabaseReady()) return false;
       return Boolean(await count(pool, departmentId) || (await blockers(pool, departmentId)).length);
     },
-    async inspect(departmentId) {
+    async inspect(departmentId, replication) {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The Church Calendar database is unavailable."], recordCount: 0 };
-      const problems = await blockers(pool, departmentId);
+      const problems = await blockers(pool, departmentId, replication);
       return { ready: problems.length === 0, blockers: problems, recordCount: await count(pool, departmentId) };
     },
-    async exportSnapshot(client, departmentId) {
-      const problems = await blockers(client, departmentId);
+    async exportSnapshot(client, departmentId, replication) {
+      const problems = await blockers(client, departmentId, replication);
       if (problems.length) throw new Error(problems.join(" "));
-      return collect(client, departmentId);
+      const snapshot = await collect(client, departmentId);
+      const evidence = await collectCalendarBookingEvidence(client, departmentId);
+      return evidence ? { ...snapshot, calendarBookingEvidence: evidence } : snapshot;
     },
     prepareSnapshotForPeer: async (input, seal) => {
       const snapshot = readSnapshot(input);
@@ -204,17 +209,24 @@ export function registerCalendarReplication(context: ModuleServerContext) {
       })])) };
     },
     restoreDependencies: {
-      moduleIds: ["core-site"],
-      validate(input, dependencies) { assertDependencies(readSnapshot(input), dependencies.get("core-site")); },
+      moduleIds: ["core-site", "resource-scheduler"],
+      validate(input, dependencies) {
+        const core = dependencies.get("core-site");
+        assertDependencies(readSnapshot(input), core);
+        validateCalendarBookingSnapshots(input, dependencies.get("resource-scheduler"), core);
+      },
     },
-    async prepareRestore(client, departmentId, input) {
-      const problems = await blockers(client, departmentId);
+    async validateRestoreTarget(client, departmentId, input, replication) {
+      const problems = await blockers(client, departmentId, replication);
       const blocker = problems.find((problem) => problem !== memberBlocker);
       if (blocker) throw new Error(blocker);
       if (input === undefined) {
         if (await count(client, departmentId)) throw new Error("The incoming standby snapshot omits existing Church Calendar data.");
         return;
       }
+    },
+    async prepareRestore(client, departmentId, input) {
+      if (input === undefined) return;
       for (const key of ["calendars", "generations", "tags", "agendaPublications"] as const) {
         await client.query(`DELETE FROM ${tables[key].name} WHERE department_id=$1`, [departmentId]);
       }
@@ -228,6 +240,9 @@ export function registerCalendarReplication(context: ModuleServerContext) {
     async verifySnapshot(client, departmentId, input, restoreContext) {
       const snapshot = readSnapshot(input);
       const actual = await collect(client, departmentId);
+      if (snapshot.calendarBookingEvidence !== await collectCalendarBookingEvidence(client, departmentId)) {
+        return { ready: false, blockers: ["Restored Calendar and Scheduler booking links differ from the signed snapshot."] };
+      }
       for (const key of keys) {
         const rows = restoreContext ? snapshot[key].map((row) => mappedRow(row, restoreContext)) : snapshot[key];
         const signature = (items: Row[]) => items.map((row) => JSON.stringify(canonical(row))).sort();

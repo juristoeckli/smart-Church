@@ -362,6 +362,10 @@ async function restoreSiteModules(
     await contract.validate(snapshot, dependencies);
   }
   const exportContext = replicationExportContext(entries);
+  // Check existing cross-module relationships while every parent still exists.
+  for (const adapter of adapters.values()) {
+    await adapter.validateRestoreTarget?.(client, departmentId, prepared.get(adapter.moduleId)?.snapshot, exportContext);
+  }
   // Clear module-owned dependents before core replaces the referenced rows.
   // Adapters can also guard existing module data when the incoming manifest omits it.
   for (const adapter of adapters.values()) {

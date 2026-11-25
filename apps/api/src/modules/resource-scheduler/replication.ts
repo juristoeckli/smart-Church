@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
-import type { ModuleServerContext, ReplicationRestoreContext } from "../module-sdk.js";
+import { collectCalendarBookingEvidence, requireCalendarBookingModules, validateCalendarBookingSnapshots } from "../../calendar-booking-replication.js";
+import type { ModuleServerContext, ReplicationExportContext, ReplicationRestoreContext } from "../module-sdk.js";
 
 const tables = {
   settings: { name: "resource_scheduler_settings", columns: "resource_id total_units default_lead_in_minutes default_cleanup_minutes updated_at", key: "resource_id" },
@@ -13,13 +14,12 @@ const tables = {
 } satisfies Record<string, { name: string; columns: string; key: string; child?: boolean }>;
 type Table = keyof typeof tables;
 type Row = Record<string, unknown>;
-type Snapshot = { version: 1 } & Record<Table, Row[]>;
+type Snapshot = { version: 1; calendarBookingEvidence?: string } & Record<Table, Row[]>;
 const keys = Object.keys(tables) as Table[];
 const dateColumns = new Set(["all_day_date", "occurrence_date"]);
 const jsonColumns = new Set(["recurrence", "details"]);
 const userColumns = new Set(["requested_by", "created_by", "updated_by", "actor_user_id", "user_id"]);
 const tokenHash = /^[0-9a-f]{64}$/;
-const linkedBlocker = "Resource Scheduler standby cannot yet transfer bookings linked to Church Calendar.";
 const orphanMarkBlocker = "Resource Scheduler has saved marks for accounts that are no longer members of this location.";
 
 function record(value: unknown): value is Row {
@@ -39,16 +39,22 @@ function readSnapshot(input: unknown): Snapshot {
   return input as Snapshot;
 }
 
-async function blockers(client: Pick<PoolClient, "query">, departmentId: string) {
-  const state = await client.query<{ linked: boolean; orphan_mark: boolean; calendar_links: boolean }>(`SELECT
-    EXISTS (SELECT 1 FROM resource_booking_series WHERE department_id=$1 AND linked_appointment_id IS NOT NULL) AS linked,
-    EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=$1
-      AND NOT EXISTS (SELECT 1 FROM department_memberships member WHERE member.department_id=$1 AND member.user_id=mark.user_id)) AS orphan_mark,
-    to_regclass('public.church_calendar_resource_links') IS NOT NULL AS calendar_links`, [departmentId]);
-  const local = state.rows[0];
-  const linked = local?.linked || (local?.calendar_links && (await client.query(`SELECT 1 FROM church_calendar_resource_links link
-    JOIN resource_bookings booking ON booking.id=link.resource_booking_id WHERE booking.department_id=$1 LIMIT 1`, [departmentId])).rowCount);
-  return [linked ? linkedBlocker : null, local?.orphan_mark ? orphanMarkBlocker : null].filter((value): value is string => !!value);
+async function linkBlocker(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
+  try {
+    requireCalendarBookingModules(await collectCalendarBookingEvidence(client, departmentId), replication);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "The Calendar booking links could not be verified.";
+  }
+}
+
+async function blockers(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
+  const state = await client.query<{ orphan_mark: boolean }>(`SELECT EXISTS (
+    SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=$1
+      AND NOT EXISTS (SELECT 1 FROM department_memberships member WHERE member.department_id=$1 AND member.user_id=mark.user_id)
+  ) AS orphan_mark`, [departmentId]);
+  return [await linkBlocker(client, departmentId, replication),
+    state.rows[0]?.orphan_mark ? orphanMarkBlocker : null].filter((value): value is string => !!value);
 }
 
 function assertDependencies(snapshot: Snapshot, core: unknown) {
@@ -63,7 +69,6 @@ function assertDependencies(snapshot: Snapshot, core: unknown) {
   const members = new Set(rows("department_memberships").map((row) => row.user_id));
   const series = new Set(snapshot.series.map((row) => row.id));
   const occurrences = new Set(snapshot.occurrences.map((row) => `${row.series_id}:${row.resource_booking_id}`));
-  if (snapshot.series.some((row) => row.linked_appointment_id !== null)) throw new Error(linkedBlocker);
   if ([...snapshot.settings, ...snapshot.series, ...snapshot.marks].some((row) => !resources.has(row.resource_id)) ||
       snapshot.series.some((row) => row.beneficiary_contact_id !== null && !contacts.has(row.beneficiary_contact_id)) ||
       snapshot.occurrences.some((row) => !series.has(row.series_id) || !bookings.has(row.resource_booking_id)) ||
@@ -135,20 +140,22 @@ export function registerResourceSchedulerReplication(context: ModuleServerContex
     return totals.rows[0].count;
   };
   context.replication.register({
-    schemaVersion: "1",
+    schemaVersion: "2",
     async requiresSnapshot(departmentId) {
       if (!pool || !isDatabaseReady()) return false;
       return Boolean(await count(pool, departmentId) || (await blockers(pool, departmentId)).length);
     },
-    async inspect(departmentId) {
+    async inspect(departmentId, replication) {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The Resource Scheduler database is unavailable."], recordCount: 0 };
-      const problems = await blockers(pool, departmentId);
+      const problems = await blockers(pool, departmentId, replication);
       return { ready: problems.length === 0, blockers: problems, recordCount: await count(pool, departmentId) };
     },
-    async exportSnapshot(client, departmentId) {
-      const problems = await blockers(client, departmentId);
+    async exportSnapshot(client, departmentId, replication) {
+      const problems = await blockers(client, departmentId, replication);
       if (problems.length) throw new Error(problems.join(" "));
-      return collect(client, departmentId);
+      const snapshot = await collect(client, departmentId);
+      const evidence = await collectCalendarBookingEvidence(client, departmentId);
+      return evidence ? { ...snapshot, calendarBookingEvidence: evidence } : snapshot;
     },
     prepareSnapshotForPeer: async (input, seal) => {
       const snapshot = readSnapshot(input);
@@ -164,16 +171,24 @@ export function registerResourceSchedulerReplication(context: ModuleServerContex
       }) };
     },
     restoreDependencies: {
-      moduleIds: ["core-site"],
-      validate(input, dependencies) { assertDependencies(readSnapshot(input), dependencies.get("core-site")); },
+      moduleIds: ["core-site", "church-calendar"],
+      validate(input, dependencies) {
+        const core = dependencies.get("core-site");
+        assertDependencies(readSnapshot(input), core);
+        validateCalendarBookingSnapshots(dependencies.get("church-calendar"), input, core);
+      },
     },
-    async prepareRestore(client, departmentId, input) {
-      const problems = await blockers(client, departmentId);
-      if (problems.some((problem) => problem === linkedBlocker)) throw new Error(linkedBlocker);
+    async validateRestoreTarget(client, departmentId, input, replication) {
+      const problems = await blockers(client, departmentId, replication);
+      const blocker = problems.find((problem) => problem !== orphanMarkBlocker);
+      if (blocker) throw new Error(blocker);
       if (input === undefined) {
         if (await count(client, departmentId)) throw new Error("The incoming standby snapshot omits existing Resource Scheduler data.");
         return;
       }
+    },
+    async prepareRestore(client, departmentId, input) {
+      if (input === undefined) return;
       for (const key of ["series", "settings", "marks", "audit", "subscriptions"] as const) {
         await client.query(`DELETE FROM ${tables[key].name} WHERE department_id=$1`, [departmentId]);
       }
@@ -189,6 +204,9 @@ export function registerResourceSchedulerReplication(context: ModuleServerContex
     async verifySnapshot(client, departmentId, input, restoreContext) {
       const snapshot = readSnapshot(input);
       const actual = await collect(client, departmentId);
+      if (snapshot.calendarBookingEvidence !== await collectCalendarBookingEvidence(client, departmentId)) {
+        return { ready: false, blockers: ["Restored Calendar and Scheduler booking links differ from the signed snapshot."] };
+      }
       for (const key of keys) {
         const rows = restoreContext ? snapshot[key].map((row) => mappedRow(row, restoreContext)) : snapshot[key];
         const signature = (items: Row[]) => items.map((row) => JSON.stringify(canonical(row))).sort();

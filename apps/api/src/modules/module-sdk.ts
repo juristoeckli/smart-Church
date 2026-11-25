@@ -23,6 +23,7 @@ export type ModuleReplicationAdapter = {
     moduleIds: readonly string[];
     validate: (snapshot: unknown, dependencies: ReadonlyMap<string, unknown>) => void | Promise<void>;
   };
+  validateRestoreTarget?: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationExportContext) => Promise<void>;
   prepareRestore?: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationExportContext) => Promise<void>;
   // Runs after Core restores bookable resources and before it inserts their bookings.
   restoreBeforeCoreResourceBookings?: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationRestoreContext) => Promise<void>;
