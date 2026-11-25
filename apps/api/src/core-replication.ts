@@ -15,9 +15,15 @@ type CoreSnapshot = { version: number; sourceDepartmentId: string; department: {
 function normalizeSnapshot(input: unknown): CoreSnapshot | null {
   if (!input || typeof input !== "object") return null;
   const snapshot = input as CoreSnapshot;
-  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 38 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
+  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 39 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
   if (snapshot.version >= 38 && !Array.isArray(snapshot.tables.check_in_label_templates)) return null;
+  if (snapshot.version >= 39 && snapshot.tables.check_in_label_templates?.some(row =>
+    !Array.isArray(row.pickup_tag_ids) || row.pickup_tag_ids.length > 50 ||
+    new Set(row.pickup_tag_ids).size !== row.pickup_tag_ids.length ||
+    row.pickup_tag_ids.some(id => typeof id !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)),
+  )) return null;
   const tables = Object.fromEntries(snapshotTableNames.map((table) => [table, Array.isArray(snapshot.tables[table]) ? snapshot.tables[table] : []])) as CoreSnapshot["tables"];
+  tables.check_in_label_templates = (tables.check_in_label_templates ?? []).map(row => ({ ...row, pickup_tag_ids: row.pickup_tag_ids ?? [] }));
   tables.event_registrations = (tables.event_registrations ?? []).map((row) => ({ ...row, cancellation_token_hash: row.cancellation_token_hash ?? null, additional_attendee: row.additional_attendee ?? false, party_id: row.party_id ?? null, answer_snapshot: row.answer_snapshot ?? [] }));
   tables.resource_bookings = (tables.resource_bookings ?? []).map((row) => ({ ...row, is_intake_request: row.is_intake_request ?? false, subtitle: row.subtitle ?? "", description: row.description ?? "", beneficiary_contact_id: row.beneficiary_contact_id ?? null }));
   tables.bookable_resources = (tables.bookable_resources ?? []).map((row) => ({ ...row, intake_only: row.intake_only ?? false, calendar_required: row.calendar_required ?? false, manager_booking_only: row.manager_booking_only ?? false, visibility_group_id: row.visibility_group_id ?? null, responsible_user_id: row.responsible_user_id ?? null }));
@@ -181,7 +187,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 38, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 39, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 const dependentModuleRecords = [
@@ -253,7 +259,7 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "29",
+    schemaVersion: "30",
     inspect: async (departmentId, replication) => {
       const blockers = await dependentSnapshotBlockers(pool, departmentId, replication);
       const count = await countRecords(pool, departmentId);
@@ -338,6 +344,9 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       // services reachable only from one installation. Replicate the site's
       // identity and schedule timezone without enabling source modules here.
       await client.query("UPDATE departments SET name=$2,time_zone=$3 WHERE id=$1", [targetDepartmentId, snapshot.department.name, snapshot.department.time_zone]);
+      if (snapshot.version < 39 && (await client.query(
+        "SELECT 1 FROM check_in_label_templates WHERE department_id=$1 AND cardinality(pickup_tag_ids)>0", [targetDepartmentId],
+      )).rowCount) throw new Error("The older snapshot omits this location's configured pickup print tags.");
       if (snapshot.version < 38 && (await client.query("SELECT 1 FROM check_in_label_templates WHERE department_id=$1", [targetDepartmentId])).rowCount) {
         throw new Error("This older core snapshot does not include the location's Check-in label templates. Export a current snapshot before restoring.");
       }

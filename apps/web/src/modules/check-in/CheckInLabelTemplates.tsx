@@ -64,7 +64,7 @@ export function CheckInLabelTemplateEditor({ departmentId, csrfToken, current }:
     try {
       const response = await fetch(path, { method: "PUT", cache: "no-store",
         headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
-        body: JSON.stringify(draft),
+        body: JSON.stringify({ revision: draft.revision, templates: draft.templates, pickupTagIds: draft.pickupTagIds }),
       });
       const result = await response.json() as CheckInLabelTemplateSettings & { error?: string };
       if (!response.ok) {
@@ -94,6 +94,23 @@ export function CheckInLabelTemplateEditor({ departmentId, csrfToken, current }:
             setError(""); setNotice("");
           }} />
       </label>)}
+      {settings.pickupTagIds && <fieldset disabled={saving}>
+        <legend>Print pickup slips only for these People tags</legend>
+        <p>Any selected tag matches. Leave all unchecked to keep standard pickup-slip printing. Tag-based printing requires private People access.</p>
+        {settings.availablePickupTags?.map(tag => <label key={tag.id}>
+          <input type="checkbox" checked={settings.pickupTagIds?.includes(tag.id)}
+            disabled={(settings.pickupTagIds?.length ?? 0) >= 50 && !settings.pickupTagIds?.includes(tag.id)}
+            onChange={event => {
+              const selected = settings.pickupTagIds ?? [];
+              setDraft({ ...settings, pickupTagIds: event.target.checked ? [...selected, tag.id] : selected.filter(id => id !== tag.id) });
+              setError(""); setNotice("");
+            }} /> {tag.label}
+        </label>)}
+        {settings.pickupTagIds.filter(id => !settings.availablePickupTags?.some(tag => tag.id === id)).map(id => <button type="button" key={id}
+          className="checkin-print" onClick={() => setDraft({ ...settings, pickupTagIds: settings.pickupTagIds?.filter(tag => tag !== id) })}>
+          Remove unavailable tag
+        </button>)}
+      </fieldset>}
       <button className="checkin-print" type="submit" disabled={saving || !draft || stale}>Save location templates</button>
       {draft && <button className="checkin-print" type="button" disabled={saving} onClick={() => {
         setDraft(undefined); setError(""); setNotice("");

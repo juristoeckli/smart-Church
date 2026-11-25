@@ -1,7 +1,12 @@
 export const checkInLabelTemplateKeys = ["individual", "child", "parent"] as const;
 export type CheckInLabelTemplateKey = typeof checkInLabelTemplateKeys[number];
 export type CheckInLabelTemplates = Record<CheckInLabelTemplateKey, string>;
-export type CheckInLabelTemplateSettings = { revision: number; templates: CheckInLabelTemplates };
+export type CheckInLabelTemplateSettings = {
+  revision: number;
+  templates: CheckInLabelTemplates;
+  pickupTagIds?: string[];
+  availablePickupTags?: { id: string; label: string }[];
+};
 export const checkInLabelTemplateTokens = ["firstName", "lastName", "lastName.1", "group", "meeting", "date"] as const;
 export type CheckInLabelTemplateToken = typeof checkInLabelTemplateTokens[number];
 

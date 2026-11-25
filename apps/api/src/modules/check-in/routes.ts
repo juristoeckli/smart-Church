@@ -1,4 +1,4 @@
-import { registerCheckInLabelTemplates } from "./label-templates.js";
+import { pickupPrintCoverage, registerCheckInLabelTemplates } from "./label-templates.js";
 import { registerGroupAttendanceCodes } from "./group-attendance-codes.js";
 import { canReadPrivateContactDetails } from "../../location-grants.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -107,6 +107,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ORDER BY contact.last_name,contact.first_name`, [departmentId, request.params.eventId, canViewPrivatePeople]);
     const attendees = [...roster.rows, ...visitors.rows] as Array<Record<string, unknown> & { id: string }>;
     if (canManage(request) && attendees.length) {
+      const pickupCoverage = await pickupPrintCoverage(pool!, departmentId, attendees.map(attendee => attendee.id), canViewPrivatePeople);
       const pickupRows = await pool!.query<{ child_contact_id: string; id: string | null; name: string; released_at: Date | null; legacy: boolean }>(
         `SELECT pickup.child_contact_id,authorized.id,COALESCE(NULLIF(concat_ws(' ',authorized.first_name,authorized.last_name),''),'Removed contact') AS name,pickup.released_at,false AS legacy
            FROM check_in_event_pickups pickup
@@ -132,7 +133,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (row.id) byChild.set(row.child_contact_id, [...(byChild.get(row.child_contact_id) ?? []), { id: row.id, name: row.name }]);
         if (row.released_at) releases.set(row.child_contact_id, { name: row.name, at: row.released_at });
       }
-      return { attendees: attendees.map((attendee) => ({ ...attendee, authorizedPickups: byChild.get(attendee.id) ?? [], previousPickupIds: legacyByChild.get(attendee.id) ?? [], pickupRelease: releases.get(attendee.id) ?? null })) };
+      return { attendees: attendees.map((attendee) => ({ ...attendee, authorizedPickups: byChild.get(attendee.id) ?? [], pickupSlipEligible: pickupCoverage?.has(attendee.id) ?? true, previousPickupIds: legacyByChild.get(attendee.id) ?? [], pickupRelease: releases.get(attendee.id) ?? null })) };
     }
     return { attendees: attendees.map((attendee) => ({ ...attendee, authorizedPickups: [] })) };
   });

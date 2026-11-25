@@ -9,7 +9,7 @@ import { checkInPrintFormats, checkInPrintItems, readCheckInPrintOptions, writeC
 
 type EventRow = { id: string; title: string; kind: string; eventDate: string; startTime: string; location: string; completedAt: string | null };
 type GroupRow = { id: string; name: string; memberCount: number; parentGroupId: string | null };
-type Attendee = { id: string; firstName: string; lastName: string; email: string | null; phone: string | null; firstTimeVisitor: boolean; checkedInAt: string | null; groups: string[]; isVisitor?: boolean; authorizedPickups: Array<{ id: string; name: string }>; previousPickupIds?: string[]; pickupRelease?: { name: string; at: string } | null };
+type Attendee = { id: string; firstName: string; lastName: string; email: string | null; phone: string | null; firstTimeVisitor: boolean; checkedInAt: string | null; groups: string[]; isVisitor?: boolean; authorizedPickups: Array<{ id: string; name: string }>; previousPickupIds?: string[]; pickupSlipEligible?: boolean; pickupRelease?: { name: string; at: string } | null };
 type RosterLayout = "full" | "groups" | "people";
 type AttendanceFilter = "all" | "awaiting" | "present" | "released";
 type IdentityCheck = "" | "photo_id" | "personally_known";
@@ -91,7 +91,11 @@ export function CheckInModule({ csrfToken, department, departmentId, accountId, 
     };
     const unsubscribe = realtime.subscribe("module:check-in:changed", refresh);
     const unsubscribeReconnect = realtime.subscribe("realtime:connected", refresh);
-    return () => { unsubscribe(); unsubscribeReconnect(); };
+    const unsubscribeTags = realtime.subscribe("people-records:changed", event => {
+      if (event.departmentId === departmentId) void reloadRoster().catch((reason) => setError(reason.message));
+    });
+    const unsubscribePrintPolicy = realtime.subscribe("module:check-in:label-templates-changed", refresh);
+    return () => { unsubscribe(); unsubscribeReconnect(); unsubscribeTags(); unsubscribePrintPolicy(); };
   }, [realtime, reloadBase, reloadRoster]);
   useEffect(() => { setCodeQuery(""); setStationScope(null); setPickupEditor(null); setReleaseAttendee(null); }, [rosterScope]);
   const normalizedCode = canManage ? codeQuery.trim().toUpperCase() : "";
@@ -241,7 +245,7 @@ export function CheckInModule({ csrfToken, department, departmentId, accountId, 
     finally { setBusy(false); }
   };
   const mayPrintPickup = (person: Attendee) => canManage && !person.isVisitor && !person.pickupRelease
-    && Boolean(person.checkedInAt) && person.authorizedPickups.length > 0;
+    && Boolean(person.checkedInAt) && person.authorizedPickups.length > 0 && person.pickupSlipEligible === true;
   const presentForPickup = shown.filter(mayPrintPickup);
   const releaseControl = (person: Attendee) => person.pickupRelease
     ? <small>Released to {person.pickupRelease.name} · {new Date(person.pickupRelease.at).toLocaleTimeString()}</small>
