@@ -104,9 +104,9 @@ function categoryDto(row: WikiCategoryRow) {
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   registerWikiReplication(context);
-  async function site(request: FastifyRequest, reply: FastifyReply, manage = false) {
+  async function site(request: FastifyRequest, reply: FastifyReply, manage = false, allowQueryLocation = false) {
     if (!pool || !isDatabaseReady()) { reply.code(503).send({ error: "The Wiki database is unavailable." }); return null; }
-    const departmentId = await resolveDepartmentId(request, reply);
+    const departmentId = await resolveDepartmentId(request, reply, false, allowQueryLocation);
     if (!departmentId) return null;
     const enabled = await pool.query<{ enabled_modules: string[] }>("SELECT enabled_modules FROM departments WHERE id=$1", [departmentId]);
     if (!(enabled.rows[0]?.enabled_modules ?? []).includes("wiki")) { reply.code(404).send({ error: "Wiki is not enabled for this site." }); return null; }
@@ -951,7 +951,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Params: { id: string; fileId: string } }>("/api/modules/wiki/pages/:id/files/:fileId/download", async (request, reply) => {
-    const departmentId = await site(request, reply);
+    const departmentId = await site(request, reply, false, true);
     if (!departmentId) return reply;
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Wiki file not found." });
     const result = await pool!.query<{ file_name: string; content_type: string; file_data: Buffer }>(

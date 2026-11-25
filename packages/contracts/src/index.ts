@@ -1,3 +1,5 @@
+export { isWikiAttachmentDownloadPath, wikiAttachmentDownloadPath, wikiAttachmentSignInLocation } from "./wiki-download.js";
+
 export type ContactStatus = "member" | "visitor";
 
 export interface ContactRelationship {

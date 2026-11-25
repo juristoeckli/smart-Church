@@ -17,6 +17,7 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { wikiAttachmentSignInLocation } from "@smart-church/contracts";
 import type { AuthStatus, AuthenticatedUser, Contact, ContactRelationship, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, ServicePlanTemplate, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
@@ -511,7 +512,11 @@ app.addHook("preHandler", async (request, reply) => {
   const user = bearerToken?.startsWith("sc_")
     ? await currentApiKeyUser(bearerToken, request.url)
     : await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
-  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (!user) {
+    const signInLocation = wikiAttachmentSignInLocation(request.method, request.url, request.headers["sec-fetch-mode"], request.headers.accept);
+    if (signInLocation) return reply.header("Cache-Control", "private, no-store").redirect(signInLocation, 303);
+    return reply.code(401).send({ error: "Sign in to continue." });
+  }
   request.authenticatedUser = user;
   reply.header("Cache-Control", "no-store");
   if (user.mustChangePassword && !user.isServiceUser) return reply.code(403).send({ error: "Change your password before continuing." });

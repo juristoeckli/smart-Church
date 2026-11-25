@@ -1,3 +1,4 @@
+import { WikiAttachmentDownload } from "./WikiAttachmentDownload";
 import { isPeopleTagLookup, peopleGroupNavigationState, peopleTagNavigationState } from "./people-group-navigation";
 import { AccountSetupInvitation, PersonAccountOnboarding } from "./AccountSetupInvitation";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
@@ -31,6 +32,7 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
+import { isWikiAttachmentDownloadPath } from "@smart-church/contracts";
 import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, CreateSiteUser, DepartmentProfile, HttpAccessMode, LocationPermission, PresenterPermission, ServerPermission, SiteUser, UserMenuPreferences, UserPhoneLabel, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VideoPermission } from "@smart-church/contracts";
 import { Authentication, PasswordChangeRequired } from "./Authentication";
 import { SelfSignupPage } from "./SelfSignup";
@@ -1406,6 +1408,8 @@ function WorkspaceApp() {
   if (authLoading) return <main className="auth-page"><section className="auth-card auth-loading" role="status"><span className="eyebrow">GFC WORKSPACE</span><p>Checking your sign-in…</p></section></main>;
   if (!authUser) return <Authentication setupRequired={setupRequired} setupLocation={setupLocation} selfSignupEnabled={selfSignupEnabled} selfSignupSites={selfSignupSites} unavailableMessage={authUnavailableMessage} onAuthenticated={(user) => { setAuthUnavailableMessage(""); setSetupRequired(false); setAuthUser(user); void fetch("/api/auth/status").then((response) => response.json()).then((result: AuthStatus) => { setCsrfToken(result.csrfToken ?? ""); setSelfSignupEnabled(result.selfSignupEnabled ?? false); setSelfSignupSites(result.selfSignupSites ?? []); }).catch(() => setCsrfToken("")); }} />;
   if (authUser.mustChangePassword) return <PasswordChangeRequired onChanged={setAuthUser} />;
+  const wikiDownload = new URLSearchParams(window.location.search).get("wikiDownload");
+  if (wikiDownload && isWikiAttachmentDownloadPath(wikiDownload)) return <WikiAttachmentDownload key={wikiDownload} path={wikiDownload} />;
 
   const userInitials = authUser.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || authUser.username[0]?.toUpperCase() || "U";
   const canManageSite = department.role === "site_admin";
