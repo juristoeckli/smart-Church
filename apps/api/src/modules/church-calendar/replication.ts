@@ -1,3 +1,4 @@
+import { normalizeCalendarImageMetadata } from "./image-metadata.js";
 import type { PoolClient } from "pg";
 import { collectCalendarBookingEvidence, requireCalendarBookingModules, validateCalendarBookingSnapshots } from "../../calendar-booking-replication.js";
 import type { ModuleServerContext, ReplicationExportContext, ReplicationRestoreContext } from "../module-sdk.js";
@@ -7,7 +8,7 @@ const tables = {
   appointments: { name: "church_calendar_appointments", key: "id", columns: "id calendar_id title subtitle description starts_at ends_at all_day place url internal_only tags recurrence linked_event_id signup_group_id responsible_contact_id time_zone created_by created_at updated_at archived_at historical_actor_id historical_actor_name" },
   exceptions: { name: "church_calendar_appointment_exceptions", key: "appointment_id,original_start", columns: "appointment_id original_start cancelled overrides updated_by updated_at historical_actor_id historical_actor_name", child: true },
   dates: { name: "church_calendar_extra_dates", key: "appointment_id,starts_at", columns: "appointment_id starts_at ends_at created_by historical_actor_id historical_actor_name", child: true },
-  images: { name: "church_calendar_appointment_images", key: "appointment_id", columns: "appointment_id content_type filename content uploaded_by updated_at historical_actor_id historical_actor_name" },
+  images: { name: "church_calendar_appointment_images", key: "appointment_id", columns: "appointment_id content_type filename content uploaded_by updated_at historical_actor_id historical_actor_name image_metadata revision" },
   templates: { name: "church_calendar_appointment_templates", key: "id", columns: "id calendar_id name title subtitle description place url internal_only tags" },
   generations: { name: "church_calendar_event_generations", key: "id", columns: "id appointment_id occurrence_start service_event_id template_id actor_user_id created_at historical_actor_id historical_actor_name" },
   tags: { name: "church_calendar_tag_definitions", key: "tag_key", columns: "tag_key name color description" },
@@ -22,11 +23,11 @@ const tables = {
 } satisfies Record<string, { name: string; columns: string; key: string; child?: boolean }>;
 type Table = keyof typeof tables;
 type Row = Record<string, unknown>;
-type Snapshot = { version: 3; calendarBookingEvidence?: string } & Record<Table, Row[]>;
+type Snapshot = { version: 4; calendarBookingEvidence?: string } & Record<Table, Row[]>;
 const keys = Object.keys(tables) as Table[];
 const wallTimes = new Set(["starts_at", "ends_at", "original_start", "occurrence_start"]);
 const tokenTables = ["feeds", "agendaPublications", "subscriptions"] as const;
-const jsonColumns = new Set(["recurrence", "overrides"]);
+const jsonColumns = new Set(["recurrence", "overrides", "image_metadata"]);
 const userColumns = new Set(["owner_user_id", "created_by", "updated_by", "uploaded_by", "actor_user_id", "invited_by", "user_id", "recipient_user_id"]);
 const tokenHash = /^[0-9a-f]{64}$/;
 const scopeBlocker = "Calendar contains an appointment linked to a calendar in a different location.";
@@ -37,7 +38,7 @@ function record(value: unknown): value is Row {
 }
 
 function readSnapshot(input: unknown): Snapshot {
-  if (!record(input) || input.version !== 3) throw new Error("The Church Calendar snapshot is invalid.");
+  if (!record(input) || input.version !== 4) throw new Error("The Church Calendar snapshot is invalid.");
   for (const key of keys) {
     const columns = tables[key].columns.split(" ");
     const rows = input[key];
@@ -110,6 +111,10 @@ function assertDependencies(snapshot: Snapshot, core: unknown) {
     throw new Error("A Church Calendar feed or subscription hash is invalid.");
   }
   for (const image of snapshot.images) {
+    if (!normalizeCalendarImageMetadata(image.image_metadata) || typeof image.revision !== "string"
+      || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(image.revision)) {
+      throw new Error("A Church Calendar image has invalid metadata or revision.");
+    }
     const data = image.content;
     if (typeof data !== "string" || !data.length || data.length > Math.ceil(1048576 / 3) * 4 ||
         !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new Error("A Church Calendar image has invalid binary content.");
@@ -119,7 +124,7 @@ function assertDependencies(snapshot: Snapshot, core: unknown) {
 }
 
 async function collect(client: Pick<PoolClient, "query">, departmentId: string): Promise<Snapshot> {
-  const snapshot = { version: 3 } as Snapshot;
+  const snapshot = { version: 4 } as Snapshot;
   for (const key of keys) {
     const table = tables[key];
     const columns = table.columns.split(" ").map((column) => {
@@ -178,7 +183,7 @@ export function registerCalendarReplication(context: ModuleServerContext) {
     return totals.rows[0].count;
   };
   context.replication.register({
-    schemaVersion: "3",
+    schemaVersion: "4",
     async requiresSnapshot(departmentId) {
       if (!pool || !isDatabaseReady()) return false;
       return Boolean(await count(pool, departmentId) || (await blockers(pool, departmentId)).length);

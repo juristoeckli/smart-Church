@@ -63,3 +63,16 @@
 .church-calendar-grid-event strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .church-calendar-grid-event:focus-visible { z-index: 1; outline: 2px solid currentColor; outline-offset: -2px; }
 .church-calendar-timed-event { position: absolute; }
+
+.calendar-image-settings { display: grid; min-width: 0; gap: .65rem; }
+.calendar-image-settings p, .calendar-image-display { margin: 0; }
+.calendar-image-display { max-width: 34rem; }
+.calendar-image-display img { display: block; width: 100%; max-height: 24rem; object-fit: cover; border-radius: 8px; background: Canvas; }
+.calendar-image-display figcaption, .calendar-image-actions { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.calendar-image-display figcaption { padding-top: .35rem; font-size: .82rem; }
+.calendar-image-metadata-fields { display: grid; min-width: 0; gap: .55rem; border: 1px solid var(--calendar-border, #d0d7de); border-radius: 8px; padding: .65rem; }
+.calendar-image-focus, .calendar-image-crop-previews { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+.calendar-image-crop-previews { max-width: 32rem; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+.calendar-image-crop-previews img { display: block; width: 100%; aspect-ratio: 2; object-fit: cover; border-radius: 6px; }
+.calendar-image-crop-previews div:last-child img { aspect-ratio: 1; }
+.calendar-image-crop-previews span { display: block; font-size: .8rem; margin-bottom: .2rem; }

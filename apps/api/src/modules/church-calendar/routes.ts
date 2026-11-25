@@ -1,3 +1,4 @@
+import { calendarImageMetadataSchema, defaultCalendarImageMetadata, normalizeCalendarImageMetadata, type CalendarImageMetadata } from "./image-metadata.js";
 import { registerCalendarEmailSubscriptions } from "./email-subscriptions.js";
 import { registerCalendarBookingDescriptions } from "./booking-descriptions.js";
 import { loadPublicAgenda, registerCalendarAgendaPublications } from "./calendar-agenda-publications.js";
@@ -1429,9 +1430,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
-  app.put<{ Params: { id: string }; Body: { filename: string; contentType: string; data: string } }>("/api/modules/church-calendar/appointments/:id/image", { schema: {
+  app.put<{ Params: { id: string }; Body: { filename: string; contentType: string; data: string; metadata?: CalendarImageMetadata } }>("/api/modules/church-calendar/appointments/:id/image", { schema: {
     params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    body: { type: "object", additionalProperties: false, required: ["filename", "contentType", "data"], properties: { filename: { type: "string", minLength: 1, maxLength: 180 }, contentType: { type: "string", enum: ["image/jpeg", "image/png", "image/gif", "image/webp"] }, data: { type: "string", minLength: 4, maxLength: 1398104 } } },
+    body: { type: "object", additionalProperties: false, required: ["filename", "contentType", "data"], properties: { filename: { type: "string", minLength: 1, maxLength: 180 }, contentType: { type: "string", enum: ["image/jpeg", "image/png", "image/gif", "image/webp"] }, data: { type: "string", minLength: 4, maxLength: 1398104 }, metadata: calendarImageMetadataSchema } },
   } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -1443,6 +1444,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const row = appointment.rows[0];
     if (!row) return responseError(reply, 404, "Appointment not found.");
     if (!canManageCalendar(request, row.scope, row.owner_user_id)) return responseError(reply, 403, "You cannot change this appointment image.");
+    const metadata = request.body.metadata ? normalizeCalendarImageMetadata(request.body.metadata) : defaultCalendarImageMetadata;
+    if (!metadata) return responseError(reply, 400, "Use plain image credit and alternative text and an HTTP or HTTPS source link without credentials.");
     const cleanName = request.body.filename.replace(/[\\/\u0000-\u001f\u007f]/g, "_").trim().slice(0, 180) || "appointment-image";
     const data = request.body.data;
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) return responseError(reply, 400, "The image data is invalid.");
@@ -1454,9 +1457,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       : bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
     if (!validSignature) return responseError(reply, 400, "The file contents do not match the selected image type.");
     await context.pool.query(
-      `INSERT INTO church_calendar_appointment_images(appointment_id,department_id,content_type,filename,content,uploaded_by)
-       VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(appointment_id) DO UPDATE SET department_id=EXCLUDED.department_id,content_type=EXCLUDED.content_type,filename=EXCLUDED.filename,content=EXCLUDED.content,uploaded_by=EXCLUDED.uploaded_by,updated_at=now()`,
-      [request.params.id, departmentId, request.body.contentType, cleanName, bytes, userId(request)],
+      `INSERT INTO church_calendar_appointment_images(appointment_id,department_id,content_type,filename,content,uploaded_by,image_metadata,revision)
+       VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
+       ON CONFLICT(appointment_id) DO UPDATE SET department_id=EXCLUDED.department_id,content_type=EXCLUDED.content_type,
+         filename=EXCLUDED.filename,content=EXCLUDED.content,uploaded_by=EXCLUDED.uploaded_by,updated_at=now(),
+         image_metadata=EXCLUDED.image_metadata,revision=EXCLUDED.revision`,
+      [request.params.id, departmentId, request.body.contentType, cleanName, bytes, userId(request), JSON.stringify(metadata), randomUUID()],
     );
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-image-updated", appointmentId: request.params.id });
     return { imageUrl: `/api/modules/church-calendar/appointments/${request.params.id}/image` };
@@ -1478,22 +1484,90 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { removed: true };
   });
 
+  const imageAudience = `WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+         AND (calendar.scope='community' OR calendar.owner_user_id=$3 OR (calendar.scope='group' AND ($4 OR EXISTS(
+           SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
+            WHERE membership.user_id=$3 AND membership.department_id=$2 AND member.group_id=calendar.group_id AND member.status='active'))))`;
+
+  app.get<{ Params: { id: string } }>("/api/modules/church-calendar/appointments/:id/image/metadata", {
+    schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+  }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await context.pool.query<{ image_metadata: unknown; revision: string }>(
+      `SELECT image.image_metadata,image.revision FROM church_calendar_appointment_images image
+        JOIN church_calendar_appointments appointment ON appointment.id=image.appointment_id AND appointment.department_id=image.department_id
+        JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+        ${imageAudience}`, [request.params.id, departmentId, userId(request), hasGroupVisibility(request)],
+    );
+    const image = result.rows[0];
+    if (!image) return responseError(reply, 404, "Appointment image not found.");
+    return reply.header("Cache-Control", "private, no-store").send({
+      metadata: normalizeCalendarImageMetadata(image.image_metadata) ?? defaultCalendarImageMetadata, revision: image.revision,
+    });
+  });
+
+  app.patch<{ Params: { id: string }; Body: { revision: string; metadata: CalendarImageMetadata } }>(
+    "/api/modules/church-calendar/appointments/:id/image/metadata", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["revision", "metadata"],
+        properties: { revision: { type: "string", format: "uuid" }, metadata: calendarImageMetadataSchema } },
+    } }, async (request, reply) => {
+      if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+      if (!context.validateMutation(request, reply)) return reply;
+      const departmentId = await context.resolveDepartmentId(request, reply);
+      if (!departmentId) return reply;
+      const metadata = normalizeCalendarImageMetadata(request.body.metadata);
+      if (!metadata) return responseError(reply, 400, "Use plain image credit and alternative text and an HTTP or HTTPS source link without credentials.");
+      const client = await context.pool.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "This location is read-only on this installation.");
+        }
+        const selected = await client.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+          `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment
+            JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+            ${imageAudience} FOR SHARE OF appointment,calendar`, [request.params.id, departmentId, userId(request), hasGroupVisibility(request)],
+        );
+        const owner = selected.rows[0];
+        if (!owner || !canManageCalendar(request, owner.scope, owner.owner_user_id)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, owner ? 403 : 404, owner ? "You cannot change this appointment image." : "Appointment image not found.");
+        }
+        const revision = randomUUID();
+        const updated = await client.query(
+          `UPDATE church_calendar_appointment_images SET image_metadata=$4::jsonb,revision=$5,updated_at=now()
+            WHERE appointment_id=$1 AND department_id=$2 AND revision=$3`,
+          [request.params.id, departmentId, request.body.revision, JSON.stringify(metadata), revision],
+        );
+        if (!updated.rowCount) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "This image was changed or removed. Reload the image and try again.");
+        }
+        await client.query("COMMIT");
+        context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-image-metadata-updated", appointmentId: request.params.id });
+        return { metadata, revision };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    },
+  );
+
   app.get<{ Params: { id: string } }>("/api/modules/church-calendar/appointments/:id/image", async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const image = await context.pool.query<{ content: Buffer; content_type: string; filename: string }>(
-      `SELECT image.content,image.content_type,image.filename FROM church_calendar_appointment_images image
+    const image = await context.pool.query<{ content: Buffer; content_type: string; filename: string; revision: string }>(
+      `SELECT image.content,image.content_type,image.filename,image.revision FROM church_calendar_appointment_images image
         JOIN church_calendar_appointments appointment ON appointment.id=image.appointment_id AND appointment.department_id=image.department_id
         JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
-       WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
-         AND (calendar.scope='community' OR calendar.owner_user_id=$3 OR (calendar.scope='group' AND ($4 OR EXISTS(
-           SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
-            WHERE membership.user_id=$3 AND membership.department_id=$2 AND member.group_id=calendar.group_id AND member.status='active'))))`,
+        ${imageAudience}`,
       [request.params.id, departmentId, userId(request), hasGroupVisibility(request)]);
     const file = image.rows[0];
     if (!file) return responseError(reply, 404, "Appointment image not found.");
-    return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").send(file.content);
+    return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").header("X-Calendar-Image-Revision", file.revision).send(file.content);
   });
 
   app.post<{ Body: AppointmentInput & { createEventTemplateId?: string } }>("/api/modules/church-calendar/appointments", { schema: { body: {
