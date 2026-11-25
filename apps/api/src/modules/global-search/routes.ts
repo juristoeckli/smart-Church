@@ -66,6 +66,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const optional = await pool.query<{
       wikiEnabled: boolean;
       wikiReady: boolean;
+      wikiSourceReady: boolean;
       songsReady: boolean;
       communityEnabled: boolean;
       contactSourceReady: boolean;
@@ -74,6 +75,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }>(
       `SELECT COALESCE($2::text = ANY(location.enabled_modules),false) AS "wikiEnabled",
               to_regclass('public.wiki_pages') IS NOT NULL AND to_regclass('public.wiki_categories') IS NOT NULL AS "wikiReady",
+              to_regclass('public.churchtools_migration_wiki_pages') IS NOT NULL AS "wikiSourceReady",
               to_regclass('public.worship_songs') IS NOT NULL AS "songsReady",
               $3::text = ANY(location.enabled_modules) AS "communityEnabled",
               EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contacts' AND column_name='source_system')
@@ -88,7 +90,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM departments location WHERE location.id=$1`,
       [departmentId, "wiki", "community"],
     );
-    const state = optional.rows[0] ?? { wikiEnabled: false, wikiReady: false, songsReady: false, communityEnabled: false, contactSourceReady: false, groupSourceReady: false, migrationLinksReady: false };
+    const state = optional.rows[0] ?? { wikiEnabled: false, wikiReady: false, wikiSourceReady: false, songsReady: false, communityEnabled: false, contactSourceReady: false, groupSourceReady: false, migrationLinksReady: false };
+    const wikiIdCondition = state.wikiSourceReady ? `(page.id=$2 OR EXISTS (
+      SELECT 1 FROM churchtools_migration_wiki_pages source
+      WHERE source.department_id=page.department_id AND source.page_id=page.id AND source.source_guid=$2
+    ))` : "page.id=$2";
     const wikiAudienceCondition = `($3::boolean OR page.audience='location' OR (page.audience='group' AND EXISTS (
       SELECT 1 FROM group_members audience_member
       JOIN department_memberships audience_user ON audience_user.contact_id=audience_member.contact_id AND audience_user.department_id=page.department_id
@@ -114,7 +120,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ).then((result) => result.rows),
       state.wikiEnabled && state.wikiReady && (!validIdQuery || localUuidQuery) ? pool.query<{ id: string; title: string; detail: string }>(
         localUuidQuery
-          ? `SELECT page.id,page.title,COALESCE(category.name,'') AS detail FROM wiki_pages page LEFT JOIN wiki_categories category ON category.id=page.category_id AND category.department_id=page.department_id WHERE page.department_id=$1 AND page.id=$2 AND page.status='active' AND ${wikiAudienceCondition}`
+          ? `SELECT page.id,page.title,COALESCE(category.name,'') AS detail FROM wiki_pages page LEFT JOIN wiki_categories category ON category.id=page.category_id AND category.department_id=page.department_id WHERE page.department_id=$1 AND ${wikiIdCondition} AND page.status='active' AND ${wikiAudienceCondition} ORDER BY (page.id=$2) DESC,lower(page.title),page.id LIMIT 6`
           : `SELECT page.id,page.title,COALESCE(category.name,'') AS detail FROM wiki_pages page LEFT JOIN wiki_categories category ON category.id=page.category_id AND category.department_id=page.department_id WHERE page.department_id=$1 AND page.title ILIKE $2 AND page.status='active' AND ${wikiAudienceCondition} ORDER BY lower(page.title),page.id LIMIT 6`,
         [...values, wikiManager, request.authenticatedUser!.id],
       ).then((result) => result.rows) : Promise.resolve([]),
