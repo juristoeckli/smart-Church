@@ -7,7 +7,7 @@ type Category = typeof categories[number];
 type TimelineQuery = { category?: Category; from?: string; through?: string; beforeTime?: string; beforeKey?: string };
 const pageSize = 50;
 
-export const visibleProfileHistory = `($3::boolean OR h.action<>'field_updated' OR EXISTS (
+export const visibleProfileHistory = `($3::boolean OR NOT h.managers_only) AND ($3::boolean OR h.action<>'field_updated' OR EXISTS (
   SELECT 1 FROM people_record_fields field
    WHERE field.department_id=h.department_id AND field.visibility='private_people'
      AND h.subject IN (field.id::text,field.field_key,'bulk:'||field.field_key)
@@ -33,7 +33,7 @@ const profileHistory = `SELECT h.id,'profile:'||h.id::text AS cursor_key,h.actio
     CASE WHEN h.action='consent_recorded' THEN 'privacy'
          WHEN h.action IN ('relationship_added','relationship_removed') THEN 'relationships'
          WHEN h.action IN ('household_linked','household_unlinked','household_updated') THEN 'household'
-         WHEN h.action IN ('attachment_added','attachment_removed') THEN 'attachments'
+         WHEN h.action IN ('attachment_added','attachment_removed','attachment_access_changed') THEN 'attachments'
          WHEN h.action IN ('person_archived','person_restored','person_merged','csv_import_created') THEN 'lifecycle'
          ELSE 'profile' END AS category,
     COALESCE(field.label,h.subject) AS subject,NULL::uuid AS group_id,h.actor_user_id,h.created_at,

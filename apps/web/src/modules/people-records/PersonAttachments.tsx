@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
+import type { ModuleContext } from "../../module-registry";
 import { formatUserDate } from "../../date-format";
 
-type Attachment = { id: string; fileName: string; fileSize: number; isPortrait?: boolean; uploadedAt: string; uploadedBy: string | null };
+type Attachment = { id: string; fileName: string; fileSize: number; isPortrait?: boolean; managersOnly?: boolean; uploadedAt: string; uploadedBy: string | null };
 const maxAttachmentBytes = 10 * 1024 * 1024;
 const maxPortraitBytes = 2 * 1024 * 1024;
 
@@ -35,12 +36,13 @@ async function expectSuccess(response: Response, fallback: string) {
   throw new Error(result?.message ?? result?.error ?? fallback);
 }
 
-export function PersonAttachments({ contactId, departmentId, csrfToken, canManage, archived }: {
+export function PersonAttachments({ contactId, departmentId, csrfToken, canManage, archived, realtime }: {
   contactId: string;
   departmentId: string;
   csrfToken: string;
   canManage: boolean;
   archived: boolean;
+  realtime?: ModuleContext["realtime"];
 }) {
   const path = `/api/people-records/${contactId}/attachments`;
   const portraitPath = "/api/people-records/" + contactId + "/portrait";
@@ -55,6 +57,11 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => realtime?.subscribe("people-records:changed", (event) => {
+    const payload = event.payload as { contactId?: string } | undefined;
+    if (event.departmentId === departmentId && payload?.contactId === contactId) setRevision((current) => current + 1);
+  }), [realtime, departmentId, contactId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -96,7 +103,8 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
   async function upload(event: FormEvent<HTMLFormElement>, useAsPortrait = false) {
     event.preventDefault();
     const form = event.currentTarget;
-    const file = new FormData(form).get("attachment");
+    const fields = new FormData(form);
+    const file = fields.get("attachment");
     if (!(file instanceof File) || file.size < 1 || file.size > maxAttachmentBytes) {
       setActionError("Choose a non-empty file no larger than 10 MiB.");
       return;
@@ -105,6 +113,7 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
       const content = useAsPortrait ? await portraitFile(file) : file;
       const query = new URLSearchParams({ filename: content.name });
       if (useAsPortrait) query.set("useAsPortrait", "true");
+      if (fields.has("managersOnly")) query.set("managersOnly", "true");
       const response = await fetch(`${path}?${query}`, { method: "POST", headers: {
         "content-type": "application/vnd.smart-church.person-attachment", "x-department-id": departmentId, "x-csrf-token": csrfToken,
       }, body: content });
@@ -112,6 +121,18 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
       form.reset();
       setRevision((current) => current + 1);
       setNotice(useAsPortrait ? "Portrait uploaded." : "Attachment added.");
+    });
+  }
+
+  async function changeAudience(attachment: Attachment) {
+    await submitAttachmentAction(async () => {
+      const managersOnly = !attachment.managersOnly;
+      const response = await fetch(`${path}/${attachment.id}`, { method: "PATCH", headers: {
+        "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken,
+      }, body: JSON.stringify({ managersOnly }) });
+      await expectSuccess(response, "Could not change the attachment audience.");
+      setRevision((current) => current + 1);
+      setNotice(managersOnly ? "Attachment restricted to People managers." : "Attachment shared with private People readers.");
     });
   }
 
@@ -166,6 +187,7 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
       {canWrite && visiblePortrait && <button type="button" disabled={busy} onClick={() => void setPortraitAttachment(null)}>Remove portrait</button>}
       {canWrite && <form className="module-toolbar" onSubmit={(event) => void upload(event, true)}>
         <label>Portrait image<input name="attachment" type="file" accept="image/jpeg,image/png,image/webp" required disabled={busy} /></label>
+        <label><input name="managersOnly" type="checkbox" disabled={busy} /> People managers only</label>
         <button type="submit" disabled={busy}>Upload portrait</button>
       </form>}
       {portraitError && <p role="alert">{portraitError}</p>}
@@ -177,6 +199,7 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
     {open && <div>
       {canWrite && <form className="module-toolbar" onSubmit={(event) => void upload(event)}>
         <label>Choose file, up to 10 MiB<input name="attachment" type="file" required disabled={busy} /></label>
+        <label><input name="managersOnly" type="checkbox" disabled={busy} /> People managers only</label>
         <button type="submit" disabled={busy}>Upload attachment</button>
       </form>}
       {archived && canManage && <p>Restore this person to upload or delete attachments.</p>}
@@ -185,9 +208,14 @@ export function PersonAttachments({ contactId, departmentId, csrfToken, canManag
       {attachments?.length ? <ul>{attachments.map((attachment) => <li key={attachment.id}>
         <span>{attachment.fileName} · {formatUserDate(attachment.uploadedAt, true)}{attachment.uploadedBy ? ` · ${attachment.uploadedBy}` : ""}</span>{" "}
         {attachment.isPortrait && <span>Portrait · </span>}
+        {attachment.managersOnly && <span>People managers only · </span>}
         {canWrite && !attachment.isPortrait && attachment.fileSize <= maxPortraitBytes && /\.png$/i.test(attachment.fileName)
           && <button type="button" disabled={busy} onClick={() => void setPortraitAttachment(attachment.id)} aria-label={"Use " + attachment.fileName + " as portrait"}>Use as portrait</button>}
         <button type="button" disabled={busy} onClick={() => void download(attachment)} aria-label={`Download ${attachment.fileName}`}>Download</button>{" "}
+        {canWrite && <button type="button" disabled={busy} onClick={() => void changeAudience(attachment)}
+          aria-label={`${attachment.managersOnly ? "Share" : "Restrict"} ${attachment.fileName}`}>
+          {attachment.managersOnly ? "Share with private People readers" : "Restrict to People managers"}
+        </button>}
         {canWrite && <button type="button" disabled={busy} onClick={() => void remove(attachment)} aria-label={`Delete ${attachment.fileName}`}>Delete</button>}
       </li>)}</ul> : attachments && <p>No attachments have been uploaded.</p>}
       <button type="button" disabled={busy || (!attachments && !loadError)} onClick={() => setRevision((current) => current + 1)}>Refresh attachments</button>
