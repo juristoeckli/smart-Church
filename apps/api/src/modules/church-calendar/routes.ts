@@ -219,6 +219,32 @@ async function registrationFormTemplatesInstalled(db: Pick<PoolClient, "query">)
   return Boolean(result.rows[0]?.installed);
 }
 
+async function lockRegistrationTemplate(client: PoolClient, departmentId: string, templateGroupId: string) {
+  if (!await registrationFormTemplatesInstalled(client)) {
+    return { status: 409, error: "Registration form templates are unavailable at this site." } as const;
+  }
+  const template = await client.query(
+    `SELECT form.group_id FROM church_groups groups
+       JOIN group_signup_forms form ON form.group_id=groups.id AND form.department_id=groups.department_id
+      WHERE groups.id=$1 AND groups.department_id=$2 AND groups.status IN ('active','draft')
+        AND groups.source_system IS NULL FOR SHARE OF groups,form`,
+    [templateGroupId, departmentId],
+  );
+  return template.rowCount ? null : { status: 404, error: "Signup form template not found in this location." } as const;
+}
+
+async function copyRegistrationForm(client: PoolClient, departmentId: string, templateGroupId: string, groupIds: string[]) {
+  // Copy form settings only. Draft groups start empty with public signup disabled.
+  await client.query(
+    `INSERT INTO group_signup_forms(group_id,department_id,revision,questions,default_role,heading,active_seat_limit,waitlist_limit,counted_roles)
+     SELECT generated.group_id,template.department_id,gen_random_uuid(),template.questions,template.default_role,template.heading,
+            template.active_seat_limit,template.waitlist_limit,template.counted_roles
+       FROM group_signup_forms template CROSS JOIN unnest($3::uuid[]) generated(group_id)
+      WHERE template.group_id=$1 AND template.department_id=$2`,
+    [templateGroupId, departmentId, groupIds],
+  );
+}
+
 async function lockCalendarSeries(db: PoolClient, id: string, departmentId: string) {
   const { rows: [row] } = await db.query<{ starts_at: string; ends_at: string; recurrence: Recurrence | null }>(
     `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,recurrence
@@ -1196,19 +1222,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!row.recurrence) { await client.query("ROLLBACK"); return responseError(reply, 400, "Registration groups can be generated only for a recurring appointment."); }
       const templateGroupId = request.body.templateGroupId;
       if (templateGroupId) {
-        if (!await registrationFormTemplatesInstalled(client)) {
-          await client.query("ROLLBACK"); return responseError(reply, 409, "Registration form templates are unavailable at this site.");
-        }
-        const group = await client.query(
-          "SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND status IN ('active','draft') AND source_system IS NULL FOR SHARE",
-          [templateGroupId, departmentId],
-        );
-        const template = group.rowCount
-          ? await client.query("SELECT group_id FROM group_signup_forms WHERE group_id=$1 AND department_id=$2 FOR SHARE", [templateGroupId, departmentId])
-          : null;
-        if (!template?.rowCount) {
-          await client.query("ROLLBACK"); return responseError(reply, 404, "Signup form template not found in this location.");
-        }
+        const problem = await lockRegistrationTemplate(client, departmentId, templateGroupId);
+        if (problem) { await client.query("ROLLBACK"); return responseError(reply, problem.status, problem.error); }
       }
       const startDate = row.starts_at.slice(0, 10);
       const throughDate = request.body.throughDate;
@@ -1251,16 +1266,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         createdGroupIds.push(groupId);
       }
-      if (templateGroupId && createdGroupIds.length) {
-        // Copy reusable form settings only. New groups keep the default review mode and no signup window.
-        await client.query(
-          `INSERT INTO group_signup_forms(group_id,department_id,revision,questions,default_role,heading,active_seat_limit,waitlist_limit,counted_roles)
-           SELECT generated.group_id,template.department_id,gen_random_uuid(),template.questions,template.default_role,template.heading,
-                  template.active_seat_limit,template.waitlist_limit,template.counted_roles
-             FROM group_signup_forms template CROSS JOIN unnest($3::uuid[]) generated(group_id)
-            WHERE template.group_id=$1 AND template.department_id=$2`, [templateGroupId, departmentId, createdGroupIds],
-        );
-      }
+      if (templateGroupId && createdGroupIds.length) await copyRegistrationForm(client, departmentId, templateGroupId, createdGroupIds);
       const created = createdGroupIds.length;
       await client.query("COMMIT");
       context.realtime.publish("module:church-calendar:changed", departmentId, { action: "registration-groups-generated", appointmentId: row.id, created });
@@ -1580,9 +1586,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").header("X-Calendar-Image-Revision", file.revision).send(file.content);
   });
 
-  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string; newResourceBookings?: ResourceSelection[] } }>("/api/modules/church-calendar/appointments", { schema: { body: {
+  app.post<{ Body: AppointmentInput & { createEventTemplateId?: string; newResourceBookings?: ResourceSelection[]; newSignupGroup?: { templateGroupId?: string } } }>("/api/modules/church-calendar/appointments", { schema: { body: {
     type: "object", additionalProperties: false, required: ["calendarId", "title", "startsAt", "endsAt"],
-    properties: { newResourceBookings: resourceSelectionListSchema, createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
+    properties: { newSignupGroup: { type: "object", additionalProperties: false, properties: { templateGroupId: { type: "string", format: "uuid" } } }, newResourceBookings: resourceSelectionListSchema, createEventTemplateId: { type: "string", format: "uuid" }, calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
   } } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -1607,6 +1613,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!calendar) return responseError(reply, 404, "The calendar was not found.");
     const isContributor = !canManageCalendar(request, calendar.scope, calendar.owner_user_id);
     const createEventTemplateId = request.body.createEventTemplateId;
+    const newSignupGroup = request.body.newSignupGroup;
+    if (newSignupGroup) {
+      if (isContributor || !(request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage"))) {
+        return responseError(reply, 403, "Calendar and group management access is required to create a registration group.");
+      }
+      if (calendar.scope !== "community" || normalized.internalOnly || normalized.recurrence || normalized.signupGroupId) {
+        return responseError(reply, 400, "Create a registration group from a one-time community appointment without an existing signup link or internal visibility.");
+      }
+    }
     const newResourceBookings = request.body.newResourceBookings;
     if (newResourceBookings) {
       if (isContributor || calendar.scope === "personal") return responseError(reply, 403, "Shared calendar management is required to book resources with an appointment.");
@@ -1643,11 +1658,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const id = randomUUID();
     let linkedEventId = normalized.linkedEventId ?? null;
+    let signupGroupId = normalized.signupGroupId ?? null;
     let bookings: CalendarCreatedBooking[] | undefined;
     const client = await context.pool.connect();
     try {
       await client.query("BEGIN");
-      if ((isContributor || createEventTemplateId || newResourceBookings) && !await context.lockDepartmentForWrite(client, departmentId)) {
+      if ((isContributor || createEventTemplateId || newResourceBookings || newSignupGroup) && !await context.lockDepartmentForWrite(client, departmentId)) {
         await client.query("ROLLBACK");
         return responseError(reply, 409, "This location is read-only on this installation.");
       }
@@ -1660,6 +1676,32 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           await client.query("ROLLBACK");
           return responseError(reply, 403, "You no longer have permission to add appointments to this calendar.");
         }
+      }
+      if (newSignupGroup) {
+        const target = await client.query(
+          `SELECT 1 FROM church_calendar_calendars calendar JOIN departments site ON site.id=calendar.department_id
+            WHERE calendar.id=$1 AND calendar.department_id=$2 AND calendar.scope='community' AND calendar.archived_at IS NULL
+              AND 'community'=ANY(site.enabled_modules) FOR SHARE OF calendar`, [normalized.calendarId, departmentId],
+        );
+        if (!target.rowCount || !isServerModuleEnabled("community")) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "An active community calendar and Groups are required at this location.");
+        }
+        const templateGroupId = newSignupGroup.templateGroupId;
+        if (templateGroupId) {
+          const problem = await lockRegistrationTemplate(client, departmentId, templateGroupId);
+          if (problem) { await client.query("ROLLBACK"); return responseError(reply, problem.status, problem.error); }
+        }
+        signupGroupId = randomUUID();
+        const date = normalized.startsAt.slice(0, 10);
+        const name = ("Reg " + date + " " + normalized.title.slice(0, 70) + " " + id.slice(0, 8)).slice(0, 120);
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [userId(request)]);
+        await client.query(
+          `INSERT INTO church_groups(id,department_id,name,description,status,starts_on,ends_on,public_signup_enabled)
+           VALUES($1,$2,$3,'Registration group for a Calendar appointment.','draft',$4,$4,false)`,
+          [signupGroupId, departmentId, name, date],
+        );
+        if (templateGroupId) await copyRegistrationForm(client, departmentId, templateGroupId, [signupGroupId]);
       }
       if (createEventTemplateId) {
         const eligible = await client.query<{ name: string; time_zone: string; services_enabled: boolean }>(
@@ -1705,7 +1747,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query(
         `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by,time_zone)
          VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
-        [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, linkedEventId, normalized.signupGroupId ?? null, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request), normalized.timeZone ?? null],
+        [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, linkedEventId, signupGroupId, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request), normalized.timeZone ?? null],
       );
       if (createEventTemplateId && linkedEventId) {
         await client.query(
@@ -1732,8 +1774,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-created", appointmentId: id });
+    if (newSignupGroup && signupGroupId) context.realtime.publish("core:groups:changed", departmentId, { action: "registration-group-created", groupId: signupGroupId });
     if (bookings?.length) context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
-    return reply.code(201).send({ id, ...(createEventTemplateId ? { linkedEventId } : {}), ...(bookings ? { bookings } : {}) });
+    return reply.code(201).send({ id, ...(createEventTemplateId ? { linkedEventId } : {}), ...(bookings ? { bookings } : {}), ...(newSignupGroup ? { signupGroupId } : {}) });
   });
 
   app.get("/api/modules/church-calendar/archive", async (request, reply) => {
@@ -1800,7 +1843,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!event.rowCount) return responseError(reply, 400, "The linked event does not belong to this location.");
     }
     if (normalized.signupGroupId) {
-      const group = await context.pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND status='active' AND source_system IS NULL", [normalized.signupGroupId, departmentId]);
+      const group = await context.pool.query(`SELECT id FROM church_groups WHERE id=$1 AND department_id=$2
+        AND (status='active' OR (status='draft' AND id=$3)) AND source_system IS NULL`,
+        [normalized.signupGroupId, departmentId, row.signup_group_id ?? null]);
       if (!group.rowCount) return responseError(reply, 400, "Choose a local group in this location.");
     }
     const values = normalized;
