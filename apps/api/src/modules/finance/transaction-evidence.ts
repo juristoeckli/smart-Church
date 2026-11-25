@@ -33,8 +33,10 @@ export function registerTransactionEvidence(routes: FastifyInstance, context: Mo
     if (!id) return reply;
     const { rows:[record] } = await pool!.query<{ files: unknown[] }>(`
       SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('id',e.id,'fileName',e.file_name,'fileSize',e.file_size,
-          'uploadedAt',e.created_at,'uploadedBy',account.display_name) ORDER BY e.created_at DESC,e.id)
+          'uploadedAt',e.created_at,'uploadedBy',COALESCE(attribution.actor_name,account.display_name)) ORDER BY e.created_at DESC,e.id)
         FROM finance_transaction_evidence e LEFT JOIN app_users account ON account.id=e.uploaded_by
+        LEFT JOIN finance_actor_attribution attribution ON attribution.department_id=e.department_id
+          AND attribution.record_table='finance_transaction_evidence' AND attribution.record_key=e.id::text AND attribution.actor_slot='uploaded_by'
         WHERE e.department_id=t.department_id AND e.transaction_id=t.id),'[]') AS files
       FROM finance_transactions t WHERE t.department_id=$1 AND t.id=$2 AND t.status='posted'`,[id,request.params.transactionId]);
     reply.header("Cache-Control","private, no-store");

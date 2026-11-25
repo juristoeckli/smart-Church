@@ -23,10 +23,11 @@ const tables = {
   mappings: { name: "finance_bank_statement_account_mappings", key: "source_digest", columns: "source_digest account_id updated_at" },
   evidence: { name: "finance_transaction_evidence", key: "id", columns: "id transaction_id file_name file_size file_data content_hash uploaded_by created_at" },
   audit: { name: "finance_audit", key: "id", columns: "id actor_user_id action record_kind record_id details created_at" },
+  actors: { name: "finance_actor_attribution", key: "record_table record_key actor_slot", columns: "record_table record_key actor_slot actor_id actor_name legacy_backfill" },
 } as const;
 type Table = keyof typeof tables;
 type Row = Record<string, unknown>;
-type Snapshot = { version: 1 } & Record<Table, Row[]>;
+type Snapshot = { version: 2 } & Record<Table, Row[]>;
 const keys = Object.keys(tables) as Table[];
 const userColumns = new Set(["created_by", "updated_by", "actor_user_id", "imported_by", "reconciled_by", "uploaded_by"]);
 const textualColumns = new Set([
@@ -40,7 +41,7 @@ const mutable = new Set<Table>([
 ]);
 const maximumBytes = 64 * 1024 * 1024;
 const maximumRows = 200_000;
-const envelopeContext = Buffer.from("smart-church/finance-standby/v1");
+const envelopeContext = Buffer.from("smart-church/finance-standby/v2");
 const tooLarge = "Finance exceeds the standby snapshot size or record limit.";
 
 function record(value: unknown): value is Row {
@@ -52,7 +53,7 @@ function recordKey(row: Row, table: Table) {
 }
 
 function readSnapshot(value: unknown): Snapshot {
-  if (!record(value) || value.version !== 1) throw new Error("The Finance snapshot is invalid.");
+  if (!record(value) || value.version !== 2) throw new Error("The Finance snapshot is invalid.");
   let count = 0;
   for (const key of keys) {
     const columns = tables[key].columns.split(" ");
@@ -187,44 +188,57 @@ function assertLedger(snapshot: Snapshot) {
   assertEvidence(snapshot);
 }
 
-function assertUsers(snapshot: Snapshot, core: unknown) {
-  if (!record(core) || !record(core.tables) || !Array.isArray(core.tables.app_users)) {
-    throw new Error("Finance standby requires a Core snapshot.");
-  }
-  const users = new Set(core.tables.app_users.filter(record).map(row => row.id));
+type ActorOwner = { table: Table; record: Row; slot: string };
+const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+
+function actorKey(table: Table, row: Row, slot: string) {
+  const descriptor = tables[table];
+  return recordKey({
+    record_table: descriptor.name,
+    record_key: descriptor.key ? String(row[descriptor.key]) : "self",
+    actor_slot: slot,
+  }, "actors");
+}
+
+function actorOwners(snapshot: Snapshot) {
+  const owners = new Map<string, ActorOwner>();
   for (const key of keys) {
+    const columns = tables[key].columns.split(" ").filter(column => userColumns.has(column));
     for (const row of snapshot[key]) {
-      if (Object.entries(row).some(([column, value]) => userColumns.has(column) && value !== null && !users.has(value))) {
-        throw new Error("A Finance record refers to an actor outside the signed site account snapshot.");
-      }
+      for (const slot of columns) owners.set(actorKey(key, row, slot), { table: key, record: row, slot });
     }
+  }
+  return owners;
+}
+
+function assertAttribution(snapshot: Snapshot) {
+  const owners = actorOwners(snapshot);
+  for (const attribution of snapshot.actors) {
+    const key = recordKey(attribution, "actors");
+    if (!owners.delete(key) || typeof attribution.actor_id !== "string" || !uuid.test(attribution.actor_id)
+      || typeof attribution.actor_name !== "string" || [...attribution.actor_name].length > 100
+      || typeof attribution.legacy_backfill !== "boolean") {
+      throw new Error("A Finance actor attribution is missing its record or has invalid metadata.");
+    }
+  }
+  if ([...owners.values()].some(owner => owner.record[owner.slot] !== null)) {
+    throw new Error("A Finance actor has no historical attribution.");
   }
 }
 
 async function readiness(client: Pick<PoolClient, "query">, departmentId: string) {
-  const actorQueries = keys.flatMap(key => {
-    const table = tables[key];
-    const columns = table.columns.split(" ").filter(column => userColumns.has(column));
-    return columns.map(column => `SELECT ${column} AS actor_id FROM ${table.name}
-      WHERE department_id=$1 AND ${column} IS NOT NULL`);
-  });
-  const { rows: [status] } = await client.query<{ count: string; bytes: string; outside_actor: boolean }>(
+  const { rows: [status] } = await client.query<{ count: string; bytes: string }>(
     `WITH totals AS (${keys.map(key => `SELECT count(*) AS records,COALESCE(sum(${key === "evidence"
       ? "file_size * 2 + 512" : "octet_length(row_to_json(item)::text)"}),0) AS bytes
        FROM ${tables[key].name} item WHERE department_id=$1`).join(" UNION ALL ")})
-       SELECT sum(records)::text AS count,sum(bytes)::text AS bytes,
-           EXISTS (SELECT 1 FROM (${actorQueries.join(" UNION ALL ")}) actors
-             WHERE NOT EXISTS (SELECT 1 FROM department_memberships member
-               WHERE member.department_id=$1 AND member.user_id=actors.actor_id)) AS outside_actor
-         FROM totals`, [departmentId]);
+       SELECT sum(records)::text AS count,sum(bytes)::text AS bytes FROM totals`, [departmentId]);
   const recordCount = Number(status.count);
   const blockers = recordCount > maximumRows || Number(status.bytes) > maximumBytes ? [tooLarge] : [];
-  if (status.outside_actor) blockers.push("Finance has records attributed to accounts outside this site. Restore those memberships before transfer.");
   return { recordCount, blockers };
 }
 
 async function collect(client: Pick<PoolClient, "query">, departmentId: string): Promise<Snapshot> {
-  const snapshot = { version: 1 } as Snapshot;
+  const snapshot = { version: 2 } as Snapshot;
   for (const key of keys) {
     const table = tables[key];
     const columns = table.columns.split(" ").map(column => {
@@ -242,9 +256,8 @@ async function collect(client: Pick<PoolClient, "query">, departmentId: string):
 function mappedRow(row: Row, context: ReplicationRestoreContext) {
   return Object.fromEntries(Object.entries(row).map(([column, value]) => {
     if (!userColumns.has(column) || value === null) return [column,value];
-    const local = context.userIdMap.get(String(value));
-    if (!local) throw new Error("A Finance actor cannot be resolved on this standby.");
-    return [column,local];
+    // Historical attribution is restored separately. Only signed Core accounts can gain a live link.
+    return [column, context.userIdMap.get(String(value)) ?? null];
   }));
 }
 
@@ -257,13 +270,42 @@ function indexed(rows: Row[], table: Table) {
   return new Map(rows.map(row => [recordKey(row, table), row]));
 }
 
-function assertTarget(target: Snapshot, source: Snapshot, ignoreActors = false) {
+function canChangeExisting(table: Table, old: Row, incoming: Row) {
+  return mutable.has(table) || (table === "journals" && old.status === "draft")
+    || (table === "bankRows" && ["unmatched", "suggested"].includes(String(old.status))
+      && ["matched", "ignored"].includes(String(incoming.status)));
+}
+
+function assertTargetAttribution(target: Snapshot, source: Snapshot, preflight: boolean) {
+  const incoming = indexed(source.actors, "actors");
+  const priorOwners = actorOwners(target);
+  const nextOwners = actorOwners(source);
+  for (const old of target.actors) {
+    const key = recordKey(old, "actors");
+    const prior = priorOwners.get(key);
+    const nextOwner = nextOwners.get(key);
+    const next = incoming.get(key);
+    if (!prior) throw new Error("The standby contains an orphaned Finance historical attribution.");
+    if (!nextOwner && prior.table === "bankRules") continue;
+    if (!next || !nextOwner) throw new Error("The incoming Finance snapshot omits existing historical attribution.");
+    if (equalRow(old, next, "actors") || canChangeExisting(prior.table, prior.record, nextOwner.record)) continue;
+    // Migration backfill on an old standby may have captured a local UUID or a newer display name.
+    // Only replace it when Core confirms that the signed live account resolves to the same local actor.
+    if (old.legacy_backfill === true && old.actor_id !== next.actor_id && old.actor_id === prior.record[prior.slot]
+        && (preflight || prior.record[prior.slot] === nextOwner.record[nextOwner.slot])) continue;
+    throw new Error("The incoming Finance snapshot differs from immutable historical attribution on the standby.");
+  }
+}
+
+function assertTarget(target: Snapshot, source: Snapshot, preflight = false) {
+  assertTargetAttribution(target, source, preflight);
   const existingPosted = new Set(target.journals.filter(row => row.status === "posted").map(row => row.id));
   const existingLines = indexed(target.lines, "lines");
   if (source.lines.some(row => existingPosted.has(row.transaction_id) && !existingLines.has(recordKey(row,"lines")))) {
     throw new Error("The incoming Finance snapshot adds a line to a journal already posted on the standby.");
   }
   for (const key of keys) {
+    if (key === "actors") continue;
     const incoming = indexed(source[key], key);
     for (const old of target[key]) {
       const next = incoming.get(recordKey(old, key));
@@ -274,13 +316,7 @@ function assertTarget(target: Snapshot, source: Snapshot, ignoreActors = false) 
       if ((key === "journalNumbers" || key === "receiptSettings") && exactInteger(next.next_number) < exactInteger(old.next_number)) {
         throw new Error("The incoming Finance snapshot would roll back a receipt counter.");
       }
-      if (equalRow(old,next,key,ignoreActors) || mutable.has(key)) continue;
-      if (key === "journals" && old.status === "draft") continue;
-      if (key === "bankRows" && ["unmatched","suggested"].includes(String(old.status))
-          && ["matched","ignored"].includes(String(next.status))) {
-        // The live trigger checks the allowed transition, original columns, and references.
-        continue;
-      }
+      if (equalRow(old, next, key, true) || canChangeExisting(key, old, next)) continue;
       throw new Error(`The incoming Finance snapshot differs from existing immutable ${key} records on the standby.`);
     }
   }
@@ -306,7 +342,7 @@ async function writeRow(client: PoolClient, departmentId: string, key: Table, ro
 export function registerFinanceReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "1",
+    schemaVersion: "2",
     async requiresSnapshot(departmentId) {
       return Boolean(pool && isDatabaseReady() && (await readiness(pool,departmentId)).recordCount);
     },
@@ -320,6 +356,7 @@ export function registerFinanceReplication(context: ModuleServerContext) {
       if (state.blockers.length) throw new Error(state.blockers.join(" "));
       const snapshot=readSnapshot(await collect(client,departmentId));
       assertLedger(snapshot);
+      assertAttribution(snapshot);
       encoded(snapshot);
       return snapshot;
     },
@@ -329,11 +366,11 @@ export function registerFinanceReplication(context: ModuleServerContext) {
       const cipher=createCipheriv("aes-256-gcm",key,iv);
       cipher.setAAD(envelopeContext);
       const ciphertext=Buffer.concat([cipher.update(plain),cipher.final()]);
-      return { version:1, sealedKey:seal(key.toString("base64")), iv:iv.toString("base64"),
+      return { version:2, sealedKey:seal(key.toString("base64")), iv:iv.toString("base64"),
         tag:cipher.getAuthTag().toString("base64"), ciphertext:ciphertext.toString("base64") };
     },
     async restoreSnapshotFromPeer(input, open) {
-      if (!record(input) || input.version!==1 || typeof input.sealedKey!=="string" || input.sealedKey.length>65536 ||
+      if (!record(input) || input.version!==2 || typeof input.sealedKey!=="string" || input.sealedKey.length>65536 ||
         typeof input.iv!=="string" || input.iv.length!==16 || typeof input.tag!=="string" || input.tag.length!==24 ||
         typeof input.ciphertext!=="string" || input.ciphertext.length>Math.ceil(maximumBytes/3)*4) {
         throw new Error("The Finance snapshot must be encrypted for this standby.");
@@ -349,7 +386,12 @@ export function registerFinanceReplication(context: ModuleServerContext) {
     },
     restoreDependencies: {
       moduleIds:["core-site"],
-      validate(input, dependencies) { const snapshot=readSnapshot(input); assertLedger(snapshot); assertUsers(snapshot,dependencies.get("core-site")); },
+      validate(input, dependencies) {
+        if (!dependencies.has("core-site")) throw new Error("Finance standby requires a signed Core snapshot.");
+        const snapshot = readSnapshot(input);
+        assertLedger(snapshot);
+        assertAttribution(snapshot);
+      },
     },
     async validateRestoreTarget(client,departmentId,input) {
       if (input===undefined) {
@@ -361,11 +403,16 @@ export function registerFinanceReplication(context: ModuleServerContext) {
     async restoreSnapshot(client,departmentId,input,restoreContext) {
       const source=readSnapshot(input);
       const target=await collect(client,departmentId);
-      const mapped=Object.fromEntries([["version",1],...keys.map(key=>[key,source[key].map(row=>mappedRow(row,restoreContext))])]) as Snapshot;
+      const mapped=Object.fromEntries([["version",2],...keys.map(key=>[key,source[key].map(row=>mappedRow(row,restoreContext))])]) as Snapshot;
       assertTarget(target,mapped);
       const updatesAfterLines: Row[]=[];
       for (const key of keys) {
-        const existing=indexed(target[key],key);
+        // Live triggers may supply provisional local names as new rows are inserted.
+        // Re-read the attribution rows and replace provisional metadata with the signed labels.
+        const existing = key === "actors"
+          ? indexed((await client.query(`SELECT ${tables.actors.columns.replaceAll(" ", ",")}
+              FROM finance_actor_attribution WHERE department_id=$1`, [departmentId])).rows, "actors")
+          : indexed(target[key], key);
         if (key==="bankRules") {
           const current=indexed(mapped.bankRules,"bankRules");
           for (const row of target.bankRules) if (!current.has(recordKey(row,key))) {
@@ -374,7 +421,7 @@ export function registerFinanceReplication(context: ModuleServerContext) {
         }
         for (const row of key==="journals" ? orderedJournals(mapped) : mapped[key]) {
           const old=existing.get(recordKey(row,key));
-          if (old && equalRow(old,row,key)) continue;
+          if (old && equalRow(old, row, key, key !== "actors" && !canChangeExisting(key, old, row))) continue;
           if (key==="journals" && old?.status==="draft" && row.status==="posted") {
             updatesAfterLines.push(row);
           } else {
@@ -391,7 +438,7 @@ export function registerFinanceReplication(context: ModuleServerContext) {
         const expected=indexed(source[key].map(row=>restoreContext ? mappedRow(row,restoreContext) : row),key);
         if (expected.size!==restored[key].length || restored[key].some(row=> {
           const candidate=expected.get(recordKey(row,key));
-          return !candidate || !equalRow(candidate,row,key);
+          return !candidate || !equalRow(candidate, row, key, key !== "actors" && !mutable.has(key) && !(key === "journals" && row.status === "draft"));
         })) return { ready:false, blockers:[`Finance ${key} differs from the signed snapshot.`] };
       }
       return { ready:true, blockers:[] };
