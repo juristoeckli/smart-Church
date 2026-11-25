@@ -885,7 +885,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const d = await department(request, reply);
       if (!d) return reply;
       const result = await pool!.query(
-        'SELECT consent.id, consent.purpose, consent.status, consent.captured_at AS "capturedAt", consent.expires_at AS "expiresAt", consent.notes, consent.source, actor.display_name AS "actorName" FROM people_record_consents consent LEFT JOIN app_users actor ON actor.id=consent.actor_user_id WHERE consent.department_id=$1 AND consent.contact_id=$2 ORDER BY consent.captured_at DESC, consent.id',
+        'SELECT consent.id, consent.purpose, consent.status, consent.captured_at AS "capturedAt", consent.expires_at AS "expiresAt", consent.notes, consent.source, COALESCE(consent.historical_actor_name,actor.display_name) AS "actorName" FROM people_record_consents consent LEFT JOIN app_users actor ON actor.id=consent.actor_user_id WHERE consent.department_id=$1 AND consent.contact_id=$2 ORDER BY consent.captured_at DESC, consent.id',
         [d, request.params.contactId],
       );
       reply.header("cache-control", "private, no-store");

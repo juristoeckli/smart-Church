@@ -36,7 +36,7 @@ const profileHistory = `SELECT h.id,'profile:'||h.id::text AS cursor_key,h.actio
          WHEN h.action IN ('attachment_added','attachment_removed','attachment_access_changed') THEN 'attachments'
          WHEN h.action IN ('person_archived','person_restored','person_merged','csv_import_created') THEN 'lifecycle'
          ELSE 'profile' END AS category,
-    COALESCE(field.label,h.subject) AS subject,NULL::uuid AS group_id,h.actor_user_id,h.created_at,
+    COALESCE(field.label,h.subject) AS subject,NULL::uuid AS group_id,h.actor_user_id,h.historical_actor_name,h.created_at,
     CASE WHEN h.action='person_merged' THEN jsonb_build_object('mergedContactId',h.before_value->'mergedContactId') ELSE h.before_value END AS before_value,
     h.after_value
   FROM people_record_history h
@@ -45,7 +45,7 @@ const profileHistory = `SELECT h.id,'profile:'||h.id::text AS cursor_key,h.actio
   WHERE h.department_id=$1 AND h.contact_id=$2 AND ${visibleProfileHistory}`;
 
 const membershipHistory = `SELECT id,'membership:'||id::text AS cursor_key,'membership_'||action AS action,
-    'membership' AS category,group_name AS subject,group_id,actor_user_id,created_at,before_value,after_value
+    'membership' AS category,group_name AS subject,group_id,actor_user_id,NULL::text AS historical_actor_name,created_at,before_value,after_value
   FROM (
     SELECT DISTINCT ON (group_id,action,created_at,before_value,after_value) *
     FROM (
@@ -92,7 +92,7 @@ export function registerPeopleHistoryTimeline(routes: FastifyInstance, { pool }:
     if (membershipHistoryAvailable) params.push(canManageMembershipHistory(request), request.authenticatedUser!.id);
     const { rows } = await pool!.query<{ cursorTime: string; cursorKey: string } & Record<string, unknown>>(
       `WITH events AS (${profileHistory}${membershipHistoryAvailable ? ` UNION ALL ${membershipHistory}` : ""})
-       SELECT events.id,events.action,events.category,events.subject,events.group_id AS "groupId",account.display_name AS "actorName",
+       SELECT events.id,events.action,events.category,events.subject,events.group_id AS "groupId",COALESCE(events.historical_actor_name,account.display_name) AS "actorName",
               events.created_at AS "createdAt",events.before_value AS "beforeValue",events.after_value AS "afterValue",
               to_char(events.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorTime",events.cursor_key AS "cursorKey"
          FROM events JOIN departments location ON location.id=$1

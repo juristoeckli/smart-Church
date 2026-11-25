@@ -68,9 +68,9 @@ export function registerPrivatePersonNotes(routes: FastifyInstance, context: Mod
     const person = await pool!.query("SELECT 1 FROM contacts WHERE department_id=$1 AND id=$2", [departmentId, contactId]);
     if (!person.rowCount) return reply.code(404).send({ error: "Person not found." });
     const notes = await pool!.query(
-      `SELECT note.id,note.body,note.revision,note.created_at AS "createdAt",author.display_name AS "createdBy",
-              note.edited_at AS "editedAt",editor.display_name AS "editedBy",
-              note.archived_at AS "archivedAt",archiver.display_name AS "archivedBy"
+      `SELECT note.id,note.body,note.revision,note.created_at AS "createdAt",COALESCE(note.created_actor_name,author.display_name) AS "createdBy",
+              note.edited_at AS "editedAt",COALESCE(note.edited_actor_name,editor.display_name) AS "editedBy",
+              note.archived_at AS "archivedAt",CASE WHEN note.archived_at IS NOT NULL THEN COALESCE(note.archived_actor_name,archiver.display_name) END AS "archivedBy"
          FROM people_record_private_notes note
          LEFT JOIN app_users author ON author.id=note.created_by
          LEFT JOIN app_users editor ON editor.id=note.edited_by

@@ -105,7 +105,7 @@ export function registerPersonAttachments(routes: FastifyInstance, context: Modu
     const person = await pool!.query("SELECT 1 FROM contacts WHERE department_id=$1 AND id=$2", [departmentId, contactId]);
     if (!person.rowCount) return reply.code(404).send({ error: "Person not found." });
     const result = await pool!.query(
-      `SELECT file.id,file.file_name AS "fileName",file.file_size AS "fileSize",file.is_portrait AS "isPortrait",file.managers_only AS "managersOnly",file.created_at AS "uploadedAt",account.display_name AS "uploadedBy"
+      `SELECT file.id,file.file_name AS "fileName",file.file_size AS "fileSize",file.is_portrait AS "isPortrait",file.managers_only AS "managersOnly",file.created_at AS "uploadedAt",COALESCE(file.historical_actor_name,account.display_name) AS "uploadedBy"
          FROM people_record_attachments file LEFT JOIN app_users account ON account.id=file.uploaded_by
         WHERE file.department_id=$1 AND file.contact_id=$2 AND (NOT file.managers_only OR $3::boolean) ORDER BY file.created_at DESC,file.id`, [departmentId, contactId, canManagePeopleFields(request)],
     );
