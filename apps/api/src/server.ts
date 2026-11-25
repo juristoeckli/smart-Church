@@ -1,3 +1,4 @@
+import { isPastorServiceRole } from "@smart-church/contracts";
 import { cleanContactInput, contactInputProperties } from "./contact-input.js";
 import { captureSignupAnswers, prepareSignupQuestions, signupAnswerFields, signupQuestionsSchema, type SignupQuestion, type SignupQuestionDraft } from "./modules/community/signup-form.js";
 import { isResourceBookingManager } from "./resource-booking-policy.js";
@@ -2758,9 +2759,9 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const currentContactId = linkedContact.rows[0]?.contact_id ?? null;
   const visibleAssets = await visibleServiceResourceIds(selectedDepartmentId, [...new Set(result.rows.flatMap((row) => row.asset_ids ?? []))], request, pool);
   const pastorAssignments = new Map(result.rows.map((row) => [row.id, (row.positions ?? [])
-    .filter((position) => /^(?:pastor(?:in|e|a)?|pfarrer(?:in)?|pasteur(?:e)?|ministre)$/iu.test(position.name.trim()))
-    .flatMap((position) => position.contactId ? [position.contactId] : [])]));
-  const pastorIds = [...new Set([...pastorAssignments.values()].flat())];
+    .filter((position) => isPastorServiceRole(position.name))
+    .filter((position) => position.contactId || position.sourcePastorName)]));
+  const pastorIds = [...new Set([...pastorAssignments.values()].flatMap((positions) => positions.flatMap((position) => position.contactId ? [position.contactId] : [])))];
   const pastors = pastorIds.length ? await pool.query<{ id: string; name: string }>(
     "SELECT id, trim(concat_ws(' ', first_name, last_name)) AS name FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])",
     [selectedDepartmentId, pastorIds],
@@ -2773,7 +2774,7 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
     const visibleEvent = canManageRegistrations ? event : (({ registrationToken: _registrationToken, canManageAttachments: _attachments, ...safeEvent }) => safeEvent)(event);
     return {
       ...visibleEvent,
-      pastorNames: [...new Set((pastorAssignments.get(event.id) ?? []).flatMap((id) => pastorsById.get(id) || []))],
+      pastorNames: [...new Set((pastorAssignments.get(event.id) ?? []).map((position) => (position.contactId && pastorsById.get(position.contactId)) || position.sourcePastorName).filter((name): name is string => Boolean(name)))],
       positions: (visibleEvent.positions ?? []).map((position, index) => {
         const response = responsesByPosition.get(`${event.id}:${index}`);
         const assignedToCurrentUser = Boolean(currentContactId && position.contactId === currentContactId);

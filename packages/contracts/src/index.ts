@@ -1,3 +1,5 @@
+export function isPastorServiceRole(name: string) { return /^(?:pastor(?:in|e|a)?|pfarrer(?:in)?|pasteur(?:e)?|ministre)$/iu.test(name.trim()); }
+
 export { isWikiAttachmentDownloadPath, wikiAttachmentDownloadPath, wikiAttachmentSignInLocation } from "./wiki-download.js";
 
 export type ContactStatus = "member" | "visitor";
@@ -30,6 +32,7 @@ export type CreateContact = Omit<Contact, "id" | "archivedAt">;
 export type ServiceEventKind = "service" | "meeting" | "community" | "other";
 
 export interface ServicePosition {
+  sourcePastorName?: string;
   name: string;
   swapAllowed?: boolean;
   category?: string;
