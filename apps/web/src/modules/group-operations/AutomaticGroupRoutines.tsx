@@ -5,18 +5,29 @@ type Status = "active" | "paused" | "waitlist";
 type Step =
   | { kind: "wait"; minutes: number }
   | { kind: "followup"; subject: string; dueDays: number; assigneeId: string }
-  | { kind: "membership"; role?: string; status?: Status };
+  | { kind: "membership"; role?: string; status?: Status }
+  | { kind: "addToGroup"; targetGroupId: string; role: string; status: Status }
+  | { kind: "removeMembership" };
 type Routine = { id: string; name: string; role: string; status: Status; steps: Step[]; enabled: boolean };
 type Run = { id: string; routineId: string; memberName: string; phase: "queued" | "waiting" | "completed" | "cancelled" | "failed"; nextStep: number; dueAt: string; outcome: string | null };
-type Data = { active: boolean; canChangeMembership: boolean; roles: string[]; assignees: Array<{id: string; name: string}>; routines: Routine[]; runs: Run[] };
+type Data = { active: boolean; canChangeMembership: boolean; roles: string[]; assignees: Array<{id: string; name: string}>; routines: Routine[]; runs: Run[]; targetGroups: Array<{id: string; name: string}> };
 type Props = Pick<ModuleContext, "departmentId" | "csrfToken" | "realtime"> & { groupId: string };
 const statuses: Record<Status, string> = { active: "Active", paused: "Paused", waitlist: "Waitlist" };
 const phases: Record<Run["phase"], string> = { queued: "Queued", waiting: "Waiting", completed: "Completed", cancelled: "Cancelled", failed: "Failed" };
 const emptyDraft = () => ({ name: "", role: "Member", status: "active" as Status, steps: [] as Step[] });
 
-function stepLabel(step: Step) {
+const terminal = (step?: Step) => step?.kind === "membership" || step?.kind === "removeMembership";
+const membershipStep = (step: Step) => terminal(step) || step.kind === "addToGroup";
+const stepTitles: Record<Step["kind"], string> = {
+  wait: "Wait", followup: "Follow-up", membership: "Final membership change",
+  addToGroup: "Add to another group", removeMembership: "End source membership",
+};
+
+function stepLabel(step: Step, groups: Data["targetGroups"] = []) {
   if (step.kind === "wait") return `Wait ${step.minutes} minutes`;
   if (step.kind === "followup") return `Create follow-up: ${step.subject}`;
+  if (step.kind === "removeMembership") return "End membership in this group";
+  if (step.kind === "addToGroup") return `Add to ${groups.find(({ id }) => id === step.targetGroupId)?.name ?? "another group"} as ${step.role} · ${statuses[step.status]}`;
   return `Change membership to ${[step.role, step.status && statuses[step.status]].filter(Boolean).join(" · ")}`;
 }
 
@@ -86,10 +97,10 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
     setDraft((current) => ({ ...current, steps: current.steps.map((existing, position) => position === index ? step : existing) }));
   }
 
-  const hasFinalStep = draft.steps.at(-1)?.kind === "membership";
+  const hasFinalStep = terminal(draft.steps.at(-1));
   function addStep(step: Step) {
     setDraft((current) => {
-      const beforeFinal = current.steps.at(-1)?.kind === "membership" ? current.steps.length - 1 : current.steps.length;
+      const beforeFinal = terminal(current.steps.at(-1)) ? current.steps.length - 1 : current.steps.length;
       return { ...current, steps: [...current.steps.slice(0, beforeFinal), step, ...current.steps.slice(beforeFinal)] };
     });
   }
@@ -110,7 +121,7 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
           {Object.entries(statuses).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
         {draft.steps.map((step, index) => <fieldset key={index}>
-          <legend>{index + 1}. {step.kind === "wait" ? "Wait" : step.kind === "followup" ? "Follow-up" : "Final membership change"}</legend>
+          <legend>{index + 1}. {stepTitles[step.kind]}</legend>
           {step.kind === "wait" && <label>Wait minutes<input type="number" min={1} max={525600} required value={step.minutes}
             onChange={(event) => sendStep(index, { ...step, minutes: Number(event.target.value) })} /></label>}
           {step.kind === "followup" && <>
@@ -120,6 +131,17 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
             </select></label>
             <label>Due in days<input type="number" min={0} max={365} required value={step.dueDays} onChange={(event) => sendStep(index, { ...step, dueDays: Number(event.target.value) })} /></label>
           </>}
+          {step.kind === "addToGroup" && <>
+            <label>Destination group<select required value={step.targetGroupId} onChange={(event) => sendStep(index, { ...step, targetGroupId: event.target.value })}>
+              <option value="">Choose a group</option>{data.targetGroups.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
+            </select></label>
+            <label>Destination role<input required maxLength={80} value={step.role} onChange={(event) => sendStep(index, { ...step, role: event.target.value })} /></label>
+            <label>Destination status<select value={step.status} onChange={(event) => sendStep(index, { ...step, status: event.target.value as Status })}>
+              {Object.entries(statuses).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select></label>
+            <small>An existing destination membership with a different role or status stops the routine.</small>
+          </>}
+          {step.kind === "removeMembership" && <p>Removes the membership in this group after all earlier steps have finished.</p>}
           {step.kind === "membership" && <>
             <label>New role<input list={roleList} maxLength={80} value={step.role ?? ""} placeholder="Keep current role"
               onChange={(event) => sendStep(index, { ...step, role: event.target.value || undefined })} /></label>
@@ -133,6 +155,10 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
           <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12} onClick={() => addStep({ kind: "wait", minutes: 1440 })}>Add wait</button>
           <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12 || !data.assignees.length}
             onClick={() => addStep({ kind: "followup", subject: "", assigneeId: "", dueDays: 1 })}>Add follow-up</button>
+          {data.canChangeMembership && data.targetGroups.length > 0 && <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12}
+            onClick={() => addStep({ kind: "addToGroup", targetGroupId: "", role: "Member", status: "active" })}>Add to another group</button>}
+          {data.canChangeMembership && <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12 || hasFinalStep}
+            onClick={() => addStep({ kind: "removeMembership" })}>End source membership</button>}
           {data.canChangeMembership && <button className="button button-secondary" type="button" disabled={draft.steps.length >= 12 || hasFinalStep}
             onClick={() => addStep({ kind: "membership" })}>Add membership change</button>}
         </div>
@@ -143,9 +169,9 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
       <h2>Definitions and progress</h2>
       <div className="go-list">{data.routines.map((routine) => <article key={routine.id}>
         <div><strong>{routine.name}</strong><small>{routine.role} · {statuses[routine.status]} · {routine.enabled ? "Enabled" : "Disabled"}</small>
-          <ol>{routine.steps.map((step, index) => <li key={index}>{stepLabel(step)}</li>)}</ol></div>
+          <ol>{routine.steps.map((step, index) => <li key={index}>{stepLabel(step, data.targetGroups)}</li>)}</ol></div>
         <button className="button button-secondary" type="button" disabled={busy || (!routine.enabled && (
-          !data.active || !data.canChangeMembership && routine.steps.some((step) => step.kind === "membership")
+          !data.active || !data.canChangeMembership && routine.steps.some(membershipStep)
         ))} onClick={() => {
           if (routine.enabled && !window.confirm("Disable this routine and cancel members’ queued or waiting steps?")) return;
           void mutate("PATCH", "/" + routine.id, { enabled: !routine.enabled }, routine.enabled ? "Routine disabled." : "Routine enabled.");
@@ -156,7 +182,7 @@ export function AutomaticGroupRoutines({ departmentId, groupId, csrfToken, realt
       <div className="go-list">{data.runs.map((run) => {
         const routine = data.routines.find((item) => item.id === run.routineId);
         return <article key={run.id}><div><strong>{run.memberName}</strong><small>{routine?.name} · {phases[run.phase]}</small>
-          {run.phase === "waiting" && <small>Wait ends {new Date(run.dueAt).toLocaleString()}{routine && routine.steps[run.nextStep] ? ` · Next: ${stepLabel(routine.steps[run.nextStep])}` : ""}</small>}
+          {run.phase === "waiting" && <small>Wait ends {new Date(run.dueAt).toLocaleString()}{routine && routine.steps[run.nextStep] ? ` · Next: ${stepLabel(routine.steps[run.nextStep], data.targetGroups)}` : ""}</small>}
           {run.outcome && <p>{run.outcome}</p>}</div>
           {run.phase === "waiting" && <button className="button button-secondary" type="button" disabled={busy}
             onClick={() => void mutate("POST", "/runs/" + run.id + "/skip-wait", {}, "Wait released.")}>Skip wait</button>}

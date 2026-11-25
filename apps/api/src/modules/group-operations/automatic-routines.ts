@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { automaticRoutineAuthority, startAutomaticGroupRoutineWorker, type MemberStatus, type RoutineStep } from "./automatic-routine-worker.js";
+import { automaticRoutineAuthority, isTerminalMembershipStep, requiresMembershipAuthority, startAutomaticGroupRoutineWorker, type MemberStatus, type RoutineStep } from "./automatic-routine-worker.js";
 
 type GroupParams = { groupId: string };
 type RoutineInput = { name: string; role: string; status: MemberStatus; steps: RoutineStep[] };
@@ -13,15 +13,17 @@ const roleText = { type: "string", minLength: 1, maxLength: 80 } as const;
 const groupParams = { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: uuid } } as const;
 const base = "/api/modules/group-operations/automatic-routines/:groupId";
 const stepSchema = { type: "object", additionalProperties: false, required: ["kind"], properties: {
-  kind: { type: "string", enum: ["wait", "followup", "membership"] },
+  kind: { type: "string", enum: ["wait", "followup", "membership", "addToGroup", "removeMembership"] },
   minutes: { type: "integer", minimum: 1, maximum: 525600 },
   subject: { type: "string", minLength: 1, maxLength: 160 },
   assigneeId: uuid, dueDays: { type: "integer", minimum: 0, maximum: 365 },
-  role: roleText, status: membershipStatus,
+  role: roleText, status: membershipStatus, targetGroupId: uuid,
 }, oneOf: [
   { properties: { kind: { const: "wait" } }, required: ["minutes"] },
   { properties: { kind: { const: "followup" } }, required: ["subject", "assigneeId", "dueDays"] },
   { properties: { kind: { const: "membership" } }, anyOf: [{ required: ["role"] }, { required: ["status"] }] },
+  { properties: { kind: { const: "addToGroup" } }, required: ["targetGroupId", "role", "status"] },
+  { properties: { kind: { const: "removeMembership" } } },
 ] } as const;
 
 export function registerAutomaticGroupRoutines(app: FastifyInstance, context: ModuleServerContext,
@@ -102,8 +104,12 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
         WHERE member.group_id=$2 ORDER BY lower(person.last_name),lower(person.first_name),person.id LIMIT 2000`, args),
       automaticRoutineAuthority(pool!, departmentId, groupId, actorId),
     ]);
+    const targets = authority?.manage_members ? await pool!.query(
+      `SELECT id,name FROM church_groups WHERE department_id=$1 AND id<>$2 AND status='active' AND source_system IS NULL
+        ORDER BY lower(name),id LIMIT 2000`, args,
+    ) : null;
     reply.header("Cache-Control", "private, no-store");
-    return { active, canChangeMembership: Boolean(authority?.manage_members), routines: routines.rows, runs: runs.rows,
+    return { active, canChangeMembership: Boolean(authority?.manage_members), routines: routines.rows, runs: runs.rows, targetGroups: targets?.rows ?? [],
       assignees: members.rows.filter((member) => member.status === "active").map(({id, name}) => ({ id, name })),
       roles: [...new Set(members.rows.map((member) => String(member.role).trim()))].sort((a, b) => a.localeCompare(b)) };
   });
@@ -117,16 +123,26 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
     const { name, role, status, steps } = request.body;
     if (!active) { reply.code(409).send({ error: "Activate the group before creating an automatic routine." }); return null; }
     if (!name.trim() || !role.trim()) { reply.code(400).send({ error: "Enter a routine name and trigger role." }); return null; }
-    const final = steps.findIndex((step) => step.kind === "membership");
+    const final = steps.findIndex(isTerminalMembershipStep);
     if (final !== -1 && final !== steps.length - 1) {
       reply.code(400).send({ error: "A membership change must be the last action in the routine." }); return null;
     }
-    if (final !== -1 && !canChangeMembership) {
-      reply.code(403).send({ error: "Group membership management is required for an automatic role or status change." }); return null;
+    if (steps.some(requiresMembershipAuthority) && !canChangeMembership) {
+      reply.code(403).send({ error: "Group membership management is required for automatic changes to group memberships." }); return null;
     }
     const change = steps[final];
     if (change?.kind === "membership" && !change.role?.trim() && !change.status) {
       reply.code(400).send({ error: "Choose a new membership role or status." }); return null;
+    }
+    const destinations = steps.filter((step) => step.kind === "addToGroup");
+    if (destinations.some((step) => !step.role.trim())) { reply.code(400).send({ error: "Enter a destination role." }); return null; }
+    const destinationIds = [...new Set(destinations.map((step) => step.targetGroupId.toLowerCase()))];
+    if (destinationIds.length) {
+      const targets = await client.query(`SELECT id FROM church_groups WHERE department_id=$1 AND id<>$2 AND id=ANY($3::uuid[])
+        AND status='active' AND source_system IS NULL`, [departmentId, groupId, destinationIds]);
+      if (targets.rowCount !== destinationIds.length) {
+        reply.code(400).send({ error: "Choose a different active native group from this location for each destination." }); return null;
+      }
     }
     const followups = steps.filter((step) => step.kind === "followup");
     if (followups.some((step) => !step.subject.trim())) { reply.code(400).send({ error: "Enter a follow-up subject." }); return null; }
@@ -141,6 +157,8 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
     const cleaned = steps.map((step) => {
       if (step.kind === "followup") return { kind: step.kind, subject: step.subject.trim(), assigneeId: step.assigneeId, dueDays: step.dueDays };
       if (step.kind === "membership") return { kind: step.kind, role: step.role?.trim() || undefined, status: step.status };
+      if (step.kind === "addToGroup") return { kind: step.kind, targetGroupId: step.targetGroupId.toLowerCase(), role: step.role.trim(), status: step.status };
+      if (step.kind === "removeMembership") return { kind: step.kind };
       return { kind: step.kind, minutes: step.minutes };
     });
     const id = randomUUID();
@@ -164,7 +182,7 @@ export function registerAutomaticGroupRoutines(app: FastifyInstance, context: Mo
       "SELECT steps,enabled,trigger_role,trigger_status FROM group_automatic_routines WHERE id=$1 AND department_id=$2 AND group_id=$3 FOR UPDATE", [routineId, departmentId, groupId],
     );
     if (!routine) { reply.code(404).send({ error: "Routine not found in this group." }); return null; }
-    if (enabled && (!active || (routine.steps.some((step) => step.kind === "membership") && !canChangeMembership))) {
+    if (enabled && (!active || (routine.steps.some(requiresMembershipAuthority) && !canChangeMembership))) {
       reply.code(403).send({ error: "An active group and the required management permissions are needed to enable this routine." }); return null;
     }
     if (enabled && !routine.enabled) {

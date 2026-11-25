@@ -7,7 +7,12 @@ export type MemberStatus = "active" | "paused" | "waitlist";
 export type RoutineStep =
   | { kind: "wait"; minutes: number }
   | { kind: "followup"; subject: string; assigneeId: string; dueDays: number }
-  | { kind: "membership"; role?: string; status?: MemberStatus };
+  | { kind: "membership"; role?: string; status?: MemberStatus }
+  | { kind: "addToGroup"; targetGroupId: string; role: string; status: MemberStatus }
+  | { kind: "removeMembership" };
+
+export const isTerminalMembershipStep = (step: RoutineStep) => step.kind === "membership" || step.kind === "removeMembership";
+export const requiresMembershipAuthority = (step: RoutineStep) => isTerminalMembershipStep(step) || step.kind === "addToGroup";
 
 type Job = {
   id: string; department_id: string; group_id: string; routine_id: string; contact_id: string;
@@ -37,6 +42,11 @@ async function finish(client: PoolClient, id: string, phase: "completed" | "canc
     [id, phase, next, explanation]);
 }
 
+async function setRoutineActor(client: PoolClient, job: Job) {
+  await client.query("SELECT set_config('smart_church.automatic_routine_chain',$1,true),set_config('smart_church.actor_id',$2,true)",
+    ["{" + job.chain.join(",") + "}", job.actor_id]);
+}
+
 async function processCandidate(client: PoolClient, context: ModuleServerContext, departmentId: string, candidate: Candidate, now: Date) {
   if (!await context.lockDepartmentForWrite(client, departmentId)) return null;
   const { rows: [rule] } = await client.query<Pick<Job, "enabled" | "steps" | "trigger_role" | "trigger_status" | "actor_id"> & { eligible: boolean }>(
@@ -59,19 +69,21 @@ async function processCandidate(client: PoolClient, context: ModuleServerContext
   if (!job) return null;
   if (!job.enabled || !job.eligible || member?.role !== job.trigger_role || member?.status !== job.trigger_status) {
     await finish(client, job.id, "cancelled", job.next_step, "The membership or routine is no longer eligible.");
-    return { groupId: job.group_id, membershipChanged: false };
+    return { groupId: job.group_id, changedGroupIds: [] };
   }
   const authority = await automaticRoutineAuthority(client, departmentId, job.group_id, job.actor_id);
-  if (!authority?.manage_group || (job.steps.some((step) => step.kind === "membership") && !authority.manage_members)) {
+  if (!authority?.manage_group || (job.steps.some(requiresMembershipAuthority) && !authority.manage_members)) {
     await finish(client, job.id, "failed", job.next_step, "The routine owner no longer has the required permissions.");
-    return { groupId: job.group_id, membershipChanged: false };
+    return { groupId: job.group_id, changedGroupIds: [] };
   }
+  const changedGroups = new Set<string>();
+  const result = () => ({ groupId: job.group_id, changedGroupIds: [...changedGroups] });
   for (let next = job.next_step; next < job.steps.length; next += 1) {
     const step = job.steps[next];
     if (step.kind === "wait") {
       await client.query("UPDATE group_automatic_routine_runs SET phase='waiting',next_step=$2,due_at=$3,updated_at=now() WHERE id=$1",
         [job.id, next + 1, new Date(now.getTime() + step.minutes * 60_000)]);
-      return { groupId: job.group_id, membershipChanged: false };
+      return result();
     }
     if (step.kind === "followup") {
       const assignee = await client.query(
@@ -81,7 +93,7 @@ async function processCandidate(client: PoolClient, context: ModuleServerContext
       );
       if (!assignee.rowCount) {
         await finish(client, job.id, "failed", next, "The follow-up assignee is no longer an active group member.");
-        return { groupId: job.group_id, membershipChanged: false };
+        return result();
       }
       const taskId = randomUUID();
       await client.query(
@@ -94,17 +106,49 @@ async function processCandidate(client: PoolClient, context: ModuleServerContext
         VALUES($1,$2,$3,$4,'follow_up_created',$5,jsonb_build_object('automaticRoutineRunId',$6::uuid))`,
         [randomUUID(), departmentId, job.group_id, job.actor_id, taskId, job.id]);
     }
-    if (step.kind === "membership") {
+    if (step.kind === "addToGroup") {
+      const target = await client.query(`SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND id<>$3
+        AND status='active' AND source_system IS NULL FOR SHARE`, [step.targetGroupId, departmentId, job.group_id]);
+      if (!target.rowCount) {
+        await finish(client, job.id, "failed", next, "The destination group is no longer an active native group in this location.");
+        return result();
+      }
+      await setRoutineActor(client, job);
+      const inserted = await client.query(
+        `INSERT INTO group_members (group_id,contact_id,role,status,joined_on)
+         SELECT $1,$2,$3,$4,($5::timestamptz AT TIME ZONE COALESCE(zone.name,'UTC'))::date
+           FROM departments site LEFT JOIN pg_timezone_names zone ON zone.name=site.time_zone WHERE site.id=$6
+         ON CONFLICT (group_id,contact_id) DO NOTHING RETURNING group_id`,
+        [step.targetGroupId, job.contact_id, step.role, step.status, now, departmentId],
+      );
+      if (inserted.rowCount) {
+        changedGroups.add(step.targetGroupId);
+      } else {
+        const existing = await client.query<{ role: string; status: MemberStatus }>(
+          "SELECT lower(trim(role)) AS role,status FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR SHARE",
+          [step.targetGroupId, job.contact_id],
+        );
+        if (existing.rows[0]?.role !== step.role.toLowerCase() || existing.rows[0]?.status !== step.status) {
+          await finish(client, job.id, "failed", next, "The destination membership already has a different role or status.");
+          return result();
+        }
+      }
+    }
+    if (step.kind === "membership" || step.kind === "removeMembership") {
       await finish(client, job.id, "completed", next + 1, null);
-      await client.query("SELECT set_config('smart_church.automatic_routine_chain',$1,true),set_config('smart_church.actor_id',$2,true)",
-        ["{" + job.chain.join(",") + "}", job.actor_id]);
-      await client.query(`UPDATE group_members SET role=COALESCE($3,role),status=COALESCE($4,status),auto_managed=false
-         WHERE group_id=$1 AND contact_id=$2`, [job.group_id, job.contact_id, step.role ?? null, step.status ?? null]);
-      return { groupId: job.group_id, membershipChanged: true };
+      await setRoutineActor(client, job);
+      if (step.kind === "removeMembership") {
+        await client.query("DELETE FROM group_members WHERE group_id=$1 AND contact_id=$2", [job.group_id, job.contact_id]);
+      } else {
+        await client.query(`UPDATE group_members SET role=COALESCE($3,role),status=COALESCE($4,status),auto_managed=false
+           WHERE group_id=$1 AND contact_id=$2`, [job.group_id, job.contact_id, step.role ?? null, step.status ?? null]);
+      }
+      changedGroups.add(job.group_id);
+      return result();
     }
   }
   await finish(client, job.id, "completed", job.steps.length, null);
-  return { groupId: job.group_id, membershipChanged: false };
+  return result();
 }
 
 export async function runAutomaticGroupRoutines(context: ModuleServerContext, now = new Date(), onError: (error: unknown) => void = () => {}) {
@@ -127,7 +171,10 @@ export async function runAutomaticGroupRoutines(context: ModuleServerContext, no
         await client.query("COMMIT");
         if (change) {
           context.realtime.publish("module:group-operations:changed", departmentId, { action: "automatic-routine-progress", groupId: change.groupId });
-          if (change.membershipChanged) context.realtime.publish("core:groups:changed", departmentId, { groupId: change.groupId });
+          for (const groupId of change.changedGroupIds) {
+            context.realtime.publish("core:groups:changed", departmentId, { groupId });
+            if (groupId !== change.groupId) context.realtime.publish("module:group-operations:changed", departmentId, { action: "automatic-routine-progress", groupId });
+          }
         }
       } catch (error) {
         await client.query("ROLLBACK");
