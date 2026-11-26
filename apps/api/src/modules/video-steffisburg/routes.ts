@@ -434,8 +434,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         youtubeOAuthSettings(selectedDepartmentId),
       ]);
       const needsReconnect = Boolean(connection?.oauth_client_id?.trim() && oauthSettings.clientId && connection.oauth_client_id.trim() !== oauthSettings.clientId);
+      let connectionNeedsReconnect = needsReconnect;
       const remoteSync = connection && !needsReconnect
-        ? await syncUpcomingYoutubeStreams(selectedDepartmentId)
+        ? await syncUpcomingYoutubeStreams(selectedDepartmentId).catch((error) => {
+          request.log.warn({ err: error, departmentId: selectedDepartmentId }, "Could not sync upcoming YouTube streams; local services will still be shown.");
+          connectionNeedsReconnect = true;
+          return { broadcasts: [] as YoutubeBroadcast[], created: 0, updated: 0 };
+        })
         : { broadcasts: [] as YoutubeBroadcast[], created: 0, updated: 0 };
       const youtubeIds = remoteSync.broadcasts.flatMap((broadcast) => broadcast.id ? [broadcast.id] : []);
       const [streams, nextEvent, adjacentEvents] = await Promise.all([
@@ -449,14 +454,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ]);
       const streamByBroadcastId = new Map(streams.rows.map((stream) => [stream.youtube_broadcast_id, stream]));
       let playlists: Array<{ id: string; title: string }> = [];
-      if (connection) {
+      if (connection && !connectionNeedsReconnect) {
         try { playlists = await youtubePlaylists(await youtubeAccessToken(selectedDepartmentId)); }
         catch (error) { request.log.warn({ err: error }, "Could not load YouTube playlists for the stream wizard."); }
       }
       return {
         nextEvent,
         adjacentEvents,
-        youtube: { configured: youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret, oauthSettings.redirectUri), connected: Boolean(connection) && !needsReconnect, ...(needsReconnect ? { needsReconnect: true } : {}), ...(connection ? { channelId: connection.channel_id, channelTitle: connection.channel_title } : {}) },
+        youtube: { configured: youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret, oauthSettings.redirectUri), connected: Boolean(connection) && !connectionNeedsReconnect, ...(connectionNeedsReconnect ? { needsReconnect: true } : {}), ...(connection ? { channelId: connection.channel_id, channelTitle: connection.channel_title } : {}) },
         playlists,
         streams: remoteSync.broadcasts.flatMap((broadcast) => {
           const youtubeBroadcastId = broadcast.id;

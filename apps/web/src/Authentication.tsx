@@ -230,6 +230,8 @@ export function Authentication({
         {!setupRequired && selfSignupEnabled && !showSignup && <button className="auth-link-button" type="button" onClick={() => { setShowSignup(true); setError(""); }}>{t("createAccount")}</button>}
 
         <div className="auth-footnote"><Church size={14} /> {t("accountStored")}</div>
+        <p className="auth-public-description">Smart‑Church helps participating churches manage people, groups, services, events, and livestreams.</p>
+        <nav className="auth-legal-links" aria-label="Legal information"><a href="/privacy-policy">Datenschutzerklärung</a><a href="/terms-of-service">Nutzungsbedingungen</a></nav>
       </section>
     </main>
   );
